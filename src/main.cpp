@@ -10,44 +10,44 @@
 
 namespace
 {
-void printExpr(const Expr& expr, int indent = 0)
-{
-    const std::string pad(static_cast<std::size_t>(indent), ' ');
-
-    if (const auto* integer = dynamic_cast<const IntegerExpr*>(&expr))
+    void printExpr(const Expr& expr, int indent = 0)
     {
-        std::cout << pad << "Integer(" << integer->value << ")\n";
-        return;
+        const std::string pad(static_cast<std::size_t>(indent), ' ');
+
+        if (const auto* integer = dynamic_cast<const IntegerExpr*>(&expr))
+        {
+            std::cout << pad << "Integer(" << integer->value << ")\n";
+            return;
+        }
+
+        if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+        {
+            std::cout << pad << "Name(" << name->name << ")\n";
+            return;
+        }
+
+        if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
+        {
+            std::cout << pad << "Binary(" << tokenKindName(binary->op) << ")\n";
+            printExpr(*binary->left, indent + 2);
+            printExpr(*binary->right, indent + 2);
+            return;
+        }
     }
 
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    std::string readFile(const std::string& path)
     {
-        std::cout << pad << "Name(" << name->name << ")\n";
-        return;
-    }
+        std::ifstream input(path);
+        if (!input)
+        {
+            throw std::runtime_error("could not open file: " + path);
+        }
 
-    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
-    {
-        std::cout << pad << "Binary(" << tokenKindName(binary->op) << ")\n";
-        printExpr(*binary->left, indent + 2);
-        printExpr(*binary->right, indent + 2);
-        return;
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        return buffer.str();
     }
-}
-
-std::string readFile(const std::string& path)
-{
-    std::ifstream input(path);
-    if (!input)
-    {
-        throw std::runtime_error("could not open file: " + path);
-    }
-
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    return buffer.str();
-}
-}
+} // namespace
 
 int main(int argc, char** argv)
 {
@@ -69,8 +69,8 @@ int main(int argc, char** argv)
         {
             for (const auto& token : tokens)
             {
-                std::cout << token.line << ':' << token.column << ' '
-                          << tokenKindName(token.kind) << "  " << token.text << '\n';
+                std::cout << token.line << ':' << token.column << ' ' << tokenKindName(token.kind)
+                          << "  " << token.text << '\n';
             }
             return 0;
         }

@@ -25,5 +25,5 @@ private:
     int precedence(TokenKind kind) const;
 
     std::vector<Token> tokens_;
-    std::size_t index_ {0};
+    std::size_t index_{0};
 };

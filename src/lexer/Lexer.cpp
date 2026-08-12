@@ -94,7 +94,7 @@ Token Lexer::nextToken()
 
     if (atEnd())
     {
-        return Token {TokenKind::EndOfFile, "", line_, column_};
+        return Token{TokenKind::EndOfFile, "", line_, column_};
     }
 
     const char c = current();
@@ -140,8 +140,7 @@ Token Lexer::nextToken()
                 return makeToken(TokenKind::Arrow, start, startLine, startColumn);
             }
             return makeToken(TokenKind::Minus, start, startLine, startColumn);
-        default:
-            return makeToken(TokenKind::Invalid, start, startLine, startColumn);
+        default: return makeToken(TokenKind::Invalid, start, startLine, startColumn);
     }
 }
 
@@ -172,12 +171,10 @@ Token Lexer::lexIdentifierOrKeyword()
 
     auto token = makeToken(TokenKind::Identifier, start, startLine, startColumn);
 
-    static const std::unordered_map<std::string, TokenKind> keywords {
-        {"if", TokenKind::If},
-        {"else", TokenKind::Else},
-        {"struct", TokenKind::Struct},
-        {"pub", TokenKind::Pub}
-    };
+    static const std::unordered_map<std::string, TokenKind> keywords{{"if", TokenKind::If},
+                                                                     {"else", TokenKind::Else},
+                                                                     {"struct", TokenKind::Struct},
+                                                                     {"pub", TokenKind::Pub}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {
@@ -208,12 +205,10 @@ Token Lexer::lexString()
     return makeToken(TokenKind::Invalid, start, startLine, startColumn);
 }
 
-Token Lexer::makeToken(TokenKind kind, std::size_t start, std::size_t line, std::size_t column) const
+Token Lexer::makeToken(TokenKind kind,
+                       std::size_t start,
+                       std::size_t line,
+                       std::size_t column) const
 {
-    return Token {
-        kind,
-        std::string(source_.substr(start, index_ - start)),
-        line,
-        column
-    };
+    return Token{kind, std::string(source_.substr(start, index_ - start)), line, column};
 }

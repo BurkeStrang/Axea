@@ -11,7 +11,7 @@ indent_size = 4
 [*.{c,cc,cpp,cxx,h,hh,hpp,hxx,inl,ipp}]
 indent_style = space
 indent_size = 4
-max_line_length = 120
+max_line_length = 100
 
 # --- Visual Studio C++ extensions (ignored by other editors) ---
 

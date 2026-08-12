@@ -24,3 +24,19 @@ enable_testing()
 add_executable(axea_tests tests/LexerParserTests.cpp)
 target_link_libraries(axea_tests PRIVATE axea_compiler)
 add_test(NAME axea_tests COMMAND axea_tests)
+
+find_program(CLANG_FORMAT_EXE NAMES clang-format-18 clang-format)
+if(CLANG_FORMAT_EXE)
+    file(GLOB_RECURSE AXEA_FORMAT_SOURCES
+        src/*.cpp src/*.hpp
+        tests/*.cpp tests/*.hpp
+    )
+    add_custom_target(format
+        COMMAND ${CLANG_FORMAT_EXE} -i ${AXEA_FORMAT_SOURCES}
+        COMMENT "Formatting source files with clang-format"
+    )
+    add_custom_target(format-check
+        COMMAND ${CLANG_FORMAT_EXE} --dry-run --Werror ${AXEA_FORMAT_SOURCES}
+        COMMENT "Checking source formatting with clang-format"
+    )
+endif()

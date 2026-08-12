@@ -5,12 +5,12 @@ BreakBeforeBraces: Allman
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
-ColumnLimit: 120
+ColumnLimit: 100
 
 AccessModifierOffset: -4
 IndentAccessModifiers: false
 NamespaceIndentation: All
-IndentCaseLabels: false
+IndentCaseLabels: true
 IndentPPDirectives: None
 
 PointerAlignment: Left
@@ -21,7 +21,7 @@ AllowShortFunctionsOnASingleLine: Empty
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortBlocksOnASingleLine: Empty
-AllowShortCaseLabelsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
 AllowShortLambdasOnASingleLine: All
 
 AlignAfterOpenBracket: Align

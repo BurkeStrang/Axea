@@ -105,12 +105,9 @@ int Parser::precedence(TokenKind kind) const
     switch (kind)
     {
         case TokenKind::Plus:
-        case TokenKind::Minus:
-            return 10;
+        case TokenKind::Minus: return 10;
         case TokenKind::Star:
-        case TokenKind::Slash:
-            return 20;
-        default:
-            return -1;
+        case TokenKind::Slash: return 20;
+        default: return -1;
     }
 }

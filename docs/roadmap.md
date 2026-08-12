@@ -5,13 +5,14 @@
 -   Lexer
 -   Parser
 -   AST
--   Interpreter
+-   Minimal interpreter (assignment + arithmetic)
+-   Expand expression surface: booleans, strings, comparison operators, `if` expressions
 
 ## Phase 2
 
--   Functions
+-   Functions and blocks
 -   Structs
--   Type Checker
+-   Symbol binding and type checker
 
 ## Phase 3
 

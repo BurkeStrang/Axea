@@ -34,7 +34,9 @@ struct NameExpr final : Expr
 struct BinaryExpr final : Expr
 {
     BinaryExpr(std::unique_ptr<Expr> left, TokenKind op, std::unique_ptr<Expr> right)
-        : left(std::move(left)), op(op), right(std::move(right))
+        : left(std::move(left)),
+          op(op),
+          right(std::move(right))
     {
     }
 

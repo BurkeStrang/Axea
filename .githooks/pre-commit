@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLANG_FORMAT=clang-format-18
+command -v "$CLANG_FORMAT" >/dev/null 2>&1 || CLANG_FORMAT=clang-format
+
+if ! command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
+    echo "warning: clang-format not found, skipping format-on-commit" >&2
+    exit 0
+fi
+
+mapfile -t files < <(git diff --cached --name-only --diff-filter=ACM -- '*.cpp' '*.hpp')
+[ "${#files[@]}" -eq 0 ] && exit 0
+
+"$CLANG_FORMAT" -i "${files[@]}"
+git add -- "${files[@]}"

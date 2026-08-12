@@ -13,7 +13,8 @@ struct Stmt
 struct AssignmentStmt final : Stmt
 {
     AssignmentStmt(std::string name, std::unique_ptr<Expr> value)
-        : name(std::move(name)), value(std::move(value))
+        : name(std::move(name)),
+          value(std::move(value))
     {
     }
 
