@@ -27,7 +27,10 @@ enum class TokenKind
     RightBrace,
 
     Colon,
+    Comma,
+    Dot,
     Arrow,
+    FatArrow,
 
     If,
     Else,
@@ -35,6 +38,10 @@ enum class TokenKind
     Pub,
     True,
     False,
+    Return,
+    Read,
+    Write,
+    Take,
 
     EndOfFile,
     Invalid
@@ -63,13 +70,20 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::LeftBrace: return "LeftBrace";
         case TokenKind::RightBrace: return "RightBrace";
         case TokenKind::Colon: return "Colon";
+        case TokenKind::Comma: return "Comma";
+        case TokenKind::Dot: return "Dot";
         case TokenKind::Arrow: return "Arrow";
+        case TokenKind::FatArrow: return "FatArrow";
         case TokenKind::If: return "If";
         case TokenKind::Else: return "Else";
         case TokenKind::Struct: return "Struct";
         case TokenKind::Pub: return "Pub";
         case TokenKind::True: return "True";
         case TokenKind::False: return "False";
+        case TokenKind::Return: return "Return";
+        case TokenKind::Read: return "Read";
+        case TokenKind::Write: return "Write";
+        case TokenKind::Take: return "Take";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

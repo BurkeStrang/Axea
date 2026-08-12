@@ -3,6 +3,7 @@
 #include "interpreter/Interpreter.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
+#include "sema/TypeChecker.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -11,7 +12,10 @@
 
 namespace
 {
-    void printExpr(const Expr& expr, int indent = 0)
+    void printExpr(const Expr& expr, int indent = 0);
+    void printStmt(const Stmt& stmt, int indent = 0);
+
+    void printExpr(const Expr& expr, int indent)
     {
         const std::string pad(static_cast<std::size_t>(indent), ' ');
 
@@ -55,6 +59,98 @@ namespace
             printExpr(*ifExpr->thenBranch, indent + 2);
             std::cout << pad << "Else\n";
             printExpr(*ifExpr->elseBranch, indent + 2);
+            return;
+        }
+
+        if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+        {
+            std::cout << pad << "Block\n";
+            for (const auto& statement : block->statements)
+            {
+                printStmt(*statement, indent + 2);
+            }
+            if (block->result)
+            {
+                printExpr(*block->result, indent + 2);
+            }
+            return;
+        }
+
+        if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+        {
+            std::cout << pad << "Call(" << call->callee << ")\n";
+            for (const auto& argument : call->arguments)
+            {
+                printExpr(*argument, indent + 2);
+            }
+            return;
+        }
+
+        if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+        {
+            std::cout << pad << "Field(" << field->field << ")\n";
+            printExpr(*field->object, indent + 2);
+            return;
+        }
+
+        if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
+        {
+            std::cout << pad << "StructLiteral(" << literal->typeName << ")\n";
+            for (const auto& [fieldName, fieldExpr] : literal->fields)
+            {
+                std::cout << pad << "  " << fieldName << ":\n";
+                printExpr(*fieldExpr, indent + 4);
+            }
+            return;
+        }
+    }
+
+    void printStmt(const Stmt& stmt, int indent)
+    {
+        const std::string pad(static_cast<std::size_t>(indent), ' ');
+
+        if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
+        {
+            std::cout << pad << "Assignment(" << assignment->name << ")\n";
+            printExpr(*assignment->value, indent + 2);
+            return;
+        }
+
+        if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
+        {
+            std::cout << pad << "Return\n";
+            if (returnStmt->value)
+            {
+                printExpr(*returnStmt->value, indent + 2);
+            }
+            return;
+        }
+
+        if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
+        {
+            std::cout << pad << "ExprStmt\n";
+            printExpr(*exprStmt->expr, indent + 2);
+            return;
+        }
+
+        if (const auto* function = dynamic_cast<const FunctionDecl*>(&stmt))
+        {
+            std::cout << pad << "Function(" << function->name << ")\n";
+            for (const auto& param : function->params)
+            {
+                std::cout << pad << "  Param(" << param.name << ": " << param.type << ")\n";
+            }
+            printExpr(*function->body, indent + 2);
+            return;
+        }
+
+        if (const auto* structDecl = dynamic_cast<const StructDecl*>(&stmt))
+        {
+            std::cout << pad << "Struct(" << structDecl->name << ")\n";
+            for (const auto& field : structDecl->fields)
+            {
+                std::cout << pad << "  Field(" << field.name << ": " << field.type << ")\n";
+            }
             return;
         }
     }
@@ -102,34 +198,34 @@ int main(int argc, char** argv)
         if (command == "ast")
         {
             Parser parser(std::move(tokens));
-            auto stmt = parser.parseStatement();
+            auto program = parser.parseProgram();
 
-            const auto* assignment = dynamic_cast<const AssignmentStmt*>(stmt.get());
-            if (!assignment)
+            for (const auto& item : program.items)
             {
-                throw std::runtime_error("unsupported statement");
+                printStmt(*item);
             }
-
-            std::cout << "Assignment(" << assignment->name << ")\n";
-            printExpr(*assignment->value, 2);
             return 0;
         }
 
         if (command == "run")
         {
             Parser parser(std::move(tokens));
-            auto stmt = parser.parseStatement();
+            auto program = parser.parseProgram();
 
-            const auto* assignment = dynamic_cast<const AssignmentStmt*>(stmt.get());
-            if (!assignment)
-            {
-                throw std::runtime_error("unsupported statement");
-            }
+            TypeChecker checker;
+            checker.check(program);
 
             Interpreter interpreter;
-            interpreter.execute(*stmt);
-            std::cout << assignment->name << " = "
-                      << toString(interpreter.variables().at(assignment->name)) << '\n';
+            interpreter.run(program);
+
+            for (const auto& item : program.items)
+            {
+                if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
+                {
+                    std::cout << assignment->name << " = "
+                              << toString(interpreter.variables().at(assignment->name)) << '\n';
+                }
+            }
             return 0;
         }
 

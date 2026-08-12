@@ -1,0 +1,13 @@
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+p = Point
+{
+    x: 3
+    y: 4
+}
+
+sum = p.x + p.y

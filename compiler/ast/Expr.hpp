@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct Expr
 {
@@ -78,5 +80,43 @@ struct IfExpr final : Expr
 
     std::unique_ptr<Expr> condition;
     std::unique_ptr<Expr> thenBranch;
-    std::unique_ptr<Expr> elseBranch;
+    std::unique_ptr<Expr>
+        elseBranch; // BlockExpr, or a nested IfExpr for `else if`; null if no else
+};
+
+struct CallExpr final : Expr
+{
+    CallExpr(std::string callee, std::vector<std::unique_ptr<Expr>> arguments)
+        : callee(std::move(callee)),
+          arguments(std::move(arguments))
+    {
+    }
+
+    std::string callee;
+    std::vector<std::unique_ptr<Expr>> arguments;
+};
+
+struct FieldExpr final : Expr
+{
+    FieldExpr(std::unique_ptr<Expr> object, std::string field)
+        : object(std::move(object)),
+          field(std::move(field))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::string field;
+};
+
+struct StructLiteralExpr final : Expr
+{
+    StructLiteralExpr(std::string typeName,
+                      std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields)
+        : typeName(std::move(typeName)),
+          fields(std::move(fields))
+    {
+    }
+
+    std::string typeName;
+    std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields;
 };

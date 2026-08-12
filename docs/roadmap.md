@@ -10,9 +10,9 @@
 
 ## Phase 2
 
--   [ ] Functions and blocks
--   [ ] Structs
--   [ ] Symbol binding and type checker
+-   [x] Functions and blocks
+-   [x] Structs
+-   [x] Symbol binding and type checker
 
 ## Phase 3
 

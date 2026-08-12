@@ -1,0 +1,6 @@
+square(x: i32) -> i32
+{
+    x * x
+}
+
+y = square(6)

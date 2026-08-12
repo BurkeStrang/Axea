@@ -43,3 +43,29 @@ TEST("Lexer tokenizes boolean keywords and string literals")
     EXPECT_EQ(tokens[2].text, "\"hi\"");
     EXPECT_EQ(tokens[3].kind, TokenKind::EndOfFile);
 }
+
+TEST("Lexer tokenizes Phase 2 punctuation")
+{
+    Lexer lexer(", . -> =>");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Comma);
+    EXPECT_EQ(tokens[1].kind, TokenKind::Dot);
+    EXPECT_EQ(tokens[2].kind, TokenKind::Arrow);
+    EXPECT_EQ(tokens[3].kind, TokenKind::FatArrow);
+    EXPECT_EQ(tokens[4].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer tokenizes Phase 2 keywords")
+{
+    Lexer lexer("struct pub return read write take");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Struct);
+    EXPECT_EQ(tokens[1].kind, TokenKind::Pub);
+    EXPECT_EQ(tokens[2].kind, TokenKind::Return);
+    EXPECT_EQ(tokens[3].kind, TokenKind::Read);
+    EXPECT_EQ(tokens[4].kind, TokenKind::Write);
+    EXPECT_EQ(tokens[5].kind, TokenKind::Take);
+    EXPECT_EQ(tokens[6].kind, TokenKind::EndOfFile);
+}

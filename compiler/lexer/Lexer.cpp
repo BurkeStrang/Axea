@@ -126,11 +126,18 @@ Token Lexer::nextToken()
         case '{': return makeToken(TokenKind::LeftBrace, start, startLine, startColumn);
         case '}': return makeToken(TokenKind::RightBrace, start, startLine, startColumn);
         case ':': return makeToken(TokenKind::Colon, start, startLine, startColumn);
+        case ',': return makeToken(TokenKind::Comma, start, startLine, startColumn);
+        case '.': return makeToken(TokenKind::Dot, start, startLine, startColumn);
         case '=':
             if (current() == '=')
             {
                 advance();
                 return makeToken(TokenKind::EqualEqual, start, startLine, startColumn);
+            }
+            if (current() == '>')
+            {
+                advance();
+                return makeToken(TokenKind::FatArrow, start, startLine, startColumn);
             }
             return makeToken(TokenKind::Equal, start, startLine, startColumn);
         case '-':
@@ -197,7 +204,11 @@ Token Lexer::lexIdentifierOrKeyword()
                                                                      {"struct", TokenKind::Struct},
                                                                      {"pub", TokenKind::Pub},
                                                                      {"true", TokenKind::True},
-                                                                     {"false", TokenKind::False}};
+                                                                     {"false", TokenKind::False},
+                                                                     {"return", TokenKind::Return},
+                                                                     {"read", TokenKind::Read},
+                                                                     {"write", TokenKind::Write},
+                                                                     {"take", TokenKind::Take}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {
