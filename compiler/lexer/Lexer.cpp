@@ -118,7 +118,13 @@ Token Lexer::nextToken()
 
     switch (c)
     {
-        case '+': return makeToken(TokenKind::Plus, start, startLine, startColumn);
+        case '+':
+            if (current() == '+')
+            {
+                advance();
+                return makeToken(TokenKind::PlusPlus, start, startLine, startColumn);
+            }
+            return makeToken(TokenKind::Plus, start, startLine, startColumn);
         case '*': return makeToken(TokenKind::Star, start, startLine, startColumn);
         case '/': return makeToken(TokenKind::Slash, start, startLine, startColumn);
         case '(': return makeToken(TokenKind::LeftParen, start, startLine, startColumn);
@@ -145,6 +151,11 @@ Token Lexer::nextToken()
             {
                 advance();
                 return makeToken(TokenKind::Arrow, start, startLine, startColumn);
+            }
+            if (current() == '-')
+            {
+                advance();
+                return makeToken(TokenKind::MinusMinus, start, startLine, startColumn);
             }
             return makeToken(TokenKind::Minus, start, startLine, startColumn);
         case '<':

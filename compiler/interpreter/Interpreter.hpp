@@ -28,16 +28,17 @@ std::string toString(const Value& value);
 class Environment
 {
 public:
-    explicit Environment(const Environment* parent = nullptr);
+    explicit Environment(Environment* parent = nullptr);
 
-    void define(const std::string& name, Value value);
+    void define(const std::string& name, Value value); // declares/shadows in this scope
+    void assign(const std::string& name, Value value); // mutates an existing binding, walking up
     Value get(const std::string& name) const;
 
     const std::unordered_map<std::string, Value>& bindings() const;
 
 private:
     std::unordered_map<std::string, Value> values_;
-    const Environment* parent_;
+    Environment* parent_;
 };
 
 class Interpreter

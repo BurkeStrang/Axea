@@ -3,6 +3,7 @@
 #include "interpreter/Interpreter.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
+#include "sema/CapabilityChecker.hpp"
 #include "sema/TypeChecker.hpp"
 
 #include <fstream>
@@ -133,12 +134,32 @@ namespace
             return;
         }
 
+        if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+        {
+            std::cout << pad << "FieldAssign(" << fieldAssign->field << ")\n";
+            printExpr(*fieldAssign->object, indent + 2);
+            printExpr(*fieldAssign->value, indent + 2);
+            return;
+        }
+
+        if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+        {
+            std::cout << pad << (incDec->increment ? "Increment\n" : "Decrement\n");
+            printExpr(*incDec->target, indent + 2);
+            return;
+        }
+
         if (const auto* function = dynamic_cast<const FunctionDecl*>(&stmt))
         {
             std::cout << pad << "Function(" << function->name << ")\n";
             for (const auto& param : function->params)
             {
-                std::cout << pad << "  Param(" << param.name << ": " << param.type << ")\n";
+                std::cout << pad << "  Param(";
+                if (param.declaredCapability)
+                {
+                    std::cout << capabilityName(*param.declaredCapability) << " ";
+                }
+                std::cout << param.name << ": " << param.type << ")\n";
             }
             printExpr(*function->body, indent + 2);
             return;
@@ -173,7 +194,7 @@ int main(int argc, char** argv)
 {
     if (argc != 3)
     {
-        std::cerr << "usage: ax <tokens|ast|run> <file.ax>\n";
+        std::cerr << "usage: ax <tokens|ast|run|capabilities> <file.ax>\n";
         return 1;
     }
 
@@ -212,8 +233,11 @@ int main(int argc, char** argv)
             Parser parser(std::move(tokens));
             auto program = parser.parseProgram();
 
-            TypeChecker checker;
-            checker.check(program);
+            TypeChecker typeChecker;
+            typeChecker.check(program);
+
+            CapabilityChecker capabilityChecker;
+            capabilityChecker.check(program);
 
             Interpreter interpreter;
             interpreter.run(program);
@@ -224,6 +248,37 @@ int main(int argc, char** argv)
                 {
                     std::cout << assignment->name << " = "
                               << toString(interpreter.variables().at(assignment->name)) << '\n';
+                }
+            }
+            return 0;
+        }
+
+        if (command == "capabilities")
+        {
+            Parser parser(std::move(tokens));
+            auto program = parser.parseProgram();
+
+            TypeChecker typeChecker;
+            typeChecker.check(program);
+
+            CapabilityChecker capabilityChecker;
+            capabilityChecker.check(program);
+
+            for (const auto& item : program.items)
+            {
+                const auto* function = dynamic_cast<const FunctionDecl*>(item.get());
+                if (!function)
+                {
+                    continue;
+                }
+
+                std::cout << "Function(" << function->name << ")\n";
+                const auto& capabilities =
+                    capabilityChecker.effectiveCapabilities().at(function->name);
+                for (std::size_t i = 0; i < function->params.size(); ++i)
+                {
+                    std::cout << "  Param(" << function->params[i].name << ": "
+                              << capabilityName(capabilities[i]) << ")\n";
                 }
             }
             return 0;

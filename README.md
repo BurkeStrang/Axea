@@ -17,24 +17,30 @@ The compiler can:
 
 - tokenize basic Axea syntax
 - parse a sequence of top-level statements, function declarations, and struct declarations
-- parse arithmetic expressions with precedence, booleans, strings, comparison operators, `if`/`else if`/`else` expressions, blocks, function calls, field access, and struct literals
+- parse arithmetic expressions with precedence, booleans, strings, comparison operators, `if`/`else if`/`else` expressions, blocks, function calls, field access, struct literals, field assignment, and `++`/`--`
 - type-check programs (symbol binding + a `TypeChecker` pass) before running them
+- infer `read`/`write`/`take` capabilities for function parameters and verify explicit capability declarations (`CapabilityChecker`)
+- check that a `take`-consumed parameter isn't used again afterward within the same block (ownership / use-after-move)
 - dump tokens or the AST
-- interpret whole programs: functions (including recursion and early `return`), struct construction and field access
+- interpret whole programs: functions (including recursion and early `return`), struct construction, field access, and field mutation (visible through shared struct references)
 
 Example:
 
 ```ax
-factorial(n: i32) -> i32
+struct User
 {
-    if n <= 1
-    {
-        return 1
-    }
-    n * factorial(n - 1)
+    name: str
+    age: i32
 }
 
-result = factorial(5)
+birthday(user: User) -> i32
+{
+    user.age++
+    user.age
+}
+
+u = User { name: "Burke"  age: 35 }
+newAge = birthday(u)
 ```
 
 ## Build
@@ -55,6 +61,8 @@ ctest --test-dir build --output-on-failure
 ./build/ax run examples/function.ax
 ./build/ax run examples/recursion.ax
 ./build/ax run examples/struct.ax
+./build/ax run examples/capabilities.ax
+./build/ax capabilities examples/capabilities.ax
 ```
 
 Expected AST (`examples/hello.ax`):
@@ -81,6 +89,19 @@ result = 120
 ```text
 p = Point { x: 3, y: 4 }
 sum = 7
+```
+
+Expected `capabilities` output (`examples/capabilities.ax`):
+
+```text
+Function(display)
+  Param(user: read)
+Function(birthday)
+  Param(user: write)
+Function(celebrate)
+  Param(user: write)
+Function(archive)
+  Param(user: take)
 ```
 
 ## Formatting
@@ -111,8 +132,8 @@ git config core.hooksPath .githooks
 4. ~~Add function declarations and blocks.~~ Done.
 5. ~~Add structs.~~ Done.
 6. ~~Add symbol binding and type checking.~~ Done.
-7. Add Axea's `read` / `write` / `take` capability analysis.
-8. Add ownership analysis.
+7. ~~Add Axea's `read` / `write` / `take` capability analysis.~~ Done.
+8. ~~Add ownership analysis.~~ Done.
 9. Add regions and escape analysis.
 10. Design Axea IR.
 11. Add LLVM as a backend only after the frontend semantics are stable.

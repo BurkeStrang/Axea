@@ -16,8 +16,8 @@
 
 ## Phase 3
 
--   [ ] Capability Inference
--   [ ] Ownership
+-   [x] Capability Inference
+-   [x] Ownership
 
 ## Phase 4
 

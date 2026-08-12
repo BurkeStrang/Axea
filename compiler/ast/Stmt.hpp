@@ -5,7 +5,26 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+enum class Capability
+{
+    Read,
+    Write,
+    Take
+};
+
+constexpr std::string_view capabilityName(Capability capability)
+{
+    switch (capability)
+    {
+        case Capability::Read: return "read";
+        case Capability::Write: return "write";
+        case Capability::Take: return "take";
+    }
+    return "unknown";
+}
 
 struct Stmt
 {
@@ -64,10 +83,41 @@ struct ExprStmt final : Stmt
     std::unique_ptr<Expr> expr;
 };
 
+// `object.field = value`. `object` may itself be a FieldExpr, so nested
+// chains (`a.b.c = value`) fall out for free.
+struct FieldAssignStmt final : Stmt
+{
+    FieldAssignStmt(std::unique_ptr<Expr> object, std::string field, std::unique_ptr<Expr> value)
+        : object(std::move(object)),
+          field(std::move(field)),
+          value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::string field;
+    std::unique_ptr<Expr> value;
+};
+
+// `target++` / `target--`, statement-only. `target` is a NameExpr or a
+// FieldExpr (validated by the parser at construction).
+struct IncDecStmt final : Stmt
+{
+    IncDecStmt(std::unique_ptr<Expr> target, bool increment)
+        : target(std::move(target)),
+          increment(increment)
+    {
+    }
+
+    std::unique_ptr<Expr> target;
+    bool increment; // true => `++`, false => `--`
+};
+
 struct Param
 {
     std::string name;
     std::string type;
+    std::optional<Capability> declaredCapability; // e.g. from `write user: User`
 };
 
 struct Field

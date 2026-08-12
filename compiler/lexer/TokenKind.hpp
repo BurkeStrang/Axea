@@ -9,7 +9,9 @@ enum class TokenKind
     String,
 
     Plus,
+    PlusPlus,
     Minus,
+    MinusMinus,
     Star,
     Slash,
 
@@ -55,7 +57,9 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Integer: return "Integer";
         case TokenKind::String: return "String";
         case TokenKind::Plus: return "Plus";
+        case TokenKind::PlusPlus: return "PlusPlus";
         case TokenKind::Minus: return "Minus";
+        case TokenKind::MinusMinus: return "MinusMinus";
         case TokenKind::Star: return "Star";
         case TokenKind::Slash: return "Slash";
         case TokenKind::Equal: return "Equal";

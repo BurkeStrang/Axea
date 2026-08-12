@@ -169,3 +169,38 @@ TEST("toString formats a struct instance deterministically by declared field ord
                                "x = Point { x: 1  y: 2 }";
     EXPECT_EQ(toString(run(source)), "Point { x: 1, y: 2 }");
 }
+
+TEST("Interpreter field assignment mutates the shared struct instance")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "update(p: Point) -> i32 { p.x = 99  p.x } "
+                               "p = Point { x: 1 } "
+                               "called = update(p) "
+                               "x = p.x";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter field increment mutates the shared struct instance")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "bump(p: Point) -> i32 { p.x++  p.x } "
+                               "p = Point { x: 1 } "
+                               "called = bump(p) "
+                               "x = p.x";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
+}
+
+TEST("Interpreter increment of a plain parameter mutates it through nested blocks")
+{
+    const std::string source = "bump(n: i32) -> i32 { "
+                               "  if n > 0 { n++ } "
+                               "  n "
+                               "} "
+                               "x = bump(5)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter decrement works on a plain parameter")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("f(n: i32) -> i32 { n--  n }  x = f(5)")), 4);
+}

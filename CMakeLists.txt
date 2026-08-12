@@ -10,6 +10,7 @@ add_library(axea_compiler
     compiler/parser/Parser.cpp
     compiler/interpreter/Interpreter.cpp
     compiler/sema/TypeChecker.cpp
+    compiler/sema/CapabilityChecker.cpp
 )
 
 target_include_directories(axea_compiler PUBLIC compiler)
@@ -29,6 +30,7 @@ add_executable(axea_tests
     tests/ParserTests.cpp
     tests/InterpreterTests.cpp
     tests/TypeCheckerTests.cpp
+    tests/CapabilityCheckerTests.cpp
 )
 target_include_directories(axea_tests PRIVATE tests)
 target_link_libraries(axea_tests PRIVATE axea_compiler)

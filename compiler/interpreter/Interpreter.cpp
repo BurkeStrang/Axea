@@ -62,7 +62,7 @@ std::string toString(const Value& value)
     return "()";
 }
 
-Environment::Environment(const Environment* parent)
+Environment::Environment(Environment* parent)
     : parent_(parent)
 {
 }
@@ -70,6 +70,21 @@ Environment::Environment(const Environment* parent)
 void Environment::define(const std::string& name, Value value)
 {
     values_[name] = std::move(value);
+}
+
+void Environment::assign(const std::string& name, Value value)
+{
+    if (const auto it = values_.find(name); it != values_.end())
+    {
+        it->second = std::move(value);
+        return;
+    }
+    if (parent_)
+    {
+        parent_->assign(name, std::move(value));
+        return;
+    }
+    throw std::runtime_error("undefined variable: " + name);
 }
 
 Value Environment::get(const std::string& name) const
@@ -132,6 +147,58 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
     {
         evaluate(*exprStmt->expr, env);
         return;
+    }
+
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        auto objectValue = evaluate(*fieldAssign->object, env);
+        const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&objectValue);
+        if (!instance)
+        {
+            throw std::runtime_error("field assignment on a non-struct value");
+        }
+        auto newValue = evaluate(*fieldAssign->value, env);
+        for (auto& [fieldName, fieldValue] : (*instance)->fields)
+        {
+            if (fieldName == fieldAssign->field)
+            {
+                fieldValue = std::move(newValue);
+                return;
+            }
+        }
+        throw std::runtime_error("no such field: " + fieldAssign->field);
+    }
+
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        const std::int64_t delta = incDec->increment ? 1 : -1;
+
+        if (const auto* name = dynamic_cast<const NameExpr*>(incDec->target.get()))
+        {
+            env.assign(name->name, asInt(env.get(name->name)) + delta);
+            return;
+        }
+
+        if (const auto* field = dynamic_cast<const FieldExpr*>(incDec->target.get()))
+        {
+            auto objectValue = evaluate(*field->object, env);
+            const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&objectValue);
+            if (!instance)
+            {
+                throw std::runtime_error("field increment/decrement on a non-struct value");
+            }
+            for (auto& [fieldName, fieldValue] : (*instance)->fields)
+            {
+                if (fieldName == field->field)
+                {
+                    fieldValue = asInt(fieldValue) + delta;
+                    return;
+                }
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        throw std::runtime_error("invalid increment/decrement target");
     }
 
     throw std::runtime_error("unsupported statement");

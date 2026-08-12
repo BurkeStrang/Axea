@@ -69,3 +69,15 @@ TEST("Lexer tokenizes Phase 2 keywords")
     EXPECT_EQ(tokens[5].kind, TokenKind::Take);
     EXPECT_EQ(tokens[6].kind, TokenKind::EndOfFile);
 }
+
+TEST("Lexer tokenizes increment and decrement operators")
+{
+    Lexer lexer("++ -- + -");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::PlusPlus);
+    EXPECT_EQ(tokens[1].kind, TokenKind::MinusMinus);
+    EXPECT_EQ(tokens[2].kind, TokenKind::Plus);
+    EXPECT_EQ(tokens[3].kind, TokenKind::Minus);
+    EXPECT_EQ(tokens[4].kind, TokenKind::EndOfFile);
+}

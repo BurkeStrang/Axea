@@ -81,6 +81,10 @@ private:
     Type checkBlock(const BlockExpr& block, TypeEnv& parentEnv, const Type* expectedReturnType);
     Type checkExpr(const Expr& expr, TypeEnv& env, const Type* expectedReturnType);
     void checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expectedReturnType);
+    Type checkFieldType(const Expr& object,
+                        const std::string& field,
+                        TypeEnv& env,
+                        const Type* expectedReturnType);
     Type resolveType(const std::string& name) const;
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;

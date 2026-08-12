@@ -57,12 +57,6 @@ const Token& Parser::expect(TokenKind kind, const char* message)
     return advance();
 }
 
-bool Parser::isAssignmentStart() const
-{
-    return current().kind == TokenKind::Identifier &&
-           (peek().kind == TokenKind::Equal || peek().kind == TokenKind::Colon);
-}
-
 std::unique_ptr<Stmt> Parser::parseItem()
 {
     match(TokenKind::Pub); // visibility is parsed and discarded; no module system yet
@@ -82,16 +76,27 @@ std::unique_ptr<Stmt> Parser::parseItem()
 
 Param Parser::parseParam()
 {
-    if (current().kind == TokenKind::Read || current().kind == TokenKind::Write ||
-        current().kind == TokenKind::Take)
+    std::optional<Capability> capability;
+    if (current().kind == TokenKind::Read)
     {
-        advance(); // capability annotation is parsed and discarded; no capability analysis yet
+        capability = Capability::Read;
+        advance();
+    }
+    else if (current().kind == TokenKind::Write)
+    {
+        capability = Capability::Write;
+        advance();
+    }
+    else if (current().kind == TokenKind::Take)
+    {
+        capability = Capability::Take;
+        advance();
     }
 
     const auto& name = expect(TokenKind::Identifier, "expected parameter name");
     expect(TokenKind::Colon, "expected ':' after parameter name");
     const auto& type = expect(TokenKind::Identifier, "expected parameter type");
-    return Param{name.text, type.text};
+    return Param{name.text, type.text, capability};
 }
 
 std::unique_ptr<Stmt> Parser::parseFunctionDecl()
@@ -194,27 +199,72 @@ std::unique_ptr<Expr> Parser::parseBlock()
 
     while (current().kind != TokenKind::RightBrace)
     {
-        if (isAssignmentStart())
-        {
-            statements.push_back(parseAssignment());
-            continue;
-        }
         if (current().kind == TokenKind::Return)
         {
             statements.push_back(parseReturn());
             continue;
         }
 
-        // Not obviously a statement: parse an expression and see what follows.
-        // If '}' comes right after, it was the block's trailing result;
-        // otherwise it was a non-trailing expression kept for its side effect
-        // (e.g. an early-return guard clause) and parsing continues.
+        // Not obviously a keyword-led statement: parse an expression (which
+        // naturally stops before '=', ':', '++'/'--', since none of those are
+        // infix operators) and see what follows to decide what it was.
         auto expr = parseExpression();
+
+        if (match(TokenKind::Colon))
+        {
+            auto* name = dynamic_cast<NameExpr*>(expr.get());
+            if (!name)
+            {
+                throw std::runtime_error("expected a name before ':' in a local binding");
+            }
+            const auto& type = expect(TokenKind::Identifier, "expected type name");
+            expect(TokenKind::Equal, "expected '=' after type annotation");
+            auto value = parseExpression();
+            statements.push_back(
+                std::make_unique<AssignmentStmt>(name->name, type.text, std::move(value)));
+            continue;
+        }
+
+        if (match(TokenKind::Equal))
+        {
+            auto value = parseExpression();
+            if (auto* name = dynamic_cast<NameExpr*>(expr.get()))
+            {
+                statements.push_back(
+                    std::make_unique<AssignmentStmt>(name->name, std::nullopt, std::move(value)));
+            }
+            else if (auto* field = dynamic_cast<FieldExpr*>(expr.get()))
+            {
+                statements.push_back(std::make_unique<FieldAssignStmt>(
+                    std::move(field->object), field->field, std::move(value)));
+            }
+            else
+            {
+                throw std::runtime_error("invalid assignment target");
+            }
+            continue;
+        }
+
+        if (current().kind == TokenKind::PlusPlus || current().kind == TokenKind::MinusMinus)
+        {
+            const bool increment = current().kind == TokenKind::PlusPlus;
+            advance();
+            if (!dynamic_cast<NameExpr*>(expr.get()) && !dynamic_cast<FieldExpr*>(expr.get()))
+            {
+                throw std::runtime_error("invalid increment/decrement target");
+            }
+            statements.push_back(std::make_unique<IncDecStmt>(std::move(expr), increment));
+            continue;
+        }
+
         if (current().kind == TokenKind::RightBrace)
         {
             result = std::move(expr);
             break;
         }
+
+        // A non-trailing expression kept for its side effect (e.g. an
+        // early-return guard clause); its value is discarded.
         statements.push_back(std::make_unique<ExprStmt>(std::move(expr)));
     }
 

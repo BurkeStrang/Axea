@@ -205,7 +205,53 @@ void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expected
         return;
     }
 
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        const Type fieldType =
+            checkFieldType(*fieldAssign->object, fieldAssign->field, env, expectedReturnType);
+        const Type valueType = checkExpr(*fieldAssign->value, env, expectedReturnType);
+        if (!(fieldType == valueType))
+        {
+            throw std::runtime_error("field '" + fieldAssign->field + "' expects " +
+                                     typeName(fieldType) + ", got " + typeName(valueType));
+        }
+        return;
+    }
+
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        const Type targetType = checkExpr(*incDec->target, env, expectedReturnType);
+        if (!(targetType == kI32))
+        {
+            throw std::runtime_error("'++'/'--' requires an i32 target, found " +
+                                     typeName(targetType));
+        }
+        return;
+    }
+
     throw std::runtime_error("unsupported statement");
+}
+
+Type TypeChecker::checkFieldType(const Expr& object,
+                                 const std::string& field,
+                                 TypeEnv& env,
+                                 const Type* expectedReturnType)
+{
+    const Type objectType = checkExpr(object, env, expectedReturnType);
+    if (objectType.kind != TypeKind::Struct)
+    {
+        throw std::runtime_error("field access on non-struct type " + typeName(objectType));
+    }
+
+    const StructDecl& decl = *structs_.at(objectType.structName);
+    for (const auto& declaredField : decl.fields)
+    {
+        if (declaredField.name == field)
+        {
+            return resolveType(declaredField.type);
+        }
+    }
+    throw std::runtime_error("struct '" + objectType.structName + "' has no field '" + field + "'");
 }
 
 Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expectedReturnType)
@@ -285,22 +331,7 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
-        const Type objectType = checkExpr(*field->object, env, expectedReturnType);
-        if (objectType.kind != TypeKind::Struct)
-        {
-            throw std::runtime_error("field access on non-struct type " + typeName(objectType));
-        }
-
-        const StructDecl& decl = *structs_.at(objectType.structName);
-        for (const auto& declaredField : decl.fields)
-        {
-            if (declaredField.name == field->field)
-            {
-                return resolveType(declaredField.type);
-            }
-        }
-        throw std::runtime_error("struct '" + objectType.structName + "' has no field '" +
-                                 field->field + "'");
+        return checkFieldType(*field->object, field->field, env, expectedReturnType);
     }
 
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))

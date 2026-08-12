@@ -159,7 +159,7 @@ TEST("Parser allows an omitted return type")
     EXPECT_TRUE(!function->returnType.has_value());
 }
 
-TEST("Parser parses and discards pub and capability-prefixed parameters")
+TEST("Parser parses pub (discarded) and captures a capability-prefixed parameter")
 {
     auto program = parseOne("pub update(write user: i32) -> i32 { user }");
 
@@ -168,6 +168,16 @@ TEST("Parser parses and discards pub and capability-prefixed parameters")
     EXPECT_EQ(function->name, "update");
     EXPECT_EQ(function->params[0].name, "user");
     EXPECT_EQ(function->params[0].type, "i32");
+    EXPECT_TRUE(function->params[0].declaredCapability.has_value());
+    EXPECT_TRUE(*function->params[0].declaredCapability == Capability::Write);
+}
+
+TEST("Parser leaves a parameter's capability unset when omitted")
+{
+    auto program = parseOne("f(x: i32) -> i32 { x }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(!function->params[0].declaredCapability.has_value());
 }
 
 TEST("Parser builds a struct declaration with newline-separated fields")
@@ -274,4 +284,67 @@ TEST("Parser parses an optional type annotation on a local assignment")
     EXPECT_TRUE(assignment != nullptr);
     EXPECT_TRUE(assignment->declaredType.has_value());
     EXPECT_EQ(*assignment->declaredType, "i32");
+}
+
+TEST("Parser builds a field-assignment statement")
+{
+    auto program = parseOne("f(p: Point) -> i32 { p.x = 5  1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* fieldAssign = dynamic_cast<FieldAssignStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(fieldAssign != nullptr);
+    EXPECT_EQ(fieldAssign->field, "x");
+
+    auto* object = dynamic_cast<NameExpr*>(fieldAssign->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "p");
+
+    auto* value = dynamic_cast<IntegerExpr*>(fieldAssign->value.get());
+    EXPECT_TRUE(value != nullptr);
+    EXPECT_EQ(value->value, 5);
+}
+
+TEST("Parser builds a field-assignment statement for a nested field chain")
+{
+    auto program = parseOne("f(a: A) -> i32 { a.b.c = 1  1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* fieldAssign = dynamic_cast<FieldAssignStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(fieldAssign != nullptr);
+    EXPECT_EQ(fieldAssign->field, "c");
+
+    auto* nestedObject = dynamic_cast<FieldExpr*>(fieldAssign->object.get());
+    EXPECT_TRUE(nestedObject != nullptr);
+    EXPECT_EQ(nestedObject->field, "b");
+}
+
+TEST("Parser builds increment/decrement statements for a name and a field target")
+{
+    auto program = parseOne("f(p: Point, n: i32) -> i32 { p.x++  n--  1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    EXPECT_EQ(body->statements.size(), static_cast<std::size_t>(2));
+
+    auto* fieldInc = dynamic_cast<IncDecStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(fieldInc != nullptr);
+    EXPECT_TRUE(fieldInc->increment);
+    EXPECT_TRUE(dynamic_cast<FieldExpr*>(fieldInc->target.get()) != nullptr);
+
+    auto* nameDec = dynamic_cast<IncDecStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(nameDec != nullptr);
+    EXPECT_TRUE(!nameDec->increment);
+    EXPECT_TRUE(dynamic_cast<NameExpr*>(nameDec->target.get()) != nullptr);
+}
+
+TEST("Parser rejects an invalid assignment target")
+{
+    EXPECT_THROWS(parseOne("f() -> i32 { 1 + 2 = 5 }"));
+}
+
+TEST("Parser rejects an invalid increment target")
+{
+    EXPECT_THROWS(parseOne("f() -> i32 { (1 + 2)++  3 }"));
 }

@@ -21,8 +21,6 @@ private:
     bool match(TokenKind kind);
     const Token& expect(TokenKind kind, const char* message);
 
-    bool isAssignmentStart() const;
-
     std::unique_ptr<Stmt> parseItem();
     std::unique_ptr<Stmt> parseFunctionDecl();
     std::unique_ptr<Stmt> parseStructDecl();
