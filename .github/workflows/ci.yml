@@ -16,7 +16,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          find src tests -name '*.cpp' -o -name '*.hpp' | \
+          find compiler tests -name '*.cpp' -o -name '*.hpp' | \
             xargs clang-format-18 --dry-run --Werror
 
   test:

@@ -2,6 +2,15 @@
 
 Early C++23 compiler prototype for the Axea programming language.
 
+## Repository Layout
+
+-   `compiler/` - Axea compiler
+-   `runtime/` - Runtime support
+-   `std/` - Standard library
+-   `docs/` - Specifications, compiler docs, book, and RFCs
+-   `examples/` - Example programs
+-   `tests/` - Compiler and language tests
+
 ## Current milestone
 
 The compiler can:
