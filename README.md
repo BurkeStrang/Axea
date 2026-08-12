@@ -9,7 +9,9 @@ The compiler can:
 - tokenize basic Axea syntax
 - parse a single assignment statement
 - parse arithmetic expressions with precedence
+- parse booleans, strings, comparison operators, and `if` expressions
 - dump tokens or the AST
+- interpret a single assignment statement, including `if` expressions
 
 Example:
 
@@ -30,6 +32,25 @@ ctest --test-dir build --output-on-failure
 ```bash
 ./build/ax tokens examples/hello.ax
 ./build/ax ast examples/hello.ax
+./build/ax run examples/hello.ax
+./build/ax run examples/if.ax
+```
+
+Expected AST:
+
+```text
+Assignment(x)
+  Binary(Plus)
+    Integer(1)
+    Binary(Star)
+      Integer(2)
+      Integer(3)
+```
+
+Expected `run` output:
+
+```text
+x = 7
 ```
 
 ## Formatting
@@ -52,22 +73,11 @@ To auto-format staged files on every commit, point git at the tracked hooks dire
 git config core.hooksPath .githooks
 ```
 
-Expected AST:
-
-```text
-Assignment(x)
-  Binary(Plus)
-    Integer(1)
-    Binary(Star)
-      Integer(2)
-      Integer(3)
-```
-
 ## Suggested next steps
 
-1. Add a minimal interpreter for assignment and arithmetic expressions.
-2. Add booleans, strings, and comparison operators.
-3. Make `if` an expression.
+1. ~~Add a minimal interpreter for assignment and arithmetic expressions.~~ Done.
+2. ~~Add booleans, strings, and comparison operators.~~ Done.
+3. ~~Make `if` an expression.~~ Done.
 4. Add function declarations and blocks.
 5. Add structs.
 6. Add symbol binding and type checking.

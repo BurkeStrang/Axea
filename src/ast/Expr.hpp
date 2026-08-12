@@ -44,3 +44,39 @@ struct BinaryExpr final : Expr
     TokenKind op;
     std::unique_ptr<Expr> right;
 };
+
+struct BoolExpr final : Expr
+{
+    explicit BoolExpr(bool value)
+        : value(value)
+    {
+    }
+
+    bool value;
+};
+
+struct StringExpr final : Expr
+{
+    explicit StringExpr(std::string value)
+        : value(std::move(value))
+    {
+    }
+
+    std::string value;
+};
+
+struct IfExpr final : Expr
+{
+    IfExpr(std::unique_ptr<Expr> condition,
+           std::unique_ptr<Expr> thenBranch,
+           std::unique_ptr<Expr> elseBranch)
+        : condition(std::move(condition)),
+          thenBranch(std::move(thenBranch)),
+          elseBranch(std::move(elseBranch))
+    {
+    }
+
+    std::unique_ptr<Expr> condition;
+    std::unique_ptr<Expr> thenBranch;
+    std::unique_ptr<Expr> elseBranch;
+};

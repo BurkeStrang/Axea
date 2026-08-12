@@ -15,6 +15,11 @@ enum class TokenKind
 
     Equal,
     EqualEqual,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
 
     LeftParen,
     RightParen,
@@ -28,6 +33,8 @@ enum class TokenKind
     Else,
     Struct,
     Pub,
+    True,
+    False,
 
     EndOfFile,
     Invalid
@@ -46,6 +53,11 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Slash: return "Slash";
         case TokenKind::Equal: return "Equal";
         case TokenKind::EqualEqual: return "EqualEqual";
+        case TokenKind::BangEqual: return "BangEqual";
+        case TokenKind::Less: return "Less";
+        case TokenKind::LessEqual: return "LessEqual";
+        case TokenKind::Greater: return "Greater";
+        case TokenKind::GreaterEqual: return "GreaterEqual";
         case TokenKind::LeftParen: return "LeftParen";
         case TokenKind::RightParen: return "RightParen";
         case TokenKind::LeftBrace: return "LeftBrace";
@@ -56,6 +68,8 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Else: return "Else";
         case TokenKind::Struct: return "Struct";
         case TokenKind::Pub: return "Pub";
+        case TokenKind::True: return "True";
+        case TokenKind::False: return "False";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

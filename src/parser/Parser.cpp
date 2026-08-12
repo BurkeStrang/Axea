@@ -92,6 +92,36 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return std::make_unique<IntegerExpr>(std::stoll(token.text));
     }
 
+    if (current().kind == TokenKind::String)
+    {
+        const auto token = advance();
+        return std::make_unique<StringExpr>(token.text.substr(1, token.text.size() - 2));
+    }
+
+    if (match(TokenKind::True))
+    {
+        return std::make_unique<BoolExpr>(true);
+    }
+
+    if (match(TokenKind::False))
+    {
+        return std::make_unique<BoolExpr>(false);
+    }
+
+    if (match(TokenKind::If))
+    {
+        auto condition = parseExpression();
+        expect(TokenKind::LeftBrace, "expected '{' after if condition");
+        auto thenBranch = parseExpression();
+        expect(TokenKind::RightBrace, "expected '}' after if branch");
+        expect(TokenKind::Else, "expected 'else' after if branch");
+        expect(TokenKind::LeftBrace, "expected '{' after else");
+        auto elseBranch = parseExpression();
+        expect(TokenKind::RightBrace, "expected '}' after else branch");
+        return std::make_unique<IfExpr>(
+            std::move(condition), std::move(thenBranch), std::move(elseBranch));
+    }
+
     if (current().kind == TokenKind::Identifier)
     {
         return std::make_unique<NameExpr>(advance().text);
@@ -104,6 +134,12 @@ int Parser::precedence(TokenKind kind) const
 {
     switch (kind)
     {
+        case TokenKind::EqualEqual:
+        case TokenKind::BangEqual: return 5;
+        case TokenKind::Less:
+        case TokenKind::LessEqual:
+        case TokenKind::Greater:
+        case TokenKind::GreaterEqual: return 7;
         case TokenKind::Plus:
         case TokenKind::Minus: return 10;
         case TokenKind::Star:

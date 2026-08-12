@@ -140,6 +140,27 @@ Token Lexer::nextToken()
                 return makeToken(TokenKind::Arrow, start, startLine, startColumn);
             }
             return makeToken(TokenKind::Minus, start, startLine, startColumn);
+        case '<':
+            if (current() == '=')
+            {
+                advance();
+                return makeToken(TokenKind::LessEqual, start, startLine, startColumn);
+            }
+            return makeToken(TokenKind::Less, start, startLine, startColumn);
+        case '>':
+            if (current() == '=')
+            {
+                advance();
+                return makeToken(TokenKind::GreaterEqual, start, startLine, startColumn);
+            }
+            return makeToken(TokenKind::Greater, start, startLine, startColumn);
+        case '!':
+            if (current() == '=')
+            {
+                advance();
+                return makeToken(TokenKind::BangEqual, start, startLine, startColumn);
+            }
+            return makeToken(TokenKind::Invalid, start, startLine, startColumn);
         default: return makeToken(TokenKind::Invalid, start, startLine, startColumn);
     }
 }
@@ -174,7 +195,9 @@ Token Lexer::lexIdentifierOrKeyword()
     static const std::unordered_map<std::string, TokenKind> keywords{{"if", TokenKind::If},
                                                                      {"else", TokenKind::Else},
                                                                      {"struct", TokenKind::Struct},
-                                                                     {"pub", TokenKind::Pub}};
+                                                                     {"pub", TokenKind::Pub},
+                                                                     {"true", TokenKind::True},
+                                                                     {"false", TokenKind::False}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {

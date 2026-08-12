@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(axea_compiler
     src/lexer/Lexer.cpp
     src/parser/Parser.cpp
+    src/interpreter/Interpreter.cpp
 )
 
 target_include_directories(axea_compiler PUBLIC src)
@@ -21,7 +22,13 @@ add_executable(ax src/main.cpp)
 target_link_libraries(ax PRIVATE axea_compiler)
 
 enable_testing()
-add_executable(axea_tests tests/LexerParserTests.cpp)
+add_executable(axea_tests
+    tests/TestMain.cpp
+    tests/LexerTests.cpp
+    tests/ParserTests.cpp
+    tests/InterpreterTests.cpp
+)
+target_include_directories(axea_tests PRIVATE tests)
 target_link_libraries(axea_tests PRIVATE axea_compiler)
 add_test(NAME axea_tests COMMAND axea_tests)
 
