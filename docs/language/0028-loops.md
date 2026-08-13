@@ -153,7 +153,7 @@ Compiles and runs correctly end to end — verified for every test in `tests/Llv
 - **Move-tracking resets each loop iteration**, extending the exact same already-documented per-block limitation `0009-ownership.md` describes for `if`/`else`: `CapabilityChecker::checkMovesInExpr` gives a loop body a fresh, empty moved-set, so a value moved on one iteration isn't tracked as moved on the next. Not a new gap — the same one, one level further.
 - **A loop with no reachable `break` types as `unit`, not `never`.** See above.
 - **No labeled loops.** `break`/`continue` always target the innermost enclosing loop; there's no way to target an outer one from a nested loop.
-- **`for`-in is not implemented.** Needs ranges/iterators as a feature of its own — `0001-syntax.md`'s own `for` sketch stays aspirational.
+- **`for`-in over integer ranges is implemented separately.** See `0030-for-loops.md` — pure syntactic sugar over `while`, added after this document.
 
 ---
 

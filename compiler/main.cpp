@@ -114,6 +114,24 @@ namespace
             printExpr(*loopExpr->body, indent + 2);
             return;
         }
+
+        if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+        {
+            std::cout << pad << "ArrayLiteral\n";
+            for (const auto& element : arrayLiteral->elements)
+            {
+                printExpr(*element, indent + 2);
+            }
+            return;
+        }
+
+        if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+        {
+            std::cout << pad << "Index\n";
+            printExpr(*index->object, indent + 2);
+            printExpr(*index->index, indent + 2);
+            return;
+        }
     }
 
     void printStmt(const Stmt& stmt, int indent)
@@ -149,6 +167,15 @@ namespace
             std::cout << pad << "FieldAssign(" << fieldAssign->field << ")\n";
             printExpr(*fieldAssign->object, indent + 2);
             printExpr(*fieldAssign->value, indent + 2);
+            return;
+        }
+
+        if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+        {
+            std::cout << pad << "IndexAssign\n";
+            printExpr(*indexAssign->object, indent + 2);
+            printExpr(*indexAssign->index, indent + 2);
+            printExpr(*indexAssign->value, indent + 2);
             return;
         }
 
@@ -276,6 +303,31 @@ namespace
         {
             std::cout << pad << "field.set %" << fieldSet->object << "." << fieldSet->field
                       << " = %" << fieldSet->value << "\n";
+            return;
+        }
+
+        if (const auto* arrayNew = dynamic_cast<const IrArrayNew*>(&inst))
+        {
+            std::cout << pad << "%" << arrayNew->dest << " = array.new [";
+            for (std::size_t i = 0; i < arrayNew->elements.size(); ++i)
+            {
+                std::cout << (i > 0 ? ", " : "") << "%" << arrayNew->elements[i];
+            }
+            std::cout << "]\n";
+            return;
+        }
+
+        if (const auto* indexGet = dynamic_cast<const IrIndexGet*>(&inst))
+        {
+            std::cout << pad << "%" << indexGet->dest << " = index.get %" << indexGet->object << "["
+                      << "%" << indexGet->index << "]\n";
+            return;
+        }
+
+        if (const auto* indexSet = dynamic_cast<const IrIndexSet*>(&inst))
+        {
+            std::cout << pad << "index.set %" << indexSet->object << "[%" << indexSet->index
+                      << "] = %" << indexSet->value << "\n";
             return;
         }
 

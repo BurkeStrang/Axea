@@ -29,7 +29,19 @@ private:
     std::unique_ptr<Stmt> parseWhile();
     std::unique_ptr<Stmt> parseBreak();
     std::unique_ptr<Stmt> parseContinue();
+    // `for i in a..b { body }` is pure syntactic sugar, desugared here into
+    // `{ i = a  while i < b { body  i++ } }` - no dedicated ForStmt AST node,
+    // matching how `=>` already desugars in parseFunctionDecl. Everything
+    // downstream of the parser handles the result without any awareness
+    // that `for` exists (see docs/language/0029-for-loops.md).
+    std::unique_ptr<Stmt> parseFor();
     Param parseParam();
+    // A type is either a plain identifier ("i32", "User") or an array type
+    // "[elem;N]" (see docs/language/0031-arrays.md), canonicalized here with
+    // no spaces so every downstream consumer (TypeChecker::resolveType,
+    // LlvmIrEmitter::llvmType) can parse the same fixed shape. Replaces every
+    // former `expect(TokenKind::Identifier, "expected ... type")` call site.
+    std::string parseTypeName();
 
     std::unique_ptr<Expr> parseBlock();
     std::unique_ptr<Expr> parseIfExpr();
@@ -43,4 +55,7 @@ private:
 
     std::vector<Token> tokens_;
     std::size_t index_{0};
+    // Unique per for-loop, so nested for-loops' internal counter/end names
+    // (see parseFor) can never collide with each other.
+    int forCounter_{0};
 };

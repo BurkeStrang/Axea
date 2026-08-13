@@ -413,3 +413,199 @@ TEST("Parser builds a bare break with no value")
     EXPECT_TRUE(breakStmt != nullptr);
     EXPECT_TRUE(breakStmt->value == nullptr);
 }
+
+TEST("Parser desugars for-in into an end/counter setup and an infinite while with an early bound "
+     "check")
+{
+    auto program = parseOne("f() { for i in 0..5 { total = total + i } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    EXPECT_EQ(body->statements.size(), static_cast<std::size_t>(1));
+
+    // `for` desugars to a bare ExprStmt wrapping the whole { ... } - no
+    // dedicated ForStmt node (docs/language/0029-for-loops.md).
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* outerBlock = dynamic_cast<BlockExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(outerBlock != nullptr);
+    EXPECT_EQ(outerBlock->statements.size(), static_cast<std::size_t>(3));
+
+    // [ end = b, counter = a - 1, while true { ... } ]
+    auto* endInit = dynamic_cast<AssignmentStmt*>(outerBlock->statements.at(0).get());
+    EXPECT_TRUE(endInit != nullptr);
+    EXPECT_TRUE(!endInit->forceDefine);
+    auto* endValue = dynamic_cast<IntegerExpr*>(endInit->value.get());
+    EXPECT_TRUE(endValue != nullptr);
+    EXPECT_EQ(endValue->value, 5);
+
+    auto* counterInit = dynamic_cast<AssignmentStmt*>(outerBlock->statements.at(1).get());
+    EXPECT_TRUE(counterInit != nullptr);
+    auto* startMinusOne = dynamic_cast<BinaryExpr*>(counterInit->value.get());
+    EXPECT_TRUE(startMinusOne != nullptr);
+    EXPECT_EQ(startMinusOne->op, TokenKind::Minus);
+    auto* startValue = dynamic_cast<IntegerExpr*>(startMinusOne->left.get());
+    EXPECT_TRUE(startValue != nullptr);
+    EXPECT_EQ(startValue->value, 0);
+
+    auto* whileStmt = dynamic_cast<WhileStmt*>(outerBlock->statements.at(2).get());
+    EXPECT_TRUE(whileStmt != nullptr);
+    auto* alwaysTrue = dynamic_cast<BoolExpr*>(whileStmt->condition.get());
+    EXPECT_TRUE(alwaysTrue != nullptr);
+    EXPECT_TRUE(alwaysTrue->value);
+
+    auto* whileBody = dynamic_cast<BlockExpr*>(whileStmt->body.get());
+    EXPECT_TRUE(whileBody != nullptr);
+    // [ counter++, if counter >= end { break }, i = counter (forceDefine), user's own statement ]
+    EXPECT_EQ(whileBody->statements.size(), static_cast<std::size_t>(4));
+
+    auto* increment = dynamic_cast<IncDecStmt*>(whileBody->statements.at(0).get());
+    EXPECT_TRUE(increment != nullptr);
+    EXPECT_TRUE(increment->increment);
+
+    auto* boundCheckStmt = dynamic_cast<ExprStmt*>(whileBody->statements.at(1).get());
+    EXPECT_TRUE(boundCheckStmt != nullptr);
+    auto* boundCheckIf = dynamic_cast<IfExpr*>(boundCheckStmt->expr.get());
+    EXPECT_TRUE(boundCheckIf != nullptr);
+    auto* boundCondition = dynamic_cast<BinaryExpr*>(boundCheckIf->condition.get());
+    EXPECT_TRUE(boundCondition != nullptr);
+    EXPECT_EQ(boundCondition->op, TokenKind::GreaterEqual);
+    auto* thenBlock = dynamic_cast<BlockExpr*>(boundCheckIf->thenBranch.get());
+    EXPECT_TRUE(thenBlock != nullptr);
+    EXPECT_TRUE(dynamic_cast<BreakStmt*>(thenBlock->statements.at(0).get()) != nullptr);
+
+    auto* inductionBind = dynamic_cast<AssignmentStmt*>(whileBody->statements.at(2).get());
+    EXPECT_TRUE(inductionBind != nullptr);
+    EXPECT_EQ(inductionBind->name, "i");
+    EXPECT_TRUE(inductionBind->forceDefine); // must never mutate a same-named outer variable
+}
+
+TEST("Parser gives nested for-loops distinct internal counter names")
+{
+    auto program = parseOne("f() { for i in 0..3 { for i in 0..2 { } } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* outerExprStmt = dynamic_cast<ExprStmt*>(body->statements.at(0).get());
+    auto* outerBlock = dynamic_cast<BlockExpr*>(outerExprStmt->expr.get());
+    auto* outerCounterInit = dynamic_cast<AssignmentStmt*>(outerBlock->statements.at(1).get());
+    auto* outerWhile = dynamic_cast<WhileStmt*>(outerBlock->statements.at(2).get());
+    auto* outerWhileBody = dynamic_cast<BlockExpr*>(outerWhile->body.get());
+
+    // [ counter++, if counter >= end { break }, i = counter (forceDefine), inner for's ExprStmt ]
+    auto* innerExprStmt = dynamic_cast<ExprStmt*>(outerWhileBody->statements.at(3).get());
+    EXPECT_TRUE(innerExprStmt != nullptr);
+    auto* innerBlock = dynamic_cast<BlockExpr*>(innerExprStmt->expr.get());
+    auto* innerCounterInit = dynamic_cast<AssignmentStmt*>(innerBlock->statements.at(1).get());
+
+    EXPECT_TRUE(outerCounterInit->name != innerCounterInit->name);
+}
+
+TEST("Parser builds an array literal expression")
+{
+    auto program = parseOne("x = [1, 2, 3]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* literal = dynamic_cast<ArrayLiteralExpr*>(assignment->value.get());
+    EXPECT_TRUE(literal != nullptr);
+    EXPECT_EQ(literal->elements.size(), static_cast<std::size_t>(3));
+    auto* second = dynamic_cast<IntegerExpr*>(literal->elements.at(1).get());
+    EXPECT_TRUE(second != nullptr);
+    EXPECT_EQ(second->value, 2);
+}
+
+TEST("Parser parses an array type annotation into the canonical no-spaces form")
+{
+    auto program = parseOne("x: [i32; 4] = [1, 2, 3, 4]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    EXPECT_TRUE(assignment->declaredType.has_value());
+    EXPECT_EQ(*assignment->declaredType, "[i32;4]");
+}
+
+TEST("Parser builds an index expression, chaining with field access")
+{
+    auto program = parseOne("f(a: A) -> i32 { a.items[0].x  1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body->statements.at(0).get());
+    auto* outerField = dynamic_cast<FieldExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(outerField != nullptr);
+    EXPECT_EQ(outerField->field, "x");
+
+    auto* index = dynamic_cast<IndexExpr*>(outerField->object.get());
+    EXPECT_TRUE(index != nullptr);
+    auto* indexValue = dynamic_cast<IntegerExpr*>(index->index.get());
+    EXPECT_TRUE(indexValue != nullptr);
+    EXPECT_EQ(indexValue->value, 0);
+
+    auto* innerField = dynamic_cast<FieldExpr*>(index->object.get());
+    EXPECT_TRUE(innerField != nullptr);
+    EXPECT_EQ(innerField->field, "items");
+}
+
+TEST("Parser builds an index-assignment statement")
+{
+    auto program = parseOne("f(values: [i32; 3]) -> i32 { values[0] = 5  1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* indexAssign = dynamic_cast<IndexAssignStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(indexAssign != nullptr);
+
+    auto* object = dynamic_cast<NameExpr*>(indexAssign->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "values");
+
+    auto* index = dynamic_cast<IntegerExpr*>(indexAssign->index.get());
+    EXPECT_TRUE(index != nullptr);
+    EXPECT_EQ(index->value, 0);
+
+    auto* value = dynamic_cast<IntegerExpr*>(indexAssign->value.get());
+    EXPECT_TRUE(value != nullptr);
+    EXPECT_EQ(value->value, 5);
+}
+
+TEST("Parser desugars for-in-over-an-array into a bound/counter setup comparing against .length")
+{
+    auto program = parseOne("f(values: [i32; 3]) { for v in values { total = total + v } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body->statements.at(0).get());
+    auto* outerBlock = dynamic_cast<BlockExpr*>(exprStmt->expr.get());
+    EXPECT_EQ(outerBlock->statements.size(), static_cast<std::size_t>(3));
+
+    // [ __for0_arr = values, __for0_i = -1, while true { ... } ]
+    auto* arrInit = dynamic_cast<AssignmentStmt*>(outerBlock->statements.at(0).get());
+    EXPECT_TRUE(arrInit != nullptr);
+    auto* arrValue = dynamic_cast<NameExpr*>(arrInit->value.get());
+    EXPECT_TRUE(arrValue != nullptr);
+    EXPECT_EQ(arrValue->name, "values");
+
+    auto* counterInit = dynamic_cast<AssignmentStmt*>(outerBlock->statements.at(1).get());
+    auto* counterValue = dynamic_cast<IntegerExpr*>(counterInit->value.get());
+    EXPECT_TRUE(counterValue != nullptr);
+    EXPECT_EQ(counterValue->value, -1);
+
+    auto* whileStmt = dynamic_cast<WhileStmt*>(outerBlock->statements.at(2).get());
+    auto* whileBody = dynamic_cast<BlockExpr*>(whileStmt->body.get());
+    EXPECT_EQ(whileBody->statements.size(), static_cast<std::size_t>(4));
+
+    // Bound check compares against `.length`, not a plain end variable.
+    auto* boundCheckStmt = dynamic_cast<ExprStmt*>(whileBody->statements.at(1).get());
+    auto* boundCheckIf = dynamic_cast<IfExpr*>(boundCheckStmt->expr.get());
+    auto* boundCondition = dynamic_cast<BinaryExpr*>(boundCheckIf->condition.get());
+    auto* lengthField = dynamic_cast<FieldExpr*>(boundCondition->right.get());
+    EXPECT_TRUE(lengthField != nullptr);
+    EXPECT_EQ(lengthField->field, "length");
+
+    // Loop variable is bound via indexing, not a direct counter reference.
+    auto* inductionBind = dynamic_cast<AssignmentStmt*>(whileBody->statements.at(2).get());
+    EXPECT_TRUE(inductionBind != nullptr);
+    EXPECT_EQ(inductionBind->name, "v");
+    EXPECT_TRUE(inductionBind->forceDefine);
+    auto* inductionIndex = dynamic_cast<IndexExpr*>(inductionBind->value.get());
+    EXPECT_TRUE(inductionIndex != nullptr);
+}

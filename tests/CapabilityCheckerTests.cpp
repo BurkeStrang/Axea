@@ -157,3 +157,19 @@ TEST("CapabilityChecker does not track a move as persisting across loop iteratio
                                "x = relay(p)";
     capabilitiesOf(source);
 }
+
+TEST("CapabilityChecker infers write for a parameter whose element is index-assigned")
+{
+    const auto capabilities =
+        capabilitiesOf("bump(values: [i32; 3]) -> i32 { values[0] = 99  return values[0] } "
+                       "x = bump([1, 2, 3])");
+    EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a parameter that is only indexed for reading")
+{
+    const auto capabilities =
+        capabilitiesOf("sum(values: [i32; 3]) -> i32 { return values[0] + values[1] + values[2] } "
+                       "x = sum([1, 2, 3])");
+    EXPECT_TRUE(capabilities.at("sum")[0] == Capability::Read);
+}

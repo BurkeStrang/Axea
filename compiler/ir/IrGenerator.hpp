@@ -4,6 +4,7 @@
 #include "ir/Ir.hpp"
 #include "sema/RegionChecker.hpp"
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,8 +40,18 @@ public:
     // lowering a loop body). Barrier-oblivious, like find()/contains().
     std::unordered_map<std::string, int> snapshot() const;
 
+    // Parallel to the register scope above, but for a name's statically-known
+    // array size (used only to constant-fold `.length` - see
+    // IrGenerator::arrayLengthOf and docs/language/0031-arrays.md). Simple
+    // define-shadows/lookup-walks-chain semantics, same as find(); no
+    // assign()/barrier distinction needed since this is read-only metadata,
+    // never mutated after a name is bound.
+    void defineArrayLength(const std::string& name, int length);
+    std::optional<int> findArrayLength(const std::string& name) const;
+
 private:
     std::unordered_map<std::string, int> registers_;
+    std::unordered_map<std::string, int> arrayLengths_;
     IrScope* parent_;
     bool isBarrier_;
 };
@@ -96,6 +107,18 @@ private:
     // struct-typed parameter, as worth a Drop marker - not the result of a
     // call or a field access.
     bool isObviouslyStructTyped(const Expr& expr, const FunctionDecl& function) const;
+
+    // Best-effort resolution of a fixed array's compile-time-known element
+    // count, used only to constant-fold `.length` (see docs/language/0031-arrays.md
+    // and lowerExpr's FieldExpr case) - IrGenerator has no real type table by
+    // design (every pass re-derives what it needs, e.g. isObviouslyStructTyped
+    // above), so this recognizes just enough shapes for `.length` to be
+    // zero-cost in the common cases: a direct array literal, an array-typed
+    // function parameter, or a name already recorded in `scope`'s parallel
+    // array-length map (populated by lowerStmt's AssignmentStmt case).
+    // `function` is null at top level, mirroring Context::function.
+    std::optional<int>
+    arrayLengthOf(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
     std::unordered_map<std::string, const StructDecl*> structs_;
     // Stack of pre-loop scope snapshots, one per currently-open loop (top =

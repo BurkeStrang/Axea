@@ -16,6 +16,26 @@ namespace
                                      typeName(left) + " and " + typeName(right));
         }
     }
+
+    // Shared by IndexExpr and IndexAssignStmt: a literal (compile-time-known)
+    // index can be range-checked right now, without waiting for a runtime
+    // check (see docs/language/0031-arrays.md). A non-literal index is only
+    // checked at runtime, by the interpreter - mirrors how division by zero
+    // is checked there but not here.
+    void checkLiteralIndexBounds(const Expr& indexExpr, const Type& arrayType)
+    {
+        const auto* literalIndex = dynamic_cast<const IntegerExpr*>(&indexExpr);
+        if (!literalIndex)
+        {
+            return;
+        }
+        if (literalIndex->value < 0 || literalIndex->value >= arrayType.arraySize)
+        {
+            throw std::runtime_error("array index " + std::to_string(literalIndex->value) +
+                                     " out of bounds for array of size " +
+                                     std::to_string(arrayType.arraySize));
+        }
+    }
 } // namespace
 
 std::string typeName(const Type& type)
@@ -27,6 +47,11 @@ std::string typeName(const Type& type)
         case TypeKind::String: return "str";
         case TypeKind::Unit: return "unit";
         case TypeKind::Struct: return type.structName;
+        case TypeKind::Array:
+        {
+            const Type element{type.elementKind, type.elementStructName};
+            return "[" + typeName(element) + "; " + std::to_string(type.arraySize) + "]";
+        }
         default: return "<unsupported type>";
     }
 }
@@ -62,6 +87,29 @@ Type TypeChecker::resolveType(const std::string& name) const
         {"str", TypeKind::String},
         {"unit", TypeKind::Unit},
     };
+
+    // "[elem;N]" - the canonical (no-spaces) form Parser::parseTypeName
+    // always produces (see docs/language/0031-arrays.md).
+    if (!name.empty() && name.front() == '[')
+    {
+        const auto semicolon = name.find(';');
+        const auto closeBracket = name.rfind(']');
+        if (semicolon == std::string::npos || closeBracket == std::string::npos)
+        {
+            throw std::runtime_error("malformed array type: " + name);
+        }
+
+        const std::string elementName = name.substr(1, semicolon - 1);
+        const std::string sizeText = name.substr(semicolon + 1, closeBracket - semicolon - 1);
+        const Type elementType = resolveType(elementName); // one level deep only - no nested arrays
+        if (elementType.kind == TypeKind::Array)
+        {
+            throw std::runtime_error("nested array types are not supported: " + name);
+        }
+
+        return Type{
+            TypeKind::Array, "", elementType.kind, elementType.structName, std::stoi(sizeText)};
+    }
 
     if (const auto it = primitives.find(name); it != primitives.end())
     {
@@ -264,6 +312,34 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         return;
     }
 
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        const Type objectType =
+            checkExpr(*indexAssign->object, env, expectedReturnType, currentLoopBreakTypes);
+        if (objectType.kind != TypeKind::Array)
+        {
+            throw std::runtime_error("indexed assignment into non-array type " +
+                                     typeName(objectType));
+        }
+        const Type indexType =
+            checkExpr(*indexAssign->index, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(indexType == kI32))
+        {
+            throw std::runtime_error("array index must be i32, found " + typeName(indexType));
+        }
+        checkLiteralIndexBounds(*indexAssign->index, objectType);
+
+        const Type elementType{objectType.elementKind, objectType.elementStructName};
+        const Type valueType =
+            checkExpr(*indexAssign->value, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(valueType == elementType))
+        {
+            throw std::runtime_error("array element expects " + typeName(elementType) + ", got " +
+                                     typeName(valueType));
+        }
+        return;
+    }
+
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         const Type targetType =
@@ -333,6 +409,16 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  std::vector<Type>* currentLoopBreakTypes)
 {
     const Type objectType = checkExpr(object, env, expectedReturnType, currentLoopBreakTypes);
+
+    if (objectType.kind == TypeKind::Array)
+    {
+        if (field == "length")
+        {
+            return kI32;
+        }
+        throw std::runtime_error("array has no field '" + field + "' (did you mean 'length'?)");
+    }
+
     if (objectType.kind != TypeKind::Struct)
     {
         throw std::runtime_error("field access on non-struct type " + typeName(objectType));
@@ -509,6 +595,54 @@ Type TypeChecker::checkExpr(const Expr& expr,
         }
 
         return Type{TypeKind::Struct, literal->typeName};
+    }
+
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        if (arrayLiteral->elements.empty())
+        {
+            throw std::runtime_error(
+                "cannot infer the element type of an empty array literal; add a type annotation");
+        }
+
+        const Type elementType = checkExpr(
+            *arrayLiteral->elements.front(), env, expectedReturnType, currentLoopBreakTypes);
+        for (std::size_t i = 1; i < arrayLiteral->elements.size(); ++i)
+        {
+            const Type thisType = checkExpr(
+                *arrayLiteral->elements[i], env, expectedReturnType, currentLoopBreakTypes);
+            if (!(thisType == elementType))
+            {
+                throw std::runtime_error(
+                    "array literal elements must all have the same type, found " +
+                    typeName(elementType) + " and " + typeName(thisType));
+            }
+        }
+
+        return Type{TypeKind::Array,
+                    "",
+                    elementType.kind,
+                    elementType.structName,
+                    static_cast<int>(arrayLiteral->elements.size())};
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        const Type objectType =
+            checkExpr(*index->object, env, expectedReturnType, currentLoopBreakTypes);
+        if (objectType.kind != TypeKind::Array)
+        {
+            throw std::runtime_error("indexing into non-array type " + typeName(objectType));
+        }
+        const Type indexType =
+            checkExpr(*index->index, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(indexType == kI32))
+        {
+            throw std::runtime_error("array index must be i32, found " + typeName(indexType));
+        }
+        checkLiteralIndexBounds(*index->index, objectType);
+
+        return Type{objectType.elementKind, objectType.elementStructName};
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))

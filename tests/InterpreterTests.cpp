@@ -279,3 +279,124 @@ TEST("Interpreter bare break exits a while loop early, discarding no useful valu
                                "x = f()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
 }
+
+TEST("Interpreter for-in sums a range with an exclusive upper bound")
+{
+    const std::string source = "f() -> i32 { "
+                               "  total = 0 "
+                               "  for i in 0..5 { total = total + i } "
+                               "  return total "
+                               "} "
+                               "x = f()"; // 0+1+2+3+4 = 10
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
+}
+
+TEST("Interpreter break inside a for-in loop exits early")
+{
+    const std::string source = "f() -> i32 { "
+                               "  count = 0 "
+                               "  for i in 0..10 { "
+                               "    if i == 4 { break } "
+                               "    count = count + 1 "
+                               "  } "
+                               "  return count "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
+}
+
+TEST("Interpreter continue inside a for-in loop skips the rest of that iteration")
+{
+    const std::string source = "f() -> i32 { "
+                               "  total = 0 "
+                               "  for i in 0..6 { "
+                               "    if i / 2 * 2 == i { continue } "
+                               "    total = total + i "
+                               "  } "
+                               "  return total "
+                               "} "
+                               "x = f()"; // 1 + 3 + 5 = 9
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter for-in's induction variable never leaks or mutates a same-named outer variable")
+{
+    const std::string source = "f() -> i32 { "
+                               "  i = 99 "
+                               "  for i in 0..3 { } "
+                               "  return i "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter nested for-in loops reusing the same variable name do not collide")
+{
+    const std::string source = "f() -> i32 { "
+                               "  total = 0 "
+                               "  for i in 0..3 { for i in 0..2 { total = total + 1 } } "
+                               "  return total "
+                               "} "
+                               "x = f()"; // 3 * 2 = 6
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter builds an array literal and indexes into it")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = [10, 20, 30][1]")), 20);
+}
+
+TEST("Interpreter's .length reports an array literal's element count")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = [10, 20, 30].length")), 3);
+}
+
+TEST("Interpreter index-assignment mutates the shared array instance")
+{
+    const std::string source = "bump(values: [i32; 3]) -> i32 { values[1] = 99  return values[1] } "
+                               "values = [1, 2, 3] "
+                               "called = bump(values) "
+                               "x = values[1]";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter throws on a runtime out-of-range index")
+{
+    EXPECT_THROWS(
+        runProgram("f(i: i32) -> i32 { values = [1, 2, 3]  return values[i] }  x = f(5)"));
+}
+
+TEST("Interpreter throws on index-assignment out of range")
+{
+    EXPECT_THROWS(runProgram("f(i: i32) { values = [1, 2, 3]  values[i] = 9 }  y = f(5)  x = 1"));
+}
+
+TEST("Interpreter for-in-over-an-array sums its elements")
+{
+    const std::string source = "sum(values: [i32; 4]) -> i32 { "
+                               "  total = 0 "
+                               "  for v in values { total = total + v } "
+                               "  return total "
+                               "} "
+                               "x = sum([1, 2, 3, 4])"; // 10
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
+}
+
+TEST("Interpreter break inside a for-in-over-an-array loop exits early")
+{
+    const std::string source = "f(values: [i32; 5]) -> i32 { "
+                               "  count = 0 "
+                               "  for v in values { "
+                               "    if v == 3 { break } "
+                               "    count = count + 1 "
+                               "  } "
+                               "  return count "
+                               "} "
+                               "x = f([1, 2, 3, 4, 5])";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
+}
+
+TEST("Interpreter toString formats an array literally, matching array-literal syntax")
+{
+    EXPECT_EQ(toString(run("x = [1, 2, 3]")), "[1, 2, 3]");
+}

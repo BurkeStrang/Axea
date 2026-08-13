@@ -79,6 +79,12 @@ private:
     std::pair<std::size_t, std::string> fieldIndexAndType(const std::string& structName,
                                                           const std::string& fieldName) const;
     std::string structNameFromPointerType(const std::string& pointerType) const;
+    // "[N x T]*" -> "T" - mirrors structNameFromPointerType, used by
+    // IrIndexGet's type inference and emitIndexGet/emitIndexSet's GEP
+    // (see docs/language/0031-arrays.md).
+    std::string arrayElementType(const std::string& pointerType) const;
+    // "[N x T]*" -> N.
+    int arraySizeFromPointerType(const std::string& pointerType) const;
     std::string typeOf(int reg, const FunctionContext& fctx) const;
 
     void inferTypes(const IrFunction& function, FunctionContext& fctx);
@@ -140,6 +146,13 @@ private:
     void emitStructNew(const IrStructNew& structNew, FunctionContext& fctx);
     void emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx);
     void emitFieldSet(const IrFieldSet& fieldSet, FunctionContext& fctx);
+    // Mirrors emitStructNew/emitFieldGet/emitFieldSet - same malloc + null-GEP
+    // sizeof idiom, and same load/store-via-GEP shape, just addressed by a
+    // register index instead of a named struct field (see
+    // docs/language/0031-arrays.md).
+    void emitArrayNew(const IrArrayNew& arrayNew, FunctionContext& fctx);
+    void emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fctx);
+    void emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fctx);
     void emitBranch(const IrBranch& branch, FunctionContext& fctx);
     // `while`/`loop`. See docs/language/0028-loops.md: loop-carried
     // variables become alloca/load/store (not phi), re-read at the top of

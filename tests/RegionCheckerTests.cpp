@@ -140,3 +140,22 @@ TEST("RegionChecker accepts an owned struct produced entirely within a loop's br
                  "} "
                  "p = make()");
 }
+
+TEST("RegionChecker rejects returning a borrowed array parameter directly")
+{
+    const std::string source = "get_ref(values: [i32; 3]) -> [i32; 3] { return values } "
+                               "x = get_ref([1, 2, 3])";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts a take array parameter being returned directly")
+{
+    checkRegions("consume(take values: [i32; 3]) -> [i32; 3] { return values } "
+                 "x = consume([1, 2, 3])");
+}
+
+TEST("RegionChecker accepts a primitive element read from a borrowed array parameter and returned")
+{
+    checkRegions("first(values: [i32; 3]) -> i32 { return values[0] } "
+                 "x = first([1, 2, 3])");
+}

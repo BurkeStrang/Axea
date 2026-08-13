@@ -169,6 +169,42 @@ TEST("LlvmIrEmitter passes struct parameters by pointer")
     EXPECT_TRUE(ir.find("getelementptr %Point,") != std::string::npos);
 }
 
+TEST("LlvmIrEmitter lowers an array literal to malloc plus a store per element, no named type")
+{
+    auto ir = emitLlvmIr("f() -> i32 { values = [1, 2, 3]  return values[0] }");
+    // Arrays are anonymous LLVM types - no "%<name> = type ..." declaration,
+    // unlike struct (see docs/language/0031-arrays.md).
+    EXPECT_TRUE(ir.find("declare i8* @malloc(i64)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("bitcast i8*") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr [3 x i32], [3 x i32]*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter passes array parameters by pointer to an anonymous array type")
+{
+    auto ir = emitLlvmIr("first(values: [i32; 4]) -> i32 { return values[0] }");
+    EXPECT_TRUE(ir.find("define i32 @first([4 x i32]* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter indexes with the register value, not a constant field index")
+{
+    auto ir = emitLlvmIr("get(values: [i32; 4], i: i32) -> i32 { return values[i] }");
+    // A struct field GEP index is always a literal constant; an array index
+    // is the index register itself, e.g. "i32 %1" rather than "i32 0".
+    EXPECT_TRUE(ir.find("getelementptr [4 x i32], [4 x i32]* %0, i32 0, i32 %1") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter constant-folds .length instead of emitting a runtime load")
+{
+    auto ir = emitLlvmIr("f() -> i32 { values = [1, 2, 3, 4]  return values.length }");
+    // Zero-cost per docs/language/0031-arrays.md: the size is baked in as
+    // "add i32 0, 4" (the same trivial-constant shape every IrConstInt gets),
+    // never a load through a GEP.
+    EXPECT_TRUE(ir.find("add i32 0, 4") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter hoists a string literal into a module-level global constant")
 {
     auto ir = emitLlvmIr("greeting(name: str) -> str { return \"hello\" }");

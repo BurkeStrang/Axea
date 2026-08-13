@@ -41,6 +41,19 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName) const
     {
         return "void";
     }
+    if (!axeaTypeName.empty() && axeaTypeName.front() == '[')
+    {
+        // "[elem;N]" - the canonical, no-spaces form Parser::parseTypeName
+        // always produces (see docs/language/0031-arrays.md). No named type
+        // declaration needed (unlike struct) - LLVM's anonymous array type is
+        // used directly at every reference site.
+        const auto semicolon = axeaTypeName.find(';');
+        const auto closeBracket = axeaTypeName.rfind(']');
+        const std::string elementName = axeaTypeName.substr(1, semicolon - 1);
+        const std::string sizeText =
+            axeaTypeName.substr(semicolon + 1, closeBracket - semicolon - 1);
+        return "[" + sizeText + " x " + llvmType(elementName) + "]*";
+    }
     return "%" + axeaTypeName + "*"; // struct type: always by pointer
 }
 
@@ -192,6 +205,19 @@ std::string LlvmIrEmitter::structNameFromPointerType(const std::string& pointerT
     return pointerType.substr(1, pointerType.size() - 2); // strip leading '%' and trailing '*'
 }
 
+std::string LlvmIrEmitter::arrayElementType(const std::string& pointerType) const
+{
+    // "[N x T]*" - strip the leading "[N x " and trailing "]*".
+    const auto xPos = pointerType.find(" x ");
+    return pointerType.substr(xPos + 3, pointerType.size() - (xPos + 3) - 2);
+}
+
+int LlvmIrEmitter::arraySizeFromPointerType(const std::string& pointerType) const
+{
+    // "[N x T]*" - N is everything between the leading '[' and the first ' '.
+    return std::stoi(pointerType.substr(1, pointerType.find(' ') - 1));
+}
+
 std::string LlvmIrEmitter::typeOf(int reg, const FunctionContext& fctx) const
 {
     if (reg == -1)
@@ -253,6 +279,22 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             const std::string structName = structNameFromPointerType(objectType);
             fctx.registerTypes[fieldGet->dest] =
                 fieldIndexAndType(structName, fieldGet->field).second;
+        }
+        else if (const auto* arrayNew = dynamic_cast<const IrArrayNew*>(inst.get()))
+        {
+            // Every element register is already type-inferred by this point
+            // (elements are always lowered, and therefore appear earlier in
+            // this same list, before the IrArrayNew that references them) -
+            // TypeChecker already guarantees every element agrees, so the
+            // first one is representative (same pattern as IrLoop's break
+            // values below). See docs/language/0031-arrays.md.
+            const std::string elementType = typeOf(arrayNew->elements.front(), fctx);
+            fctx.registerTypes[arrayNew->dest] =
+                "[" + std::to_string(arrayNew->elements.size()) + " x " + elementType + "]*";
+        }
+        else if (const auto* indexGet = dynamic_cast<const IrIndexGet*>(inst.get()))
+        {
+            fctx.registerTypes[indexGet->dest] = arrayElementType(typeOf(indexGet->object, fctx));
         }
         else if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get()))
         {
@@ -406,6 +448,70 @@ void LlvmIrEmitter::emitFieldSet(const IrFieldSet& fieldSet, FunctionContext& fc
               << " " << ref(fieldSet.object, fctx) << ", i32 0, i32 " << index << "\n";
     *fctx.out << "  store " << fieldLlvmType << " " << ref(fieldSet.value, fctx) << ", "
               << fieldLlvmType << "* %" << fieldPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitArrayNew(const IrArrayNew& arrayNew, FunctionContext& fctx)
+{
+    const std::string elementType = typeOf(arrayNew.elements.front(), fctx);
+    const std::string llvmArrayType =
+        "[" + std::to_string(arrayNew.elements.size()) + " x " + elementType + "]";
+    const std::string pointerType = llvmArrayType + "*";
+
+    // sizeof([N x T]) via the standard null-pointer GEP idiom - same idiom as
+    // emitStructNew, avoiding hand-computed byte sizes.
+    const int sizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << llvmArrayType << ", " << pointerType
+              << " null, i32 1\n";
+    const int sizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
+              << " to i64\n";
+
+    const int rawPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
+
+    const int destReg = defineRegister(arrayNew.dest, fctx);
+    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
+              << "\n";
+
+    for (std::size_t i = 0; i < arrayNew.elements.size(); ++i)
+    {
+        const int elementPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elementPtrReg << " = getelementptr " << llvmArrayType << ", "
+                  << pointerType << " " << ref(arrayNew.dest, fctx) << ", i32 0, i32 " << i << "\n";
+        *fctx.out << "  store " << elementType << " " << ref(arrayNew.elements[i], fctx) << ", "
+                  << elementType << "* %" << elementPtrReg << "\n";
+    }
+}
+
+void LlvmIrEmitter::emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fctx)
+{
+    const std::string objectType = typeOf(indexGet.object, fctx);
+    const std::string llvmArrayType =
+        objectType.substr(0, objectType.size() - 1); // strip trailing '*'
+    const std::string elementType = arrayElementType(objectType);
+
+    const int elementPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << llvmArrayType << ", "
+              << objectType << " " << ref(indexGet.object, fctx) << ", i32 0, i32 "
+              << ref(indexGet.index, fctx) << "\n";
+    const int destReg = defineRegister(indexGet.dest, fctx);
+    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
+              << elementPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fctx)
+{
+    const std::string objectType = typeOf(indexSet.object, fctx);
+    const std::string llvmArrayType =
+        objectType.substr(0, objectType.size() - 1); // strip trailing '*'
+    const std::string elementType = arrayElementType(objectType);
+
+    const int elementPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << llvmArrayType << ", "
+              << objectType << " " << ref(indexSet.object, fctx) << ", i32 0, i32 "
+              << ref(indexSet.index, fctx) << "\n";
+    *fctx.out << "  store " << elementType << " " << ref(indexSet.value, fctx) << ", "
+              << elementType << "* %" << elementPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitBranch(const IrBranch& branch, FunctionContext& fctx)
@@ -694,6 +800,21 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitFieldSet(*fieldSet, fctx);
             continue;
         }
+        if (const auto* arrayNew = dynamic_cast<const IrArrayNew*>(inst.get()))
+        {
+            emitArrayNew(*arrayNew, fctx);
+            continue;
+        }
+        if (const auto* indexGet = dynamic_cast<const IrIndexGet*>(inst.get()))
+        {
+            emitIndexGet(*indexGet, fctx);
+            continue;
+        }
+        if (const auto* indexSet = dynamic_cast<const IrIndexSet*>(inst.get()))
+        {
+            emitIndexSet(*indexSet, fctx);
+            continue;
+        }
         if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get()))
         {
             emitBranch(*branch, fctx);
@@ -923,6 +1044,75 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
         {
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << strFmt << ", i8* " << namePtr << ", i8* " << unitStr << ")\n";
+        }
+        else if (!llvmTypeStr.empty() && llvmTypeStr.front() == '[')
+        {
+            // Fixed array (see docs/language/0031-arrays.md): unlike struct,
+            // there's no named per-shape helper function to call (arrays are
+            // anonymous LLVM types) - the element count is statically known
+            // right here, so the N element loads/prints are unrolled inline
+            // instead, using the same per-element-type branching
+            // emitStructPrintHelpers uses for struct fields.
+            const std::string elementType = arrayElementType(llvmTypeStr);
+            const int size = arraySizeFromPointerType(llvmTypeStr);
+            const std::string llvmArrayType =
+                llvmTypeStr.substr(0, llvmTypeStr.size() - 1); // strip trailing '*'
+            const std::string openBracket = stringPtrConstant("[");
+            const std::string closeBracket = stringPtrConstant("]");
+            const std::string comma = stringPtrConstant(", ");
+            const std::string bareIntFmt = stringPtrConstant("%d");
+            const std::string bareStrFmt = stringPtrConstant("%s");
+
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << structPrefixFmt << ", i8* " << namePtr << ")\n";
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << openBracket << ")\n";
+
+            for (int i = 0; i < size; ++i)
+            {
+                if (i > 0)
+                {
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << comma << ")\n";
+                }
+
+                const int elementPtrReg = allocateRegister(fctx);
+                out << "  %" << elementPtrReg << " = getelementptr " << llvmArrayType << ", "
+                    << llvmTypeStr << " " << ref(axeaReg, fctx) << ", i32 0, i32 " << i << "\n";
+                const int elementValReg = allocateRegister(fctx);
+                out << "  %" << elementValReg << " = load " << elementType << ", " << elementType
+                    << "* %" << elementPtrReg << "\n";
+
+                if (elementType == "i32")
+                {
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareIntFmt << ", i32 %" << elementValReg << ")\n";
+                }
+                else if (elementType == "i1")
+                {
+                    const int selReg = allocateRegister(fctx);
+                    out << "  %" << selReg << " = select i1 %" << elementValReg << ", i8* "
+                        << trueStr << ", i8* " << falseStr << "\n";
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* %" << selReg << ")\n";
+                }
+                else if (elementType == "i8*")
+                {
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* %" << elementValReg << ")\n";
+                }
+                else // nested struct pointer
+                {
+                    const std::string nestedStructName = structNameFromPointerType(elementType);
+                    out << "  call void @axea.print." << nestedStructName << "(" << elementType
+                        << " %" << elementValReg << ")\n";
+                }
+            }
+
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << closeBracket << ")\n";
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << newline << ")\n";
         }
         else // struct pointer
         {

@@ -131,9 +131,18 @@ Token Lexer::nextToken()
         case ')': return makeToken(TokenKind::RightParen, start, startLine, startColumn);
         case '{': return makeToken(TokenKind::LeftBrace, start, startLine, startColumn);
         case '}': return makeToken(TokenKind::RightBrace, start, startLine, startColumn);
+        case '[': return makeToken(TokenKind::LeftBracket, start, startLine, startColumn);
+        case ']': return makeToken(TokenKind::RightBracket, start, startLine, startColumn);
         case ':': return makeToken(TokenKind::Colon, start, startLine, startColumn);
+        case ';': return makeToken(TokenKind::Semicolon, start, startLine, startColumn);
         case ',': return makeToken(TokenKind::Comma, start, startLine, startColumn);
-        case '.': return makeToken(TokenKind::Dot, start, startLine, startColumn);
+        case '.':
+            if (current() == '.')
+            {
+                advance();
+                return makeToken(TokenKind::DotDot, start, startLine, startColumn);
+            }
+            return makeToken(TokenKind::Dot, start, startLine, startColumn);
         case '=':
             if (current() == '=')
             {
@@ -224,7 +233,9 @@ Token Lexer::lexIdentifierOrKeyword()
         {"while", TokenKind::While},
         {"loop", TokenKind::Loop},
         {"break", TokenKind::Break},
-        {"continue", TokenKind::Continue}};
+        {"continue", TokenKind::Continue},
+        {"for", TokenKind::For},
+        {"in", TokenKind::In}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {

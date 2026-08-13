@@ -100,6 +100,20 @@ std::unordered_map<std::string, int> IrScope::snapshot() const
     return result;
 }
 
+void IrScope::defineArrayLength(const std::string& name, int length)
+{
+    arrayLengths_[name] = length;
+}
+
+std::optional<int> IrScope::findArrayLength(const std::string& name) const
+{
+    if (const auto it = arrayLengths_.find(name); it != arrayLengths_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findArrayLength(name) : std::nullopt;
+}
+
 int IrGenerator::freshRegister(Context& ctx)
 {
     return (*ctx.registerCount)++;
@@ -146,6 +160,38 @@ bool IrGenerator::isObviouslyStructTyped(const Expr& expr, const FunctionDecl& f
         }
     }
     return false;
+}
+
+std::optional<int> IrGenerator::arrayLengthOf(const Expr& expr,
+                                              const FunctionDecl* function,
+                                              const IrScope& scope) const
+{
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        return static_cast<int>(arrayLiteral->elements.size());
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name && !param.type.empty() && param.type.front() == '[')
+                {
+                    // "[elem;N]" - the canonical, no-spaces form
+                    // Parser::parseTypeName always produces.
+                    const auto semicolon = param.type.find(';');
+                    const auto closeBracket = param.type.rfind(']');
+                    return std::stoi(
+                        param.type.substr(semicolon + 1, closeBracket - semicolon - 1));
+                }
+            }
+        }
+        return scope.findArrayLength(name->name);
+    }
+
+    return std::nullopt;
 }
 
 int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
@@ -203,10 +249,49 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
+        // `.length` on a fixed array is always compile-time-known (see
+        // docs/language/0031-arrays.md) - constant-fold it directly rather
+        // than emitting a runtime IrFieldGet, so it's truly zero-cost. Falls
+        // through to the normal struct-field path below for anything
+        // arrayLengthOf can't resolve, including a genuine struct field that
+        // happens to be named "length".
+        if (field->field == "length")
+        {
+            if (const auto length = arrayLengthOf(*field->object, ctx.function, scope))
+            {
+                auto constInst = std::make_unique<IrConstInt>();
+                constInst->value = *length;
+                return emit(ctx, std::move(constInst));
+            }
+        }
+
         const int object = lowerExpr(*field->object, scope, ctx);
         auto inst = std::make_unique<IrFieldGet>();
         inst->object = object;
         inst->field = field->field;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        std::vector<int> elements;
+        elements.reserve(arrayLiteral->elements.size());
+        for (const auto& element : arrayLiteral->elements)
+        {
+            elements.push_back(lowerExpr(*element, scope, ctx));
+        }
+        auto inst = std::make_unique<IrArrayNew>();
+        inst->elements = std::move(elements);
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        const int object = lowerExpr(*index->object, scope, ctx);
+        const int indexReg = lowerExpr(*index->index, scope, ctx);
+        auto inst = std::make_unique<IrIndexGet>();
+        inst->object = object;
+        inst->index = indexReg;
         return emit(ctx, std::move(inst));
     }
 
@@ -296,7 +381,7 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         // `n = n + 1` needs to actually update the outer `n`, not shadow a
         // throwaway per-traversal copy (mirrors the same fix in
         // Interpreter::execute; see docs/language/0028-loops.md).
-        if (scope.contains(assignment->name))
+        if (!assignment->forceDefine && scope.contains(assignment->name))
         {
             scope.assign(assignment->name, value);
         }
@@ -308,6 +393,15 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             isObviouslyStructTyped(*assignment->value, *ctx.function))
         {
             ctx.structLocals->push_back(value);
+        }
+        // Records this name's array length, if known, so a later `.length`
+        // on it can constant-fold (see arrayLengthOf and
+        // docs/language/0031-arrays.md). Always local to this scope, mirroring
+        // define() above - not assign()'s walk-up-and-mutate, since this is
+        // read-only metadata about the binding, not the binding itself.
+        if (const auto length = arrayLengthOf(*assignment->value, ctx.function, scope))
+        {
+            scope.defineArrayLength(assignment->name, *length);
         }
         return;
     }
@@ -333,6 +427,19 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         auto inst = std::make_unique<IrFieldSet>();
         inst->object = object;
         inst->field = fieldAssign->field;
+        inst->value = value;
+        emitVoid(ctx, std::move(inst));
+        return;
+    }
+
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        const int object = lowerExpr(*indexAssign->object, scope, ctx);
+        const int indexReg = lowerExpr(*indexAssign->index, scope, ctx);
+        const int value = lowerExpr(*indexAssign->value, scope, ctx);
+        auto inst = std::make_unique<IrIndexSet>();
+        inst->object = object;
+        inst->index = indexReg;
         inst->value = value;
         emitVoid(ctx, std::move(inst));
         return;

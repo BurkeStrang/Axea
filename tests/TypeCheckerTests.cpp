@@ -187,3 +187,62 @@ TEST("TypeChecker scopes break/continue validity to the innermost loop, correctl
 {
     check("f() { while true { while true { break } continue } }");
 }
+
+TEST("TypeChecker accepts a well-typed array literal, indexing, .length, and index-assignment")
+{
+    check("f(values: [i32; 3]) -> i32 { "
+          "  values[0] = 99 "
+          "  return values[0] + values.length "
+          "} "
+          "x = f([1, 2, 3])");
+}
+
+TEST("TypeChecker rejects an array literal with mismatched element types")
+{
+    EXPECT_THROWS(check(R"(x = [1, true, 3])"));
+}
+
+TEST("TypeChecker rejects an empty array literal with no type annotation to infer from")
+{
+    EXPECT_THROWS(check("x = []"));
+}
+
+TEST("TypeChecker rejects an array literal that does not match its declared type")
+{
+    EXPECT_THROWS(check(R"(x: [i32; 3] = ["a", "b", "c"])"));
+}
+
+TEST("TypeChecker rejects a compile-time out-of-range literal index")
+{
+    EXPECT_THROWS(check("x: [i32; 3] = [1, 2, 3]  y = x[5]"));
+}
+
+TEST("TypeChecker rejects a literal index equal to the array size (exclusive upper bound)")
+{
+    EXPECT_THROWS(check("x: [i32; 3] = [1, 2, 3]  y = x[3]"));
+}
+
+TEST("TypeChecker rejects indexing into a non-array type")
+{
+    EXPECT_THROWS(check("x = 5  y = x[0]"));
+}
+
+TEST("TypeChecker rejects a non-i32 index")
+{
+    EXPECT_THROWS(check("x: [i32; 3] = [1, 2, 3]  y = x[true]"));
+}
+
+TEST("TypeChecker types .length as i32")
+{
+    check("x: [i32; 3] = [1, 2, 3]  y: i32 = x.length");
+}
+
+TEST("TypeChecker rejects an unknown field access on an array other than length")
+{
+    EXPECT_THROWS(check("x: [i32; 3] = [1, 2, 3]  y = x.size"));
+}
+
+TEST("TypeChecker rejects an index-assignment whose value does not match the element type")
+{
+    EXPECT_THROWS(check(R"(f(values: [i32; 3]) { values[0] = "oops" })"));
+}

@@ -72,6 +72,20 @@ std::string toString(const Value& value)
         result += " }";
         return result;
     }
+    if (const auto* array = std::get_if<std::shared_ptr<ArrayInstance>>(&value))
+    {
+        std::string result = "[";
+        for (std::size_t i = 0; i < (*array)->elements.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ", ";
+            }
+            result += toString((*array)->elements[i]);
+        }
+        result += "]";
+        return result;
+    }
     return "()";
 }
 
@@ -162,7 +176,7 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         // checks, not shadow a throwaway per-iteration copy (see
         // docs/language/0028-loops.md).
         Value value = evaluate(*assignment->value, env);
-        if (env.contains(assignment->name))
+        if (!assignment->forceDefine && env.contains(assignment->name))
         {
             env.assign(assignment->name, std::move(value));
         }
@@ -204,6 +218,26 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
             }
         }
         throw std::runtime_error("no such field: " + fieldAssign->field);
+    }
+
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        auto objectValue = evaluate(*indexAssign->object, env);
+        const auto* array = std::get_if<std::shared_ptr<ArrayInstance>>(&objectValue);
+        if (!array)
+        {
+            throw std::runtime_error("indexed assignment on a non-array value");
+        }
+        const std::int64_t indexValue = asInt(evaluate(*indexAssign->index, env));
+        if (indexValue < 0 || static_cast<std::size_t>(indexValue) >= (*array)->elements.size())
+        {
+            throw std::runtime_error("array index " + std::to_string(indexValue) +
+                                     " out of bounds for array of size " +
+                                     std::to_string((*array)->elements.size()));
+        }
+        (*array)->elements[static_cast<std::size_t>(indexValue)] =
+            evaluate(*indexAssign->value, env);
+        return;
     }
 
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
@@ -383,6 +417,16 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
         auto objectValue = evaluate(*field->object, env);
+
+        if (const auto* array = std::get_if<std::shared_ptr<ArrayInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*array)->elements.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
         const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&objectValue);
         if (!instance)
         {
@@ -396,6 +440,35 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             }
         }
         throw std::runtime_error("no such field: " + field->field);
+    }
+
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        auto instance = std::make_shared<ArrayInstance>();
+        instance->elements.reserve(arrayLiteral->elements.size());
+        for (const auto& element : arrayLiteral->elements)
+        {
+            instance->elements.push_back(evaluate(*element, env));
+        }
+        return instance;
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        auto objectValue = evaluate(*index->object, env);
+        const auto* array = std::get_if<std::shared_ptr<ArrayInstance>>(&objectValue);
+        if (!array)
+        {
+            throw std::runtime_error("indexing a non-array value");
+        }
+        const std::int64_t indexValue = asInt(evaluate(*index->index, env));
+        if (indexValue < 0 || static_cast<std::size_t>(indexValue) >= (*array)->elements.size())
+        {
+            throw std::runtime_error("array index " + std::to_string(indexValue) +
+                                     " out of bounds for array of size " +
+                                     std::to_string((*array)->elements.size()));
+        }
+        return (*array)->elements[static_cast<std::size_t>(indexValue)];
     }
 
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))

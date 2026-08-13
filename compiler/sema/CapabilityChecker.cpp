@@ -19,9 +19,19 @@ std::optional<std::size_t> CapabilityChecker::rootParamIndex(const Expr& expr,
                                                              const FunctionDecl& function)
 {
     const Expr* current = &expr;
-    while (const auto* field = dynamic_cast<const FieldExpr*>(current))
+    while (true)
     {
-        current = field->object.get();
+        if (const auto* field = dynamic_cast<const FieldExpr*>(current))
+        {
+            current = field->object.get();
+            continue;
+        }
+        if (const auto* index = dynamic_cast<const IndexExpr*>(current))
+        {
+            current = index->object.get();
+            continue;
+        }
+        break;
     }
     if (const auto* name = dynamic_cast<const NameExpr*>(current))
     {
@@ -101,6 +111,22 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            inferExpr(*element, function, changed);
+        }
+        return;
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        inferExpr(*index->object, function, changed);
+        inferExpr(*index->index, function, changed);
+        return;
+    }
+
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
         for (const auto& argument : call->arguments)
@@ -171,6 +197,17 @@ void CapabilityChecker::inferStmt(const Stmt& stmt, const FunctionDecl& function
         return;
     }
 
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        if (const auto paramIndex = rootParamIndex(*indexAssign->object, function))
+        {
+            raise(function.name, *paramIndex, Capability::Write, changed);
+        }
+        inferExpr(*indexAssign->index, function, changed);
+        inferExpr(*indexAssign->value, function, changed);
+        return;
+    }
+
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         // A plain-name target (`n++`) only rebinds the function's own local
@@ -237,6 +274,22 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         {
             checkMovesInExpr(*valueExpr, function, moved);
         }
+        return;
+    }
+
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            checkMovesInExpr(*element, function, moved);
+        }
+        return;
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        checkMovesInExpr(*index->object, function, moved);
+        checkMovesInExpr(*index->index, function, moved);
         return;
     }
 
@@ -337,6 +390,14 @@ void CapabilityChecker::checkMovesInStmt(const Stmt& stmt,
     {
         checkMovesInExpr(*fieldAssign->object, function, moved);
         checkMovesInExpr(*fieldAssign->value, function, moved);
+        return;
+    }
+
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        checkMovesInExpr(*indexAssign->object, function, moved);
+        checkMovesInExpr(*indexAssign->index, function, moved);
+        checkMovesInExpr(*indexAssign->value, function, moved);
         return;
     }
 

@@ -71,6 +71,30 @@ struct IrFieldSet final : IrInst
     int value;
 };
 
+// `[e1, e2, ...]`. No element-type field: every element register's LLVM type
+// is already inferred by the time this is reached (elements are always
+// lowered, and therefore type-inferred, before the IrArrayNew instruction
+// that references them), so LlvmIrEmitter derives the array's element type
+// from elements.front() rather than needing it carried here - see
+// docs/language/0031-arrays.md.
+struct IrArrayNew final : IrInst
+{
+    std::vector<int> elements;
+};
+
+struct IrIndexGet final : IrInst
+{
+    int object;
+    int index;
+};
+
+struct IrIndexSet final : IrInst
+{
+    int object;
+    int index;
+    int value;
+};
+
 // `if`/`else`, kept structured: two nested instruction lists rather than
 // separate labeled blocks, since the language has no loops yet and this
 // avoids needing real CFG merging/phi nodes for something nothing downstream

@@ -23,5 +23,16 @@ firstMultipleOver(limit: i32, step: i32) -> i32
     }
 }
 
+sumRange(start: i32, end: i32) -> i32
+{
+    total = 0
+    for n in start..end
+    {
+        total = total + n
+    }
+    return total
+}
+
 sum = sumTo(10)
 firstOver = firstMultipleOver(20, 3)
+rangeSum = sumRange(1, 5)

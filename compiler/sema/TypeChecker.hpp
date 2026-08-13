@@ -9,9 +9,10 @@
 
 // Matches docs/language/0005-type-system.md's "Initial Type Checker
 // Representation" and 0002-grammar.md's primitive_type list. Only Bool, I32,
-// String, Unit, and Struct have checking logic wired up this phase; the rest
-// are declared for architectural fidelity and reachable only as an
-// "unsupported type" error via resolveType.
+// String, Unit, Struct, and Array (docs/language/0031-arrays.md) have
+// checking logic wired up this phase; the rest are declared for
+// architectural fidelity and reachable only as an "unsupported type" error
+// via resolveType.
 enum class TypeKind
 {
     Bool,
@@ -45,13 +46,23 @@ enum class TypeKind
     Generic,
     Reference,
     Pointer,
-    Slice
+    Slice,
+    Array
 };
 
 struct Type
 {
     TypeKind kind;
     std::string structName; // populated only when kind == TypeKind::Struct
+
+    // Populated only when kind == TypeKind::Array (see docs/language/0031-arrays.md).
+    // Flat, not recursive - no nested array types in this phase. Deliberately
+    // not a std::shared_ptr<Type> element: that would make the defaulted
+    // operator== below compare pointer identity instead of structural
+    // equality, silently breaking every array-type comparison.
+    TypeKind elementKind{};
+    std::string elementStructName{};
+    int arraySize{};
 
     bool operator==(const Type&) const = default;
 };

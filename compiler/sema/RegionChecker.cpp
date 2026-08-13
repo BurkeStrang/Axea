@@ -2,6 +2,23 @@
 
 #include <stdexcept>
 
+namespace
+{
+    bool isArrayTypeString(const std::string& type)
+    {
+        return !type.empty() && type.front() == '[';
+    }
+
+    // "[elem;N]" -> "elem" - the canonical, no-spaces form
+    // Parser::parseTypeName always produces (see docs/language/0031-arrays.md).
+    // Only used to decide whether an array's element type is itself
+    // struct-typed, for IndexExpr's aliasing propagation.
+    std::string arrayElementTypeName(const std::string& type)
+    {
+        return type.substr(1, type.find(';') - 1);
+    }
+} // namespace
+
 RegionEnv::RegionEnv(const RegionEnv* parent)
     : parent_(parent)
 {
@@ -63,21 +80,35 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     {
         const auto& param = function.params[i];
         const std::string structType = structs_.contains(param.type) ? param.type : "";
-        // Only struct-typed parameters carry any aliasing risk (Value stores
-        // primitives by value); a primitive parameter is always Owned
-        // regardless of its read/write/take capability.
-        const bool borrowed = !structType.empty() && capabilities[i] != Capability::Take;
+        std::string elementStructType;
+        const bool isArray = isArrayTypeString(param.type);
+        if (isArray)
+        {
+            const std::string elementName = arrayElementTypeName(param.type);
+            if (structs_.contains(elementName))
+            {
+                elementStructType = elementName;
+            }
+        }
+        // Struct-typed and array-typed parameters both carry aliasing risk
+        // (both are heap-allocated, reference-semantics values - see
+        // docs/language/0031-arrays.md); a primitive parameter is always
+        // Owned regardless of its read/write/take capability.
+        const bool borrowed =
+            (!structType.empty() || isArray) && capabilities[i] != Capability::Take;
         env.define(param.name,
                    RegionInfo{borrowed ? Region::Borrowed : Region::Owned,
                               borrowed ? param.name : "",
-                              structType});
+                              structType,
+                              elementStructType});
         paramRegions.push_back(borrowed ? Region::Borrowed : Region::Owned);
     }
     regions_[function.name] = std::move(paramRegions);
 
-    // Nothing can leak through a non-struct return type: primitives are
-    // always copied by value, and unit carries no value at all.
-    if (!function.returnType || !structs_.contains(*function.returnType))
+    // Nothing can leak through a non-struct, non-array return type:
+    // primitives are always copied by value, and unit carries no value at all.
+    if (!function.returnType ||
+        (!structs_.contains(*function.returnType) && !isArrayTypeString(*function.returnType)))
     {
         return;
     }
@@ -155,6 +186,49 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
             return RegionInfo{Region::Borrowed, borrowed.sourceParam, literal->typeName};
         }
         return RegionInfo{Region::Owned, "", literal->typeName};
+    }
+
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        RegionInfo borrowed{Region::Owned, "", ""};
+        bool anyBorrowed = false;
+        std::string elementStructType;
+        for (const auto& element : arrayLiteral->elements)
+        {
+            const RegionInfo elementInfo =
+                regionOfExpr(*element, env, function, currentLoopBreakRegions);
+            if (!elementInfo.structType.empty())
+            {
+                elementStructType = elementInfo.structType;
+            }
+            if (elementInfo.kind == Region::Borrowed && !anyBorrowed)
+            {
+                anyBorrowed = true;
+                borrowed = elementInfo;
+            }
+        }
+        if (anyBorrowed)
+        {
+            return RegionInfo{Region::Borrowed, borrowed.sourceParam, "", elementStructType};
+        }
+        return RegionInfo{Region::Owned, "", "", elementStructType};
+    }
+
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        regionOfExpr(*index->index, env, function, currentLoopBreakRegions);
+        const RegionInfo objectInfo =
+            regionOfExpr(*index->object, env, function, currentLoopBreakRegions);
+        if (!objectInfo.elementStructType.empty())
+        {
+            // Indexing into an array-of-structs aliases the same shared
+            // instance as the array itself - mirrors FieldExpr's identical
+            // rule for a struct-typed field.
+            return RegionInfo{
+                objectInfo.kind, objectInfo.sourceParam, objectInfo.elementStructType};
+        }
+        // Primitive-element array: indexing always yields a fresh copy.
+        return RegionInfo{Region::Owned, "", ""};
     }
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
@@ -268,6 +342,14 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
     {
         regionOfExpr(*fieldAssign->object, env, function, currentLoopBreakRegions);
         regionOfExpr(*fieldAssign->value, env, function, currentLoopBreakRegions);
+        return;
+    }
+
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        regionOfExpr(*indexAssign->object, env, function, currentLoopBreakRegions);
+        regionOfExpr(*indexAssign->index, env, function, currentLoopBreakRegions);
+        regionOfExpr(*indexAssign->value, env, function, currentLoopBreakRegions);
         return;
     }
 

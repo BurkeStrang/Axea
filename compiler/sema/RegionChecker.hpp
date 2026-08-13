@@ -35,6 +35,12 @@ struct RegionInfo
     Region kind;
     std::string sourceParam; // populated when kind == Region::Borrowed, for error messages
     std::string structType;  // resolved struct type name; empty when not struct-typed
+    // Populated only when this value is an array whose element type is
+    // itself struct-typed (see docs/language/0031-arrays.md) - kept separate
+    // from structType (which means "this value itself is a struct", used by
+    // FieldExpr) so IndexExpr can promote it into the *result's* own
+    // structType, letting `arr[i].field` chains resolve correctly.
+    std::string elementStructType{};
 };
 
 class RegionEnv

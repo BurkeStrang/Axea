@@ -1,0 +1,21 @@
+sum(values: [i32; 4]) -> i32
+{
+    total = 0
+    for v in values
+    {
+        total = total + v
+    }
+    return total
+}
+
+bumpFirst(values: [i32; 4]) -> i32
+{
+    values[0] = values[0] + 1
+    return values[0]
+}
+
+numbers = [10, 20, 30, 40]
+total = sum(numbers)
+bumped = bumpFirst(numbers)
+firstNow = numbers[0]
+count = numbers.length

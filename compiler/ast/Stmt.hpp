@@ -49,16 +49,28 @@ struct AssignmentStmt final : Stmt
 {
     AssignmentStmt(std::string name,
                    std::optional<std::string> declaredType,
-                   std::unique_ptr<Expr> value)
+                   std::unique_ptr<Expr> value,
+                   bool forceDefine = false)
         : name(std::move(name)),
           declaredType(std::move(declaredType)),
-          value(std::move(value))
+          value(std::move(value)),
+          forceDefine(forceDefine)
     {
     }
 
     std::string name;
     std::optional<std::string> declaredType; // e.g. "i32"; empty if not annotated
     std::unique_ptr<Expr> value;
+    // True only for compiler-generated assignments (currently: a `for`
+    // loop's desugared induction-variable binding, see Parser::parseFor)
+    // that must always introduce a fresh binding regardless of whether a
+    // same-named variable already exists in an enclosing scope - never set
+    // by anything parsed directly from user syntax. Without this, `for i in
+    // ...` would silently mutate an unrelated outer `i` if one happened to
+    // exist, under the "assignment mutates an existing outer binding" rule
+    // (docs/language/0028-loops.md) - a loop induction variable must always
+    // be its own binding. See docs/language/0029-for-loops.md.
+    bool forceDefine = false;
 };
 
 struct ReturnStmt final : Stmt
@@ -128,6 +140,24 @@ struct FieldAssignStmt final : Stmt
 
     std::unique_ptr<Expr> object;
     std::string field;
+    std::unique_ptr<Expr> value;
+};
+
+// `object[index] = value`. `object` may itself be an IndexExpr/FieldExpr, so
+// nested targets (`a[i][j] = v`, `a[i].field = v`) fall out for free.
+struct IndexAssignStmt final : Stmt
+{
+    IndexAssignStmt(std::unique_ptr<Expr> object,
+                    std::unique_ptr<Expr> index,
+                    std::unique_ptr<Expr> value)
+        : object(std::move(object)),
+          index(std::move(index)),
+          value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> index;
     std::unique_ptr<Expr> value;
 };
 

@@ -12,15 +12,27 @@
 #include <vector>
 
 struct StructInstance;
+struct ArrayInstance;
 
-using Value =
-    std::variant<std::int64_t, bool, std::string, std::shared_ptr<StructInstance>, std::monostate>;
+using Value = std::variant<std::int64_t,
+                           bool,
+                           std::string,
+                           std::shared_ptr<StructInstance>,
+                           std::shared_ptr<ArrayInstance>,
+                           std::monostate>;
 
 struct StructInstance
 {
     std::string typeName;
     std::vector<std::pair<std::string, Value>>
         fields; // declared field order, for deterministic printing
+};
+
+// Reference semantics (always accessed via shared_ptr), mirroring
+// StructInstance - see docs/language/0031-arrays.md.
+struct ArrayInstance
+{
+    std::vector<Value> elements;
 };
 
 std::string toString(const Value& value);

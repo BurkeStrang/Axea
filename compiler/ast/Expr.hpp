@@ -133,3 +133,30 @@ struct StructLiteralExpr final : Expr
     std::string typeName;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields;
 };
+
+// `[e1, e2, ...]`. Element type and size are both inferred from the elements
+// themselves (see docs/language/0031-arrays.md) - there is no bare `[]`
+// without a type annotation to infer from.
+struct ArrayLiteralExpr final : Expr
+{
+    explicit ArrayLiteralExpr(std::vector<std::unique_ptr<Expr>> elements)
+        : elements(std::move(elements))
+    {
+    }
+
+    std::vector<std::unique_ptr<Expr>> elements;
+};
+
+// `object[index]`. `object` may itself be an IndexExpr/FieldExpr, so nested
+// chains (`a[i][j]`, `a[i].field`) fall out for free via parsePostfix.
+struct IndexExpr final : Expr
+{
+    IndexExpr(std::unique_ptr<Expr> object, std::unique_ptr<Expr> index)
+        : object(std::move(object)),
+          index(std::move(index))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> index;
+};

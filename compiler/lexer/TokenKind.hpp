@@ -27,10 +27,14 @@ enum class TokenKind
     RightParen,
     LeftBrace,
     RightBrace,
+    LeftBracket,
+    RightBracket,
 
     Colon,
+    Semicolon,
     Comma,
     Dot,
+    DotDot,
     Arrow,
     FatArrow,
 
@@ -48,6 +52,8 @@ enum class TokenKind
     Loop,
     Break,
     Continue,
+    For,
+    In,
 
     EndOfFile,
     Invalid
@@ -77,9 +83,13 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::RightParen: return "RightParen";
         case TokenKind::LeftBrace: return "LeftBrace";
         case TokenKind::RightBrace: return "RightBrace";
+        case TokenKind::LeftBracket: return "LeftBracket";
+        case TokenKind::RightBracket: return "RightBracket";
         case TokenKind::Colon: return "Colon";
+        case TokenKind::Semicolon: return "Semicolon";
         case TokenKind::Comma: return "Comma";
         case TokenKind::Dot: return "Dot";
+        case TokenKind::DotDot: return "DotDot";
         case TokenKind::Arrow: return "Arrow";
         case TokenKind::FatArrow: return "FatArrow";
         case TokenKind::If: return "If";
@@ -96,6 +106,8 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Loop: return "Loop";
         case TokenKind::Break: return "Break";
         case TokenKind::Continue: return "Continue";
+        case TokenKind::For: return "For";
+        case TokenKind::In: return "In";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

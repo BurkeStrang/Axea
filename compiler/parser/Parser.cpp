@@ -57,6 +57,21 @@ const Token& Parser::expect(TokenKind kind, const char* message)
     return advance();
 }
 
+std::string Parser::parseTypeName()
+{
+    if (!match(TokenKind::LeftBracket))
+    {
+        return expect(TokenKind::Identifier, "expected type name").text;
+    }
+
+    const auto& element = expect(TokenKind::Identifier, "expected element type in array type");
+    expect(TokenKind::Semicolon, "expected ';' in array type");
+    const auto& size = expect(TokenKind::Integer, "expected array size in array type");
+    expect(TokenKind::RightBracket, "expected ']' after array type");
+
+    return "[" + element.text + ";" + size.text + "]";
+}
+
 std::unique_ptr<Stmt> Parser::parseItem()
 {
     match(TokenKind::Pub); // visibility is parsed and discarded; no module system yet
@@ -95,8 +110,7 @@ Param Parser::parseParam()
 
     const auto& name = expect(TokenKind::Identifier, "expected parameter name");
     expect(TokenKind::Colon, "expected ':' after parameter name");
-    const auto& type = expect(TokenKind::Identifier, "expected parameter type");
-    return Param{name.text, type.text, capability};
+    return Param{name.text, parseTypeName(), capability};
 }
 
 std::unique_ptr<Stmt> Parser::parseFunctionDecl()
@@ -122,8 +136,7 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
     std::optional<std::string> returnType;
     if (match(TokenKind::Arrow))
     {
-        const auto& type = expect(TokenKind::Identifier, "expected return type");
-        returnType = type.text;
+        returnType = parseTypeName();
     }
 
     std::unique_ptr<Expr> body;
@@ -159,8 +172,7 @@ std::unique_ptr<Stmt> Parser::parseStructDecl()
     {
         const auto& fieldName = advance();
         expect(TokenKind::Colon, "expected ':' after field name");
-        const auto& fieldType = expect(TokenKind::Identifier, "expected field type");
-        fields.push_back(Field{fieldName.text, fieldType.text});
+        fields.push_back(Field{fieldName.text, parseTypeName()});
     }
     expect(TokenKind::RightBrace, "expected '}' after struct fields");
 
@@ -174,8 +186,7 @@ std::unique_ptr<Stmt> Parser::parseAssignment()
     std::optional<std::string> declaredType;
     if (match(TokenKind::Colon))
     {
-        const auto& type = expect(TokenKind::Identifier, "expected type name");
-        declaredType = type.text;
+        declaredType = parseTypeName();
     }
 
     expect(TokenKind::Equal, "expected '=' after identifier");
@@ -224,6 +235,120 @@ std::unique_ptr<Stmt> Parser::parseContinue()
     return std::make_unique<ContinueStmt>();
 }
 
+std::unique_ptr<Stmt> Parser::parseFor()
+{
+    expect(TokenKind::For, "expected 'for'");
+    const auto& name = expect(TokenKind::Identifier, "expected loop variable name");
+    expect(TokenKind::In, "expected 'in' after for-loop variable");
+    auto first = parseExpression(0, /*allowStructLiteral=*/false);
+    const bool isRange = match(TokenKind::DotDot);
+    // Range form (`for i in a..b`): `first` is the range's start. Array form
+    // (`for v in arr`): `first` is the array expression itself - determined
+    // by whether '..' follows, since both forms parse identically up to this
+    // point. See docs/language/0030-for-loops.md and 0031-arrays.md.
+    std::unique_ptr<Expr> end =
+        isRange ? parseExpression(0, /*allowStructLiteral=*/false) : nullptr;
+    auto bodyExpr = parseBlock();
+
+    // Desugars into (range form):
+    //   { __for<N>_end = b  __for<N>_i = a - 1
+    //     while true { __for<N>_i++  if __for<N>_i >= __for<N>_end { break }  i = __for<N>_i  body
+    //     } }
+    // or (array form):
+    //   { __for<N>_arr = arr  __for<N>_i = -1
+    //     while true { __for<N>_i++  if __for<N>_i >= __for<N>_arr.length { break }
+    //                  v = __for<N>_arr[__for<N>_i]  body } }
+    // The increment happens *before* the bound check and the user's body,
+    // not after. This matters because a `continue` inside `body` jumps
+    // straight back to `while true`'s (trivially-true) header - i.e.
+    // straight back to the top of this same block - so it reaches the
+    // increment on its very next pass. A naive `while cond { body  i++ }`
+    // desugaring would let `continue` skip the increment entirely and loop
+    // forever; this ordering makes `continue` and "fell off the end of the
+    // body normally" reach the exact same next step, with no special-casing
+    // needed. The mangled `__for<N>_*` names are never producible by user
+    // source (see the declaration comment in Parser.hpp) and unique per
+    // for-loop so nested for-loops can't collide with each other; the
+    // user's own name gets a *fresh* definition every iteration (forceDefine
+    // - see AssignmentStmt in Stmt.hpp) so it can never accidentally mutate
+    // a same-named outer variable.
+    const std::string counterName = "__for" + std::to_string(forCounter_) + "_i";
+    const std::string boundName =
+        "__for" + std::to_string(forCounter_) + (isRange ? "_end" : "_arr");
+    ++forCounter_;
+
+    auto* block = static_cast<BlockExpr*>(bodyExpr.get());
+
+    std::vector<std::unique_ptr<Stmt>> loopBodyStatements;
+    loopBodyStatements.push_back(
+        std::make_unique<IncDecStmt>(std::make_unique<NameExpr>(counterName), /*increment=*/true));
+
+    std::vector<std::unique_ptr<Stmt>> breakStatements;
+    breakStatements.push_back(std::make_unique<BreakStmt>(nullptr));
+    auto breakBlock = std::make_unique<BlockExpr>(std::move(breakStatements), nullptr);
+    auto emptyElseBlock =
+        std::make_unique<BlockExpr>(std::vector<std::unique_ptr<Stmt>>{}, nullptr);
+    // Range form compares against the bound directly; array form compares
+    // against the bound array's `.length` (see docs/language/0031-arrays.md).
+    std::unique_ptr<Expr> boundValue;
+    if (isRange)
+    {
+        boundValue = std::make_unique<NameExpr>(boundName);
+    }
+    else
+    {
+        boundValue = std::make_unique<FieldExpr>(std::make_unique<NameExpr>(boundName), "length");
+    }
+    auto boundCheck = std::make_unique<BinaryExpr>(
+        std::make_unique<NameExpr>(counterName), TokenKind::GreaterEqual, std::move(boundValue));
+    auto boundIf = std::make_unique<IfExpr>(
+        std::move(boundCheck), std::move(breakBlock), std::move(emptyElseBlock));
+    loopBodyStatements.push_back(std::make_unique<ExprStmt>(std::move(boundIf)));
+
+    // Range form binds the loop variable to the counter directly; array form
+    // indexes the bound array by the counter.
+    std::unique_ptr<Expr> loopVariableValue;
+    if (isRange)
+    {
+        loopVariableValue = std::make_unique<NameExpr>(counterName);
+    }
+    else
+    {
+        loopVariableValue = std::make_unique<IndexExpr>(std::make_unique<NameExpr>(boundName),
+                                                        std::make_unique<NameExpr>(counterName));
+    }
+    loopBodyStatements.push_back(std::make_unique<AssignmentStmt>(
+        name.text, std::nullopt, std::move(loopVariableValue), /*forceDefine=*/true));
+
+    for (auto& stmt : block->statements)
+    {
+        loopBodyStatements.push_back(std::move(stmt));
+    }
+
+    auto whileBody =
+        std::make_unique<BlockExpr>(std::move(loopBodyStatements), std::move(block->result));
+    auto whileStmt =
+        std::make_unique<WhileStmt>(std::make_unique<BoolExpr>(true), std::move(whileBody));
+
+    // Range form's counter starts one below the range's start (pre-decrement,
+    // since the loop body increments before using it); array form's counter
+    // simply starts at -1 for the same reason.
+    std::unique_ptr<Expr> counterInit =
+        isRange ? std::make_unique<BinaryExpr>(
+                      std::move(first), TokenKind::Minus, std::make_unique<IntegerExpr>(1))
+                : std::unique_ptr<Expr>(std::make_unique<IntegerExpr>(-1));
+
+    std::vector<std::unique_ptr<Stmt>> outerStatements;
+    outerStatements.push_back(std::make_unique<AssignmentStmt>(
+        boundName, std::nullopt, isRange ? std::move(end) : std::move(first)));
+    outerStatements.push_back(
+        std::make_unique<AssignmentStmt>(counterName, std::nullopt, std::move(counterInit)));
+    outerStatements.push_back(std::move(whileStmt));
+    auto outerBlock = std::make_unique<BlockExpr>(std::move(outerStatements), nullptr);
+
+    return std::make_unique<ExprStmt>(std::move(outerBlock));
+}
+
 std::unique_ptr<Expr> Parser::parseBlock()
 {
     expect(TokenKind::LeftBrace, "expected '{'");
@@ -257,6 +382,12 @@ std::unique_ptr<Expr> Parser::parseBlock()
             continue;
         }
 
+        if (current().kind == TokenKind::For)
+        {
+            statements.push_back(parseFor());
+            continue;
+        }
+
         // Not obviously a keyword-led statement: parse an expression (which
         // naturally stops before '=', ':', '++'/'--', since none of those are
         // infix operators) and see what follows to decide what it was.
@@ -269,11 +400,11 @@ std::unique_ptr<Expr> Parser::parseBlock()
             {
                 throw std::runtime_error("expected a name before ':' in a local binding");
             }
-            const auto& type = expect(TokenKind::Identifier, "expected type name");
+            const std::string type = parseTypeName();
             expect(TokenKind::Equal, "expected '=' after type annotation");
             auto value = parseExpression();
             statements.push_back(
-                std::make_unique<AssignmentStmt>(name->name, type.text, std::move(value)));
+                std::make_unique<AssignmentStmt>(name->name, type, std::move(value)));
             continue;
         }
 
@@ -289,6 +420,11 @@ std::unique_ptr<Expr> Parser::parseBlock()
             {
                 statements.push_back(std::make_unique<FieldAssignStmt>(
                     std::move(field->object), field->field, std::move(value)));
+            }
+            else if (auto* index = dynamic_cast<IndexExpr*>(expr.get()))
+            {
+                statements.push_back(std::make_unique<IndexAssignStmt>(
+                    std::move(index->object), std::move(index->index), std::move(value)));
             }
             else
             {
@@ -403,10 +539,24 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
 {
     auto expr = parsePrimary(allowStructLiteral);
 
-    while (match(TokenKind::Dot))
+    while (true)
     {
-        const auto& field = expect(TokenKind::Identifier, "expected field name after '.'");
-        expr = std::make_unique<FieldExpr>(std::move(expr), field.text);
+        if (match(TokenKind::Dot))
+        {
+            const auto& field = expect(TokenKind::Identifier, "expected field name after '.'");
+            expr = std::make_unique<FieldExpr>(std::move(expr), field.text);
+            continue;
+        }
+
+        if (match(TokenKind::LeftBracket))
+        {
+            auto index = parseExpression();
+            expect(TokenKind::RightBracket, "expected ']' after index");
+            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            continue;
+        }
+
+        break;
     }
 
     return expr;
@@ -441,6 +591,25 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     if (match(TokenKind::False))
     {
         return std::make_unique<BoolExpr>(false);
+    }
+
+    if (match(TokenKind::LeftBracket))
+    {
+        std::vector<std::unique_ptr<Expr>> elements;
+        if (current().kind != TokenKind::RightBracket)
+        {
+            elements.push_back(parseExpression());
+            while (match(TokenKind::Comma))
+            {
+                if (current().kind == TokenKind::RightBracket)
+                {
+                    break;
+                }
+                elements.push_back(parseExpression());
+            }
+        }
+        expect(TokenKind::RightBracket, "expected ']' after array literal elements");
+        return std::make_unique<ArrayLiteralExpr>(std::move(elements));
     }
 
     if (current().kind == TokenKind::If)
