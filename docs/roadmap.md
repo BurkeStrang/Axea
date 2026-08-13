@@ -26,7 +26,7 @@
 
 ## Phase 5
 
--   [ ] Axea IR
+-   [x] Axea IR
 
 ## Phase 6
 

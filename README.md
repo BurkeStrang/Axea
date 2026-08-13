@@ -22,7 +22,8 @@ The compiler can:
 - infer `read`/`write`/`take` capabilities for function parameters and verify explicit capability declarations (`CapabilityChecker`)
 - check that a `take`-consumed parameter isn't used again afterward within the same block (ownership / use-after-move)
 - check that a borrowed (`read`/`write`) struct parameter never escapes its function via a return value, directly or nested inside a returned struct literal (`RegionChecker`)
-- dump tokens or the AST
+- lower a checked program into Axea IR — a structured, per-function instruction sequence with ownership/capability/region markers embedded directly in the instruction stream (`IrGenerator`)
+- dump tokens, the AST, or the IR
 - interpret whole programs: functions (including recursion and early `return`), struct construction, field access, and field mutation (visible through shared struct references)
 
 Example:
@@ -66,6 +67,7 @@ ctest --test-dir build --output-on-failure
 ./build/ax capabilities examples/capabilities.ax
 ./build/ax run examples/regions.ax
 ./build/ax regions examples/regions.ax
+./build/ax ir examples/capabilities.ax
 ```
 
 Expected AST (`examples/hello.ax`):
@@ -117,6 +119,19 @@ Function(copy_point)
   Param(p: borrowed)
 ```
 
+Expected `ir` output (`examples/capabilities.ax`, `archive` function):
+
+```text
+Function(archive)
+  Params: %0=user
+  region.enter
+  move %0
+  %1 = field.get %0.name
+  drop %0
+  return %1
+  region.exit
+```
+
 ## Formatting
 
 Format all source files with clang-format:
@@ -148,7 +163,7 @@ git config core.hooksPath .githooks
 7. ~~Add Axea's `read` / `write` / `take` capability analysis.~~ Done.
 8. ~~Add ownership analysis.~~ Done.
 9. ~~Add regions and escape analysis.~~ Done.
-10. Design Axea IR.
+10. ~~Design Axea IR.~~ Done.
 11. Add LLVM as a backend only after the frontend semantics are stable.
 12. Add standard library, tooling, and IDE support.
 

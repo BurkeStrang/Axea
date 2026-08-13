@@ -1,6 +1,7 @@
 #include "ast/Expr.hpp"
 #include "ast/Stmt.hpp"
 #include "interpreter/Interpreter.hpp"
+#include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
@@ -177,6 +178,156 @@ namespace
         }
     }
 
+    void printIrInst(const IrInst& inst, int indent)
+    {
+        const std::string pad(static_cast<std::size_t>(indent), ' ');
+
+        if (const auto* constInt = dynamic_cast<const IrConstInt*>(&inst))
+        {
+            std::cout << pad << "%" << constInt->dest << " = const.i32 " << constInt->value << "\n";
+            return;
+        }
+
+        if (const auto* constBool = dynamic_cast<const IrConstBool*>(&inst))
+        {
+            std::cout << pad << "%" << constBool->dest << " = const.bool "
+                      << (constBool->value ? "true" : "false") << "\n";
+            return;
+        }
+
+        if (const auto* constString = dynamic_cast<const IrConstString*>(&inst))
+        {
+            std::cout << pad << "%" << constString->dest << " = const.str \"" << constString->value
+                      << "\"\n";
+            return;
+        }
+
+        if (const auto* binOp = dynamic_cast<const IrBinOp*>(&inst))
+        {
+            std::cout << pad << "%" << binOp->dest << " = binop " << tokenKindName(binOp->op)
+                      << " %" << binOp->lhs << ", %" << binOp->rhs << "\n";
+            return;
+        }
+
+        if (const auto* call = dynamic_cast<const IrCall*>(&inst))
+        {
+            std::cout << pad << "%" << call->dest << " = call " << call->callee << "(";
+            for (std::size_t i = 0; i < call->args.size(); ++i)
+            {
+                std::cout << (i > 0 ? ", " : "") << "%" << call->args[i];
+            }
+            std::cout << ")\n";
+            return;
+        }
+
+        if (const auto* structNew = dynamic_cast<const IrStructNew*>(&inst))
+        {
+            std::cout << pad << "%" << structNew->dest << " = struct.new " << structNew->typeName
+                      << " {";
+            for (std::size_t i = 0; i < structNew->fields.size(); ++i)
+            {
+                std::cout << (i > 0 ? "," : "") << " " << structNew->fields[i].first << ": %"
+                          << structNew->fields[i].second;
+            }
+            std::cout << " }\n";
+            return;
+        }
+
+        if (const auto* fieldGet = dynamic_cast<const IrFieldGet*>(&inst))
+        {
+            std::cout << pad << "%" << fieldGet->dest << " = field.get %" << fieldGet->object << "."
+                      << fieldGet->field << "\n";
+            return;
+        }
+
+        if (const auto* fieldSet = dynamic_cast<const IrFieldSet*>(&inst))
+        {
+            std::cout << pad << "field.set %" << fieldSet->object << "." << fieldSet->field
+                      << " = %" << fieldSet->value << "\n";
+            return;
+        }
+
+        if (const auto* branch = dynamic_cast<const IrBranch*>(&inst))
+        {
+            std::cout << pad << "%" << branch->dest << " = br %" << branch->condition << " {\n";
+            for (const auto& thenInst : branch->thenBlock)
+            {
+                printIrInst(*thenInst, indent + 2);
+            }
+            std::cout << pad << "} (-> %" << branch->thenValue << ") else {\n";
+            for (const auto& elseInst : branch->elseBlock)
+            {
+                printIrInst(*elseInst, indent + 2);
+            }
+            std::cout << pad << "} (-> %" << branch->elseValue << ")\n";
+            return;
+        }
+
+        if (const auto* returnInst = dynamic_cast<const IrReturn*>(&inst))
+        {
+            if (returnInst->value == -1)
+            {
+                std::cout << pad << "return\n";
+            }
+            else
+            {
+                std::cout << pad << "return %" << returnInst->value << "\n";
+            }
+            return;
+        }
+
+        if (const auto* borrowRead = dynamic_cast<const IrBorrowRead*>(&inst))
+        {
+            std::cout << pad << "borrow.read %" << borrowRead->value << "\n";
+            return;
+        }
+
+        if (const auto* borrowWrite = dynamic_cast<const IrBorrowWrite*>(&inst))
+        {
+            std::cout << pad << "borrow.write %" << borrowWrite->value << "\n";
+            return;
+        }
+
+        if (const auto* move = dynamic_cast<const IrMove*>(&inst))
+        {
+            std::cout << pad << "move %" << move->value << "\n";
+            return;
+        }
+
+        if (dynamic_cast<const IrRegionEnter*>(&inst))
+        {
+            std::cout << pad << "region.enter\n";
+            return;
+        }
+
+        if (dynamic_cast<const IrRegionExit*>(&inst))
+        {
+            std::cout << pad << "region.exit\n";
+            return;
+        }
+
+        if (const auto* drop = dynamic_cast<const IrDrop*>(&inst))
+        {
+            std::cout << pad << "drop %" << drop->value << "\n";
+            return;
+        }
+    }
+
+    void printIrFunction(const IrFunction& function)
+    {
+        std::cout << "Function(" << function.name << ")\n";
+        std::cout << "  Params:";
+        for (std::size_t i = 0; i < function.paramNames.size(); ++i)
+        {
+            std::cout << " %" << i << "=" << function.paramNames[i];
+        }
+        std::cout << "\n";
+        for (const auto& inst : function.body)
+        {
+            printIrInst(*inst, 2);
+        }
+    }
+
     std::string readFile(const std::string& path)
     {
         std::ifstream input(path);
@@ -195,7 +346,7 @@ int main(int argc, char** argv)
 {
     if (argc != 3)
     {
-        std::cerr << "usage: ax <tokens|ast|run|capabilities|regions> <file.ax>\n";
+        std::cerr << "usage: ax <tokens|ast|run|capabilities|regions|ir> <file.ax>\n";
         return 1;
     }
 
@@ -331,6 +482,40 @@ int main(int argc, char** argv)
                 {
                     std::cout << "  Param(" << function->params[i].name << ": "
                               << regionName(regions[i]) << ")\n";
+                }
+            }
+            return 0;
+        }
+
+        if (command == "ir")
+        {
+            Parser parser(std::move(tokens));
+            auto program = parser.parseProgram();
+
+            TypeChecker typeChecker;
+            typeChecker.check(program);
+
+            CapabilityChecker capabilityChecker;
+            capabilityChecker.check(program);
+
+            RegionChecker regionChecker;
+            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+
+            IrGenerator irGenerator;
+            auto irProgram = irGenerator.generate(
+                program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+
+            for (const auto& function : irProgram.functions)
+            {
+                printIrFunction(function);
+            }
+
+            if (!irProgram.topLevel.empty())
+            {
+                std::cout << "TopLevel\n";
+                for (const auto& inst : irProgram.topLevel)
+                {
+                    printIrInst(*inst, 2);
                 }
             }
             return 0;
