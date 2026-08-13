@@ -71,6 +71,38 @@ struct ReturnStmt final : Stmt
     std::unique_ptr<Expr> value; // null => bare `return` (unit)
 };
 
+// `while cond { body }` - a statement, not an expression: unlike `loop`,
+// normal exit (condition false) has no natural value to produce, so `while`
+// never produces one at all (see docs/language/0028-loops.md).
+struct WhileStmt final : Stmt
+{
+    WhileStmt(std::unique_ptr<Expr> condition, std::unique_ptr<Expr> body)
+        : condition(std::move(condition)),
+          body(std::move(body))
+    {
+    }
+
+    std::unique_ptr<Expr> condition;
+    std::unique_ptr<Expr> body; // always a BlockExpr
+};
+
+// `break [value]`, statement-only. Always targets the innermost enclosing
+// loop (no labeled-loop support). A value is only meaningful inside `loop`.
+struct BreakStmt final : Stmt
+{
+    explicit BreakStmt(std::unique_ptr<Expr> value)
+        : value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> value; // null => bare `break`
+};
+
+// `continue`, statement-only. Always targets the innermost enclosing loop.
+struct ContinueStmt final : Stmt
+{
+};
+
 // A non-trailing expression inside a block, kept for its side effect (e.g. an
 // early-return guard clause); its value is evaluated and discarded.
 struct ExprStmt final : Stmt

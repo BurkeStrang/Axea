@@ -138,3 +138,52 @@ TEST("TypeChecker rejects an if/else where only one branch returns and the other
 {
     EXPECT_THROWS(check("f(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { 1 } }"));
 }
+
+TEST("TypeChecker rejects a non-bool while condition")
+{
+    EXPECT_THROWS(check("f() { while 1 { } }"));
+}
+
+TEST("TypeChecker accepts a loop typed by its break values")
+{
+    check("f() -> i32 { return loop { break 1 } }");
+}
+
+TEST("TypeChecker treats a loop with no break as unit")
+{
+    // Documented imprecision (docs/language/0028-loops.md): a genuinely
+    // infinite loop with no break is really `never`, but TypeKind::Never
+    // has no checking logic wired up anywhere in this codebase.
+    EXPECT_THROWS(check("f() -> i32 { return loop { 1 } }"));
+}
+
+TEST("TypeChecker rejects mismatched break value types in the same loop")
+{
+    EXPECT_THROWS(check(
+        R"(f(flag: bool) -> i32 { return loop { if flag { break 1 } else { break "oops" } } })"));
+}
+
+TEST("TypeChecker rejects a break with a value inside while")
+{
+    EXPECT_THROWS(check("f() { while true { break 1 } }"));
+}
+
+TEST("TypeChecker allows a bare break inside while")
+{
+    check("f() { while true { break } }");
+}
+
+TEST("TypeChecker rejects break used outside a loop")
+{
+    EXPECT_THROWS(check("f() { break }"));
+}
+
+TEST("TypeChecker rejects continue used outside a loop")
+{
+    EXPECT_THROWS(check("f() { continue }"));
+}
+
+TEST("TypeChecker scopes break/continue validity to the innermost loop, correctly nested")
+{
+    check("f() { while true { while true { break } continue } }");
+}

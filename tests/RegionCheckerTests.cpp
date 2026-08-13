@@ -118,3 +118,25 @@ TEST("RegionChecker rejects an if-expression when either branch could be borrowe
                                "x = pick(u, true)";
     EXPECT_THROWS(checkRegions(source));
 }
+
+TEST("RegionChecker rejects a borrowed struct parameter escaping via a loop's break value")
+{
+    const std::string source = "struct User { name: str } "
+                               "badFind(u: User, flag: bool) -> User { "
+                               "  return loop { "
+                               "    if flag { break u } "
+                               "  } "
+                               "} "
+                               "u = User { name: \"Burke\" } "
+                               "x = badFind(u, true)";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts an owned struct produced entirely within a loop's break value")
+{
+    checkRegions("struct Point { x: i32 } "
+                 "make() -> Point { "
+                 "  return loop { break Point { x: 1 } } "
+                 "} "
+                 "p = make()");
+}

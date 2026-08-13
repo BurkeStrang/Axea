@@ -84,6 +84,19 @@ struct IfExpr final : Expr
         elseBranch; // BlockExpr, or a nested IfExpr for `else if`; null if no else
 };
 
+// Infinite loop, always an expression - unlike `while`, every exit is a
+// `break`, so its type is whatever the `break value`s inside agree on (see
+// docs/language/0028-loops.md). `body` is always a BlockExpr.
+struct LoopExpr final : Expr
+{
+    explicit LoopExpr(std::unique_ptr<Expr> body)
+        : body(std::move(body))
+    {
+    }
+
+    std::unique_ptr<Expr> body;
+};
+
 struct CallExpr final : Expr
 {
     CallExpr(std::string callee, std::vector<std::unique_ptr<Expr>> arguments)

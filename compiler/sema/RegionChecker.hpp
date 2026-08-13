@@ -61,8 +61,18 @@ public:
 private:
     void registerDecls(const Program& program);
     void checkFunction(const FunctionDecl& function, const std::vector<Capability>& capabilities);
-    RegionInfo regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl& function);
-    void regionOfStmt(const Stmt& stmt, RegionEnv& env, const FunctionDecl& function);
+    // currentLoopBreakRegions: null when not inside a loop; otherwise the
+    // active innermost loop's collector of every reachable `break value`'s
+    // region, used to determine a LoopExpr's own contributed region (mirrors
+    // TypeChecker's currentLoopBreakTypes).
+    RegionInfo regionOfExpr(const Expr& expr,
+                            RegionEnv& env,
+                            const FunctionDecl& function,
+                            std::vector<RegionInfo>* currentLoopBreakRegions);
+    void regionOfStmt(const Stmt& stmt,
+                      RegionEnv& env,
+                      const FunctionDecl& function,
+                      std::vector<RegionInfo>* currentLoopBreakRegions);
     void requireOwned(const RegionInfo& info, const FunctionDecl& function) const;
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;

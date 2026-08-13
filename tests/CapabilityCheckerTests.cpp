@@ -126,3 +126,34 @@ TEST("CapabilityChecker scopes move-checking to a single block: a move in one br
                                "x = relay(p, true)";
     capabilitiesOf(source); // must not throw, per the documented per-block limitation
 }
+
+TEST("CapabilityChecker infers write for a parameter whose field is mutated inside a loop")
+{
+    const auto capabilities = capabilitiesOf("struct Counter { value: i32 } "
+                                             "bump(c: Counter) -> i32 { "
+                                             "  n = 0 "
+                                             "  while n < 3 { c.value++  n = n + 1 } "
+                                             "  return c.value "
+                                             "} "
+                                             "c = Counter { value: 0 } "
+                                             "x = bump(c)");
+    EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker does not track a move as persisting across loop iterations")
+{
+    // Same already-documented per-block limitation as if/else, extended to
+    // loops: each iteration's move-tracking starts fresh (see
+    // docs/language/0028-loops.md), so this must not throw even though a
+    // real dataflow analysis would flag the second iteration's use.
+    const std::string source = "struct Packet { id: i32 } "
+                               "send(take packet: Packet) -> i32 { return packet.id } "
+                               "relay(packet: Packet) -> i32 { "
+                               "  n = 0 "
+                               "  while n < 2 { send(packet)  n = n + 1 } "
+                               "  return n "
+                               "} "
+                               "p = Packet { id: 1 } "
+                               "x = relay(p)";
+    capabilitiesOf(source);
+}

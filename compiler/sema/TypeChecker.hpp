@@ -5,6 +5,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Matches docs/language/0005-type-system.md's "Initial Type Checker
 // Representation" and 0002-grammar.md's primitive_type list. Only Bool, I32,
@@ -84,13 +85,27 @@ private:
     // purely by "is this immediately followed by '}'".
     bool definitelyReturns(const BlockExpr& block) const;
     bool definitelyReturnsBranch(const IfExpr& ifExpr) const;
-    Type checkBlock(const BlockExpr& block, TypeEnv& parentEnv, const Type* expectedReturnType);
-    Type checkExpr(const Expr& expr, TypeEnv& env, const Type* expectedReturnType);
-    void checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expectedReturnType);
+    // currentLoopBreakTypes: null when not inside a loop (rejects break/continue,
+    // mirroring how a null expectedReturnType rejects `return` outside a
+    // function); otherwise the active innermost loop's collector of every
+    // `break value`'s type, used to type LoopExpr itself.
+    Type checkBlock(const BlockExpr& block,
+                    TypeEnv& parentEnv,
+                    const Type* expectedReturnType,
+                    std::vector<Type>* currentLoopBreakTypes);
+    Type checkExpr(const Expr& expr,
+                   TypeEnv& env,
+                   const Type* expectedReturnType,
+                   std::vector<Type>* currentLoopBreakTypes);
+    void checkStmt(const Stmt& stmt,
+                   TypeEnv& env,
+                   const Type* expectedReturnType,
+                   std::vector<Type>* currentLoopBreakTypes);
     Type checkFieldType(const Expr& object,
                         const std::string& field,
                         TypeEnv& env,
-                        const Type* expectedReturnType);
+                        const Type* expectedReturnType,
+                        std::vector<Type>* currentLoopBreakTypes);
     Type resolveType(const std::string& name) const;
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;

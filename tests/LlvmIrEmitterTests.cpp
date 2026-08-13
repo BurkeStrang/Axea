@@ -193,6 +193,55 @@ TEST("LlvmIrEmitter does not double-terminate the merge block when both branches
     EXPECT_TRUE(ir.compare(afterUnreachable, 1, "}") == 0);
 }
 
+TEST("LlvmIrEmitter emits a main that returns i32 and prints an i32 top-level binding")
+{
+    auto ir = emitLlvmIr("x = 1 + 2");
+    EXPECT_TRUE(ir.find("define i32 @main() {") != std::string::npos);
+    EXPECT_TRUE(ir.find("ret i32 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("@printf") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"x\\00\"") != std::string::npos); // the binding's own name, hoisted
+    EXPECT_TRUE(ir.find("c\"%s = %d\\0A\\00\"") != std::string::npos); // i32 binding format
+}
+
+TEST("LlvmIrEmitter prints multiple top-level bindings in source order")
+{
+    auto ir = emitLlvmIr("a = 1  b = 2  c = 3");
+    const std::size_t aPos = ir.find("c\"a\\00\"");
+    const std::size_t bPos = ir.find("c\"b\\00\"");
+    const std::size_t cPos = ir.find("c\"c\\00\"");
+    EXPECT_TRUE(aPos != std::string::npos && bPos != std::string::npos &&
+                cPos != std::string::npos);
+    EXPECT_TRUE(aPos < bPos);
+    EXPECT_TRUE(bPos < cPos);
+}
+
+TEST("LlvmIrEmitter every printf call captures its (discarded) result into a numbered register")
+{
+    // Regression coverage: a discarded-result call to a non-void function
+    // (printf returns i32) still implicitly consumes a numbered SSA slot in
+    // LLVM IR - an unnamed "call i32 (...) @printf(...)" with no "%N ="
+    // prefix would desynchronize every later explicit register number in
+    // the same function, which the real LLVM parser (clang/llc) rejects
+    // outright even though this project's own hand-review missed it.
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 }  p = Point { x: 1  y: 2 }");
+    std::size_t pos = 0;
+    while ((pos = ir.find("call i32 (i8*, ...) @printf(", pos)) != std::string::npos)
+    {
+        const std::size_t lineStart = ir.rfind('\n', pos) + 1;
+        EXPECT_TRUE(ir.compare(lineStart, 3, "  %") == 0);
+        pos += 1;
+    }
+}
+
+TEST("LlvmIrEmitter prints a struct top-level binding via its type's print helper")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 }  p = Point { x: 1  y: 2 }");
+    EXPECT_TRUE(ir.find("define void @axea.print.Point(%Point* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.print.Point(%Point* ") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Point { \\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"x: \\00\"") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter round-trips a recursive self-call with no forward declaration needed")
 {
     auto ir = emitLlvmIr("factorial(n: i32) -> i32 { "
@@ -201,4 +250,70 @@ TEST("LlvmIrEmitter round-trips a recursive self-call with no forward declaratio
                          "}");
     EXPECT_TRUE(ir.find("define i32 @factorial(i32 %0) {") != std::string::npos);
     EXPECT_TRUE(ir.find("call i32 @factorial(i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers a while loop's carried variable via alloca/load/store")
+{
+    auto ir = emitLlvmIr("f(limit: i32) -> i32 { "
+                         "  n = 0 "
+                         "  while n < limit { n = n + 1 } "
+                         "  return n "
+                         "}");
+    EXPECT_TRUE(ir.find("= alloca i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("loop.header0:") != std::string::npos);
+    EXPECT_TRUE(ir.find("loop.body0:") != std::string::npos);
+    EXPECT_TRUE(ir.find("loop.exit0:") != std::string::npos);
+    // A while loop's own dest is never consumed - no phi for the loop itself.
+    EXPECT_TRUE(ir.find("= phi") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter marks an infinite loop with no break as unreachable at exit")
+{
+    auto ir = emitLlvmIr("f() { loop { } }");
+    EXPECT_TRUE(ir.find("loop.exit0:\n  unreachable") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter builds an exit-block phi from a loop's break values")
+{
+    auto ir = emitLlvmIr("f(flag: bool) -> i32 { "
+                         "  return loop { "
+                         "    if flag { break 1 } else { break 2 } "
+                         "  } "
+                         "}");
+    EXPECT_TRUE(ir.find("loop.exit0:") != std::string::npos);
+    EXPECT_TRUE(ir.find("= phi i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("[ %1, %if.then") != std::string::npos ||
+                ir.find(", %if.then") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter does not double-terminate a block when both loop branches break")
+{
+    // Regression coverage: alwaysTerminates must recognize IrBreak/IrContinue
+    // as terminators, matching how emitInstructions already treats them -
+    // otherwise emitLoop's "did the body fall through naturally" fallback
+    // incorrectly fires and appends a second terminator after the
+    // already-`unreachable` merge block from a both-sides-break IrBranch.
+    auto ir = emitLlvmIr("f(flag: bool) -> i32 { "
+                         "  return loop { "
+                         "    if flag { break 1 } else { break 2 } "
+                         "  } "
+                         "}");
+    const std::size_t unreachablePos = ir.find("  unreachable\n");
+    EXPECT_TRUE(unreachablePos != std::string::npos);
+    const std::size_t afterUnreachable = unreachablePos + std::string("  unreachable\n").size();
+    // Nothing but a new label (or the closing brace) may follow.
+    EXPECT_TRUE(ir[afterUnreachable] == 'l' || ir[afterUnreachable] == '}');
+}
+
+TEST("LlvmIrEmitter continue re-checks the loop header instead of falling through")
+{
+    auto ir = emitLlvmIr("f() { "
+                         "  n = 0 "
+                         "  while n < 10 { "
+                         "    n = n + 1 "
+                         "    if n == 3 { continue } "
+                         "    n = n + 100 "
+                         "  } "
+                         "}");
+    EXPECT_TRUE(ir.find("br label %loop.header0") != std::string::npos);
 }

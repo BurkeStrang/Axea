@@ -197,6 +197,33 @@ std::unique_ptr<Stmt> Parser::parseReturn()
     return std::make_unique<ReturnStmt>(std::move(value));
 }
 
+std::unique_ptr<Stmt> Parser::parseWhile()
+{
+    expect(TokenKind::While, "expected 'while'");
+    auto condition = parseExpression(0, /*allowStructLiteral=*/false);
+    auto body = parseBlock();
+    return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+std::unique_ptr<Stmt> Parser::parseBreak()
+{
+    expect(TokenKind::Break, "expected 'break'");
+
+    std::unique_ptr<Expr> value;
+    if (current().kind != TokenKind::RightBrace)
+    {
+        value = parseExpression();
+    }
+
+    return std::make_unique<BreakStmt>(std::move(value));
+}
+
+std::unique_ptr<Stmt> Parser::parseContinue()
+{
+    expect(TokenKind::Continue, "expected 'continue'");
+    return std::make_unique<ContinueStmt>();
+}
+
 std::unique_ptr<Expr> Parser::parseBlock()
 {
     expect(TokenKind::LeftBrace, "expected '{'");
@@ -209,6 +236,24 @@ std::unique_ptr<Expr> Parser::parseBlock()
         if (current().kind == TokenKind::Return)
         {
             statements.push_back(parseReturn());
+            continue;
+        }
+
+        if (current().kind == TokenKind::While)
+        {
+            statements.push_back(parseWhile());
+            continue;
+        }
+
+        if (current().kind == TokenKind::Break)
+        {
+            statements.push_back(parseBreak());
+            continue;
+        }
+
+        if (current().kind == TokenKind::Continue)
+        {
+            statements.push_back(parseContinue());
             continue;
         }
 
@@ -300,6 +345,13 @@ std::unique_ptr<Expr> Parser::parseIfExpr()
 
     return std::make_unique<IfExpr>(
         std::move(condition), std::move(thenBranch), std::move(elseBranch));
+}
+
+std::unique_ptr<Expr> Parser::parseLoopExpr()
+{
+    expect(TokenKind::Loop, "expected 'loop'");
+    auto body = parseBlock();
+    return std::make_unique<LoopExpr>(std::move(body));
 }
 
 std::vector<std::pair<std::string, std::unique_ptr<Expr>>> Parser::parseStructLiteralFields()
@@ -394,6 +446,11 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     if (current().kind == TokenKind::If)
     {
         return parseIfExpr();
+    }
+
+    if (current().kind == TokenKind::Loop)
+    {
+        return parseLoopExpr();
     }
 
     if (current().kind == TokenKind::Identifier)

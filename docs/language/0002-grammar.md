@@ -831,14 +831,18 @@ loop_expression =
 
 ---
 
-# While Expression / Statement Form
+# While Statement
 
 ```ebnf
-while_expression =
+while_statement =
     "while" expression block ;
 ```
 
-Whether `while` is a true value-producing expression remains an open question.
+Resolved (`0028-loops.md`): `while` is a statement, not an expression - unlike
+`loop`, where every exit is a `break` with a well-defined value, `while` can
+also exit normally (condition false), which has no natural value to produce.
+`break_statement`/`continue_statement` (defined above) always target the
+innermost enclosing loop - no labels.
 
 ---
 
@@ -1436,7 +1440,6 @@ Diagnostics should preserve parsing progress whenever possible.
 - Are semicolons accepted optionally?
 - Is `or` reserved only as an optional-fallback operator?
 - Should logical operators be `&&`/`||`, `and`/`or`, or both?
-- Is `while` an expression or only a statement-like construct?
 - Is `for` an expression?
 - Exact grammar for typed errors.
 - Exact grammar for destructuring assignment.

@@ -5,6 +5,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,6 +43,24 @@ private:
         int nextLabel = 0;
         std::string currentLabel; // the basic block currently being appended to
         std::ostringstream* out = nullptr;
+
+        // Per-currently-open-loop state (top = innermost), pushed/popped by
+        // emitLoop; read by emitInstructions' IrBreak/IrContinue handling.
+        // See docs/language/0028-loops.md for why loop-carried variables use
+        // alloca/load/store (not phi) here.
+        struct LoopEmitContext
+        {
+            std::string headerLabel;
+            std::string exitLabel;
+            // (pre-loop Axea register, body-end Axea register, alloca slot's LLVM register)
+            std::vector<std::tuple<int, int, int>> carriedSlots;
+            std::vector<std::pair<std::string, std::string>>
+                breakValues; // (valueRefText, exitingLabel)
+            bool anyBreakSeen =
+                false; // including bare `break` - determines exit-block reachability
+        };
+
+        std::vector<LoopEmitContext> loopStack;
     };
 
     std::string llvmType(const std::string& axeaTypeName) const;
@@ -67,6 +86,16 @@ private:
                           FunctionContext& fctx);
 
     void collectStrings(const std::vector<std::unique_ptr<IrInst>>& instructions);
+    // Registers a string constant (deduped by content) and returns its
+    // global name - shared by real Axea string literals (collectStrings) and
+    // the synthetic strings emitMain/emitStructPrintHelpers need (format
+    // strings, punctuation, field/binding names).
+    std::string hoistString(const std::string& text);
+    // An inline `i8*` constant expression referencing a hoisted string - no
+    // separate SSA register needed, since a GEP into a global constant is
+    // itself a compile-time constant in LLVM IR. Only used by the
+    // hand-emitted main/struct-print-helper text below, not by lowering.
+    std::string stringPtrConstant(const std::string& text);
     void emitStringGlobals(std::ostringstream& out) const;
     void emitStructTypeDecls(std::ostringstream& out) const;
 
@@ -80,12 +109,52 @@ private:
     // covered by explicit returns on both sides - which would double
     // terminate the merge block (already closed with `unreachable`).
     bool alwaysTerminates(const std::vector<std::unique_ptr<IrInst>>& instructions) const;
+    // True if this instruction list reaches an IrBreak anywhere, recursing
+    // into nested IrBranch but *not* into a nested IrLoop's own body (a
+    // break there targets that inner loop, not this one). Used both by
+    // alwaysTerminates (an infinite loop with no reachable break never
+    // falls through) and emitLoop/emitInstructions (does the loop's exit
+    // block have any predecessor at all).
+    bool instructionsContainBreak(const std::vector<std::unique_ptr<IrInst>>& instructions) const;
+    // First `break <value>`'s Axea register reachable in this instruction
+    // list (same nested-loop boundary as instructionsContainBreak), or -1 if
+    // none - used to type a LoopExpr's own dest register (every reachable
+    // break within the same loop is already known, by TypeChecker's own
+    // unification rule, to agree on type).
+    int findFirstBreakValue(const std::vector<std::unique_ptr<IrInst>>& instructions) const;
 
     void emitFunction(const IrFunction& function, std::ostringstream& out);
+    // One `void @axea.print.<TypeName>(%TypeName*)` helper per struct in
+    // program.structs, pretty-printing "TypeName { field: value, ... }" to
+    // match Interpreter's toString() exactly (recursing into nested
+    // struct-typed fields). Named with an `axea.print.` prefix (not
+    // `print_*`) so it can't collide with a user-defined Axea function -
+    // Axea function names are emitted unmangled as `@name`.
+    void emitStructPrintHelpers(const IrProgram& program, std::ostringstream& out);
+    // `main`: lowers the top-level script (program.topLevel) exactly like a
+    // zero-parameter function body, then prints each of
+    // program.topLevelBindings as "name = value\n" - matching `ax run`'s own
+    // printer (compiler/main.cpp) byte for byte, so the interpreter and the
+    // compiled binary can be diffed directly.
+    void emitMain(const IrProgram& program, std::ostringstream& out);
     void emitStructNew(const IrStructNew& structNew, FunctionContext& fctx);
     void emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx);
     void emitFieldSet(const IrFieldSet& fieldSet, FunctionContext& fctx);
     void emitBranch(const IrBranch& branch, FunctionContext& fctx);
+    // `while`/`loop`. See docs/language/0028-loops.md: loop-carried
+    // variables become alloca/load/store (not phi), re-read at the top of
+    // the header every iteration and re-read once more at the exit block for
+    // code after the loop; the loop's own produced value (from `loop { ...
+    // break x }`) becomes a phi at the exit block, generalizing
+    // emitBranch's merge-phi to however many break sites exist.
+    void emitLoop(const IrLoop& loop, FunctionContext& fctx);
+    // Stores each (preLoopReg, currentReg) pair's currentReg into its slot
+    // (looked up by preLoopReg in loopCtx.carriedSlots) - shared by the
+    // natural loop-back edge (using IrLoop::carried) and every
+    // IrBreak/IrContinue (using their own per-point carried snapshot).
+    void storeCarriedValues(const std::vector<std::pair<int, int>>& carried,
+                            const FunctionContext::LoopEmitContext& loopCtx,
+                            FunctionContext& fctx);
 
     // Returns true if the list ended in a terminator (Return) - the caller
     // must not append a fallthrough branch/ret after that point.

@@ -1,0 +1,27 @@
+sumTo(limit: i32) -> i32
+{
+    n = 0
+    total = 0
+    while n < limit
+    {
+        n = n + 1
+        total = total + n
+    }
+    return total
+}
+
+firstMultipleOver(limit: i32, step: i32) -> i32
+{
+    n = 0
+    return loop
+    {
+        n = n + step
+        if n > limit
+        {
+            break n
+        }
+    }
+}
+
+sum = sumTo(10)
+firstOver = firstMultipleOver(20, 3)

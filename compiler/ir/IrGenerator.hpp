@@ -32,6 +32,12 @@ public:
     void define(const std::string& name, int registerId);
     void assign(const std::string& name, int registerId);
     int find(const std::string& name) const;
+    bool
+    contains(const std::string& name) const; // walks the chain; used to decide define vs assign
+    // Every name visible from here, walking the whole parent chain - used to
+    // detect loop-carried variables (diff a snapshot taken before/after
+    // lowering a loop body). Barrier-oblivious, like find()/contains().
+    std::unordered_map<std::string, int> snapshot() const;
 
 private:
     std::unordered_map<std::string, int> registers_;
@@ -69,6 +75,17 @@ private:
 
     int lowerExpr(const Expr& expr, IrScope& scope, Context& ctx);
     void lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx);
+    // Shared by `while` (condition non-null, dest discarded by the caller)
+    // and `loop` (condition null, dest is the loop's produced value).
+    // Returns the lowered IrLoop's own dest register.
+    int lowerLoop(const Expr* condition, const Expr& body, IrScope& scope, Context& ctx);
+    // Diffs `scope`'s current snapshot against the innermost enclosing
+    // loop's pre-loop snapshot (top of loopPreSnapshotStack_) - used by
+    // BreakStmt/ContinueStmt to record exactly which carried variables have
+    // changed, and to what, by this specific point in the body. Empty if not
+    // currently inside a loop (unreachable in a well-typed program, since
+    // TypeChecker already rejects break/continue outside a loop).
+    std::vector<std::pair<int, int>> currentLoopCarriedDiff(IrScope& scope) const;
 
     int emit(Context& ctx, std::unique_ptr<IrInst> inst);
     void emitVoid(Context& ctx, std::unique_ptr<IrInst> inst);
@@ -81,4 +98,8 @@ private:
     bool isObviouslyStructTyped(const Expr& expr, const FunctionDecl& function) const;
 
     std::unordered_map<std::string, const StructDecl*> structs_;
+    // Stack of pre-loop scope snapshots, one per currently-open loop (top =
+    // innermost). Pushed/popped by lowerLoop; read by
+    // currentLoopCarriedDiff for BreakStmt/ContinueStmt.
+    std::vector<std::unordered_map<std::string, int>> loopPreSnapshotStack_;
 };

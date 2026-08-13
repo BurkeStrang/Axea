@@ -80,6 +80,12 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        inferExpr(*loopExpr->body, function, changed);
+        return;
+    }
+
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
         inferExpr(*field->object, function, changed);
@@ -179,6 +185,24 @@ void CapabilityChecker::inferStmt(const Stmt& stmt, const FunctionDecl& function
         }
         return;
     }
+
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        inferExpr(*whileStmt->condition, function, changed);
+        inferExpr(*whileStmt->body, function, changed);
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            inferExpr(*breakStmt->value, function, changed);
+        }
+        return;
+    }
+
+    // ContinueStmt: nothing to infer.
 }
 
 void CapabilityChecker::checkMovesInExpr(const Expr& expr,
@@ -226,6 +250,17 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         checkMovesInExpr(*ifExpr->thenBranch, function, thenMoved);
         std::unordered_set<std::string> elseMoved;
         checkMovesInExpr(*ifExpr->elseBranch, function, elseMoved);
+        return;
+    }
+
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        // Fresh moved-set for the body, same as an if-branch above - a value
+        // moved on one iteration isn't tracked as moved on the next
+        // (extends the same already-documented per-block limitation one
+        // level further; see docs/language/0028-loops.md).
+        std::unordered_set<std::string> loopMoved;
+        checkMovesInExpr(*loopExpr->body, function, loopMoved);
         return;
     }
 
@@ -310,6 +345,25 @@ void CapabilityChecker::checkMovesInStmt(const Stmt& stmt,
         checkMovesInExpr(*incDec->target, function, moved);
         return;
     }
+
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        checkMovesInExpr(*whileStmt->condition, function, moved);
+        std::unordered_set<std::string> loopMoved;
+        checkMovesInExpr(*whileStmt->body, function, loopMoved);
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            checkMovesInExpr(*breakStmt->value, function, moved);
+        }
+        return;
+    }
+
+    // ContinueStmt: nothing to check.
 }
 
 void CapabilityChecker::check(const Program& program)

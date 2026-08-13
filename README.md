@@ -23,9 +23,9 @@ The compiler can:
 - check that a `take`-consumed parameter isn't used again afterward within the same block (ownership / use-after-move)
 - check that a borrowed (`read`/`write`) struct parameter never escapes its function via a return value, directly or nested inside a returned struct literal (`RegionChecker`)
 - lower a checked program into Axea IR — a structured, per-function instruction sequence with ownership/capability/region markers embedded directly in the instruction stream (`IrGenerator`)
-- emit textual LLVM IR (`.ll`) from Axea IR — real basic blocks and phi nodes for `if`/`else`, heap-allocated (`malloc`) struct instances passed by pointer, and hoisted string-literal globals (`LlvmIrEmitter`)
+- emit textual LLVM IR (`.ll`) from Axea IR — real basic blocks and phi nodes for `if`/`else`, heap-allocated (`malloc`) struct instances passed by pointer, hoisted string-literal globals, and a generated `main` that prints every top-level binding (`ax run`-compatible output) so the output compiles and runs through a real LLVM toolchain (`LlvmIrEmitter`)
 - dump tokens, the AST, the IR, or the emitted LLVM IR
-- interpret whole programs: functions (including recursion and early `return`), struct construction, field access, and field mutation (visible through shared struct references)
+- interpret whole programs: functions (including recursion and early `return`), struct construction, field access, field mutation (visible through shared struct references), and loops (`while`, infinite `loop` with `break`/`continue`, `break value` for loop-as-expression)
 
 Example:
 
@@ -70,6 +70,7 @@ ctest --test-dir build --output-on-failure
 ./build/ax regions examples/regions.ax
 ./build/ax ir examples/capabilities.ax
 ./build/ax llvm-ir examples/capabilities.ax
+./build/ax run examples/loops.ax
 ```
 
 Expected AST (`examples/hello.ax`):
@@ -145,6 +146,17 @@ entry:
 }
 ```
 
+## Compile and run through a real LLVM toolchain
+
+`ax llvm-ir` output includes a generated `main` that prints every top-level binding in the same format `ax run` does, so it can be compiled and executed directly with `clang` (install with e.g. `sudo apt install clang`):
+
+```bash
+./build/ax llvm-ir examples/capabilities.ax | clang -x ir - -o /tmp/capabilities
+/tmp/capabilities
+```
+
+This should print the same output as `./build/ax run examples/capabilities.ax`.
+
 ## Formatting
 
 Format all source files with clang-format:
@@ -177,7 +189,8 @@ git config core.hooksPath .githooks
 8. ~~Add ownership analysis.~~ Done.
 9. ~~Add regions and escape analysis.~~ Done.
 10. ~~Design Axea IR.~~ Done.
-11. ~~Add LLVM as a backend only after the frontend semantics are stable.~~ Done (emits textual LLVM IR; not yet assembled/run through a real LLVM toolchain).
-12. Add standard library, tooling, and IDE support.
+11. ~~Add LLVM as a backend only after the frontend semantics are stable.~~ Done — emits textual LLVM IR with a generated `main`, verified end to end by compiling and running it through `clang`.
+12. ~~Add loops (`while`, `loop`, `break`, `continue`).~~ Done, across every stage from parsing through LLVM codegen.
+13. Add standard library, tooling, and IDE support.
 
 See `docs/language/` for the full syntax, grammar, and type-system specifications this implementation follows.

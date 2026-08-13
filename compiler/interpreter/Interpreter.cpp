@@ -29,6 +29,19 @@ namespace
     {
         Value value;
     };
+
+    // Thrown by `break`/`continue` and caught by the nearest enclosing loop's
+    // own execution - C++'s normal exception propagation already finds the
+    // *innermost* enclosing loop first, so nesting needs no extra bookkeeping
+    // (same non-std::exception design as ReturnSignal, for the same reason).
+    struct BreakSignal
+    {
+        Value value;
+    };
+
+    struct ContinueSignal
+    {
+    };
 } // namespace
 
 std::string toString(const Value& value)
@@ -105,6 +118,15 @@ const std::unordered_map<std::string, Value>& Environment::bindings() const
     return values_;
 }
 
+bool Environment::contains(const std::string& name) const
+{
+    if (values_.contains(name))
+    {
+        return true;
+    }
+    return parent_ && parent_->contains(name);
+}
+
 void Interpreter::run(const Program& program)
 {
     for (const auto& item : program.items)
@@ -132,7 +154,22 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        env.define(assignment->name, evaluate(*assignment->value, env));
+        // Mutates an already-existing binding (in this scope or any
+        // enclosing one), the same as `++`/`--` already do; only a name
+        // that's genuinely new here creates a fresh local. This matters most
+        // for loops: a loop body gets its own scope per iteration, and
+        // `n = n + 1` needs to actually update the outer `n` the condition
+        // checks, not shadow a throwaway per-iteration copy (see
+        // docs/language/0028-loops.md).
+        Value value = evaluate(*assignment->value, env);
+        if (env.contains(assignment->name))
+        {
+            env.assign(assignment->name, std::move(value));
+        }
+        else
+        {
+            env.define(assignment->name, std::move(value));
+        }
         return;
     }
 
@@ -201,6 +238,50 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         throw std::runtime_error("invalid increment/decrement target");
     }
 
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        const auto& block = static_cast<const BlockExpr&>(*whileStmt->body);
+        while (asBool(evaluate(*whileStmt->condition, env)))
+        {
+            try
+            {
+                // Fresh scope per iteration (matches BlockExpr's own
+                // per-evaluation child scope); the trailing result, if any,
+                // is evaluated for side effects only and discarded - `while`
+                // never produces a value (docs/language/0028-loops.md).
+                Environment bodyEnv(&env);
+                for (const auto& bodyStmt : block.statements)
+                {
+                    execute(*bodyStmt, bodyEnv);
+                }
+                if (block.result)
+                {
+                    evaluate(*block.result, bodyEnv);
+                }
+            }
+            catch (ContinueSignal&)
+            {
+                continue;
+            }
+            catch (BreakSignal&)
+            {
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        Value value = breakStmt->value ? evaluate(*breakStmt->value, env) : Value{std::monostate{}};
+        throw BreakSignal{std::move(value)};
+    }
+
+    if (dynamic_cast<const ContinueStmt*>(&stmt))
+    {
+        throw ContinueSignal{};
+    }
+
     throw std::runtime_error("unsupported statement");
 }
 
@@ -233,6 +314,38 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             return evaluate(*ifExpr->thenBranch, env);
         }
         return evaluate(*ifExpr->elseBranch, env);
+    }
+
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        const auto& block = static_cast<const BlockExpr&>(*loopExpr->body);
+        while (true)
+        {
+            try
+            {
+                // Same "discard the trailing result, only an explicit exit
+                // produces the real value" shape as `while` above - a `loop`
+                // never falls off the end of its body normally, it only ever
+                // exits via `break` (or diverges).
+                Environment bodyEnv(&env);
+                for (const auto& stmt : block.statements)
+                {
+                    execute(*stmt, bodyEnv);
+                }
+                if (block.result)
+                {
+                    evaluate(*block.result, bodyEnv);
+                }
+            }
+            catch (ContinueSignal&)
+            {
+                continue;
+            }
+            catch (BreakSignal& signal)
+            {
+                return std::move(signal.value);
+            }
+        }
     }
 
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))

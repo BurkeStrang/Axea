@@ -12,7 +12,7 @@ The original spec for this document was two lines:
 > LLVM is responsible for: Optimization, Register allocation, Code generation, Object file generation.
 > Axea remains responsible for language semantics and safety before lowering to LLVM IR.
 
-Phase 5 (Axea IR) deliberately stopped short of anything LLVM-shaped: no basic-block CFG, no phi nodes, nothing executed. This phase is the actual lowering pass that turns Phase 5's structured `IrProgram` into textual LLVM IR (`.ll`) — the last stage Axea itself is responsible for. Everything after this (optimization, register allocation, native code generation, object files) is real LLVM's job, and real LLVM never runs during this phase: there's no `llc`/`opt`/`clang` on this system, and linking against libLLVM's C++ API would be this project's first external dependency after five phases of staying self-contained. So the emitter is plain text generation — `std::string emit(const IrProgram&)` — and correctness this phase means "hand-reviewed, structurally plausible, valid-by-inspection LLVM IR text," not "assembled and run."
+Phase 5 (Axea IR) deliberately stopped short of anything LLVM-shaped: no basic-block CFG, no phi nodes, nothing executed. This phase is the actual lowering pass that turns Phase 5's structured `IrProgram` into textual LLVM IR (`.ll`) — the last stage Axea itself is responsible for. Everything after this (optimization, register allocation, native code generation, object files) is real LLVM's job, and linking against libLLVM's C++ API would be this project's first external dependency after five phases of staying self-contained. So the emitter is plain text generation — `std::string emit(const IrProgram&)`. Initial verification (no `clang`/`llc`/`opt` installed yet) was hand-review of the emitted text against known-good LLVM IR shapes; `clang` was installed shortly after (see "`main` and Real-Toolchain Verification" below), which caught a real bug hand-review had missed.
 
 ---
 
@@ -115,13 +115,67 @@ This is the standard, simplest representation for string literals in LLVM IR —
 
 ---
 
+# `main` and Real-Toolchain Verification
+
+The initial version of this backend had no callable entry point — `IrProgram::topLevel` (a script's own assignments, outside any function) was lowered into Axea IR but never emitted as anything, so `ax llvm-ir`'s output could be linked but never actually *run*. Once `clang` was installed, closing that gap became the natural next step: `emitMain` (`compiler/llvmir/LlvmIrEmitter.cpp`) lowers `program.topLevel` exactly like a zero-parameter function body (the existing `inferTypesInList`/`emitInstructions` machinery doesn't know or care whether an instruction list is a function body or the top-level script), then prints every top-level binding as `"name = value\n"` — matching `ax run`'s own printer (`compiler/main.cpp`, via `Interpreter`'s `toString()`) byte for byte, so the interpreter's output and the compiled binary's output can be diffed directly.
+
+Printing needs `declare i32 @printf(i8*, ...)` and a format string per value shape (`"%s = %d\n"` for `i32`; `"%s = %s\n"` for `bool`/`str`/`unit`, since a bool is first `select`ed into a `"true"`/`"false"` pointer and unit is always the literal string `"()"`, matching `toString`'s own convention exactly). Struct-typed bindings are the interesting case: `IrProgram::structs` gains one generated helper per struct type, `void @axea.print.<TypeName>(%TypeName*)`, that `printf`s `"TypeName { "`, then each field's name and value (recursing into `@axea.print.<Nested>` for a struct-typed field), then `" }"` — named with an `axea.print.` prefix specifically so it can never collide with a user-defined Axea function, since Axea function names are emitted unmangled as `@name`. `IrProgram` also gained `topLevelBindings: vector<(name, register)>`, populated by `IrGenerator::generate` right next to the existing top-level lowering loop, so `emitMain` knows which register holds each binding's final value and in what order to print them.
+
+```ax
+struct User { name: str  age: i32 }
+u = User { name: "Burke"  age: 35 }
+```
+
+```text
+$ ax llvm-ir user.ax
+define void @axea.print.User(%User* %0) {
+entry:
+  %1 = call i32 (i8*, ...) @printf(i8* getelementptr ([8 x i8], [8 x i8]* @.str.7, i64 0, i64 0))
+  %2 = call i32 (i8*, ...) @printf(i8* getelementptr ([7 x i8], [7 x i8]* @.str.8, i64 0, i64 0))
+  %3 = getelementptr %User, %User* %0, i32 0, i32 0
+  %4 = load i8*, i8** %3
+  %5 = call i32 (i8*, ...) @printf(i8* getelementptr ([3 x i8], [3 x i8]* @.str.4, i64 0, i64 0), i8* %4)
+  %6 = call i32 (i8*, ...) @printf(i8* getelementptr ([3 x i8], [3 x i8]* @.str.1, i64 0, i64 0))
+  %7 = call i32 (i8*, ...) @printf(i8* getelementptr ([6 x i8], [6 x i8]* @.str.9, i64 0, i64 0))
+  %8 = getelementptr %User, %User* %0, i32 0, i32 1
+  %9 = load i32, i32* %8
+  %10 = call i32 (i8*, ...) @printf(i8* getelementptr ([3 x i8], [3 x i8]* @.str.3, i64 0, i64 0), i32 %9)
+  %11 = call i32 (i8*, ...) @printf(i8* getelementptr ([3 x i8], [3 x i8]* @.str.2, i64 0, i64 0))
+  ret void
+}
+
+define i32 @main() {
+entry:
+  ...
+  %8 = call i32 (i8*, ...) @printf(i8* getelementptr ([6 x i8], [6 x i8]* @.str.12, i64 0, i64 0), i8* getelementptr ([2 x i8], [2 x i8]* @.str.15, i64 0, i64 0))
+  call void @axea.print.User(%User* %5)
+  %9 = call i32 (i8*, ...) @printf(i8* getelementptr ([2 x i8], [2 x i8]* @.str.13, i64 0, i64 0))
+  ret i32 0
+}
+```
+
+```
+$ clang out.ll -o out && ./out
+u = User { name: Burke, age: 35 }
+```
+
+## Bug Caught: A Discarded `call` Still Consumes a Register
+
+Every `printf` call in `emitMain`/`emitStructPrintHelpers` discards its result (the `int` character count `printf` returns) — the first version wrote these as plain `call i32 (i8*, ...) @printf(...)` with no `%N = ` prefix, since nothing needed to reference the result. Compiling through real `clang` for the first time (`clang out.ll -o out`) immediately rejected it: *"instruction expected to be numbered '%3' or greater."*
+
+The cause: LLVM's numbering scheme assigns a slot to the **result of any non-void instruction**, whether or not the text names it — a `call` to a function returning `i32` (like `printf`) implicitly consumes the next unnamed register even when written without a `%N =` prefix. Every later *explicit* register number in that function was silently off by however many discarded printf calls preceded it, which hand-review had no way to catch (the text looks completely reasonable — it's LLVM's own accounting that disagreed). Real `llc`/`clang` catches this instantly; nothing on this project's own side (grep, structural tests, careful reading) would have.
+
+Fixed by always capturing a printf call's result into a register — `%N = call i32 (i8*, ...) @printf(...)` — even though the value is never read, so it participates in the same `nextReg`/`allocateRegister` counter as everything else in that function. `void`-returning calls (`@axea.print.<Type>`) are unaffected — a genuinely void call produces no value and consumes no slot, which is why the *existing* lowering (`emitInstructions`'s `IrCall` case) already only omits the `%N =` prefix specifically when the callee's return type is `void`. `tests/LlvmIrEmitterTests.cpp` pins this down structurally (every `call i32 (i8*, ...) @printf(` must be immediately preceded by `%N = ` on its own line) and, more importantly, all six `examples/*.ax` files are now verified by actually compiling and running them through `clang` and diffing against `ax run`'s output — the real end-to-end check this whole backend exists for.
+
+---
+
 # Compiler Implementation
 
 `compiler/llvmir/LlvmIrEmitter.hpp/.cpp` — named `llvmir`, not `llvm`, since nothing here links against real LLVM; it emits text. Public surface is `std::string emit(const IrProgram&)`; it consumes only Phase 5's `IrProgram`, not the AST or the checkers directly — the entire point of having an IR is that the backend only needs to understand IR concepts.
 
 `FunctionContext` is the per-function emission state, threaded through the recursive walk (the same role `IrGenerator::Context` played in Phase 5): a type map (`registerTypes`), the register-numbering map and counter described above, a label counter for fresh `if.then`/`if.else`/`if.merge` names, the current basic block's label (updated recursively so a nested branch's own merge label becomes the correct phi predecessor one level up), and the output stream.
 
-`ax llvm-ir <file.ax>` prints the emitted `.ll` text to stdout, running the full existing pipeline (type-check → capability-check → region-check → `IrGenerator::generate`) then the new emitter — consistent with every other command's convention (no `-o` flag; redirect if you want a file). `ax run`/`ax ir` are unchanged; LLVM IR emission isn't part of execution or Phase 5's own printer in this phase.
+`ax llvm-ir <file.ax>` prints the emitted `.ll` text to stdout, running the full existing pipeline (type-check → capability-check → region-check → `IrGenerator::generate`) then the new emitter — consistent with every other command's convention (no `-o` flag; redirect if you want a file). `ax run`/`ax ir` are unchanged; LLVM IR emission isn't part of execution or Phase 5's own printer in this phase. The output is now a genuinely runnable program: `ax llvm-ir file.ax | clang -x ir - -o file && ./file` compiles and runs it through the real LLVM toolchain, `main` and all.
 
 ---
 
@@ -129,18 +183,17 @@ This is the standard, simplest representation for string literals in LLVM IR —
 
 Consistent with every prior phase's own stated scope cuts:
 
-- **Top-level script statements aren't emitted as a callable entry point.** `IrProgram::topLevel` (a bare script's assignments/expressions, outside any function) has no established `main`-equivalent convention yet — Phase 2 deliberately kept the language script-style with no `main` requirement, and wiring up an entry point is a separate decision, not implied by "emit LLVM IR for what's already there." String literals from `topLevel` are still collected into globals (harmless and needed if a future entry point references them), but no function is emitted for `topLevel` itself.
 - **No `free`, no real allocator.** Every struct leaks; see "Every Struct Is Heap-Allocated, Never Freed" above.
 - **No division-by-zero trap.** The interpreter checks and throws at runtime (Phase 1); native `sdiv` doesn't, matching how C/C++ itself treats it — undefined behavior, not a checked error.
 - **`Drop` still has no teeth.** Axea IR's `Drop` markers are informational only (Phase 5) and stay that way here — they emit no LLVM instruction at all, same as `BorrowRead`/`BorrowWrite`/`Move`/`RegionEnter`/`RegionExit`.
-- **Nothing actually assembles or runs this output.** No `llc`, no `clang`, no object files, no native binary — verification this phase is hand-review of the emitted text against known-good LLVM IR shapes, backed by `tests/LlvmIrEmitterTests.cpp`'s structural/substring assertions (the same style LLVM's own test suite uses at a larger scale). Installing a real LLVM toolchain and exercising this output through `llc` is follow-on work, not required for this phase.
+- **No general "print any value" language feature.** `main`'s printing is specifically about reporting top-level *bindings*, matching `ax run`'s own limited scope — there's no `print()` builtin usable from within Axea source that reaches this machinery.
+- **No object files or optimization passes exercised.** Compiling through `clang`/`llc` now works (see above), but nothing in this project invokes `opt` or inspects generated assembly/object code — that's real LLVM's job, deliberately left untouched.
 
 ---
 
 # Open Questions
 
 - Once loops exist, `if`/`else`'s phi-merge approach extends naturally, but a loop's back-edge will need its own phi at the loop header — does the current per-`Branch` label/phi bookkeeping generalize cleanly, or does loop lowering want its own dedicated pass?
-- Should `topLevel` gain a real `main`-equivalent convention as part of eventually running emitted IR through `llc`, or does that decision belong to whatever phase first makes running native output a goal?
 - Once `free`/a real allocator exists, does region/capability information already computed by Phases 3–4 (and threaded through Axea IR's `BorrowRead`/`BorrowWrite`/`Move`/`Drop` markers) turn out to be sufficient to place `free` calls safely, or does it need to get more precise first (per Phase 5's own "Known Imprecision" notes on `Drop`)?
 
 ---

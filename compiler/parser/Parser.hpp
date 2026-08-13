@@ -26,10 +26,14 @@ private:
     std::unique_ptr<Stmt> parseStructDecl();
     std::unique_ptr<Stmt> parseAssignment();
     std::unique_ptr<Stmt> parseReturn();
+    std::unique_ptr<Stmt> parseWhile();
+    std::unique_ptr<Stmt> parseBreak();
+    std::unique_ptr<Stmt> parseContinue();
     Param parseParam();
 
     std::unique_ptr<Expr> parseBlock();
     std::unique_ptr<Expr> parseIfExpr();
+    std::unique_ptr<Expr> parseLoopExpr();
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> parseStructLiteralFields();
 
     std::unique_ptr<Expr> parseExpression(int minPrecedence = 0, bool allowStructLiteral = true);

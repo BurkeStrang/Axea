@@ -354,3 +354,62 @@ TEST("Parser rejects an invalid increment target")
 {
     EXPECT_THROWS(parseOne("f() -> i32 { (1 + 2)++  3 }"));
 }
+
+TEST("Parser builds a while statement with condition and body")
+{
+    auto program = parseOne("f() { while n < 5 { n++ } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    EXPECT_EQ(body->statements.size(), static_cast<std::size_t>(1));
+
+    auto* whileStmt = dynamic_cast<WhileStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(whileStmt != nullptr);
+    auto* condition = dynamic_cast<BinaryExpr*>(whileStmt->condition.get());
+    EXPECT_TRUE(condition != nullptr);
+    EXPECT_EQ(condition->op, TokenKind::Less);
+    auto* whileBody = dynamic_cast<BlockExpr*>(whileStmt->body.get());
+    EXPECT_TRUE(whileBody != nullptr);
+    EXPECT_EQ(whileBody->statements.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a loop expression with break value and continue")
+{
+    auto program = parseOne("f() -> i32 { return loop { continue  break 1 } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(returnStmt != nullptr);
+
+    auto* loopExpr = dynamic_cast<LoopExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(loopExpr != nullptr);
+    auto* loopBody = dynamic_cast<BlockExpr*>(loopExpr->body.get());
+    EXPECT_TRUE(loopBody != nullptr);
+    // break/continue are always statements, even in trailing position - the
+    // block's own `result` (expression-only) stays null.
+    EXPECT_EQ(loopBody->statements.size(), static_cast<std::size_t>(2));
+    EXPECT_TRUE(loopBody->result == nullptr);
+
+    auto* continueStmt = dynamic_cast<ContinueStmt*>(loopBody->statements.at(0).get());
+    EXPECT_TRUE(continueStmt != nullptr);
+
+    auto* breakStmt = dynamic_cast<BreakStmt*>(loopBody->statements.at(1).get());
+    EXPECT_TRUE(breakStmt != nullptr);
+    auto* breakValue = dynamic_cast<IntegerExpr*>(breakStmt->value.get());
+    EXPECT_TRUE(breakValue != nullptr);
+    EXPECT_EQ(breakValue->value, 1);
+}
+
+TEST("Parser builds a bare break with no value")
+{
+    auto program = parseOne("f() { while true { break } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* whileStmt = dynamic_cast<WhileStmt*>(body->statements.at(0).get());
+    auto* whileBody = dynamic_cast<BlockExpr*>(whileStmt->body.get());
+    auto* breakStmt = dynamic_cast<BreakStmt*>(whileBody->statements.at(0).get());
+    EXPECT_TRUE(breakStmt != nullptr);
+    EXPECT_TRUE(breakStmt->value == nullptr);
+}

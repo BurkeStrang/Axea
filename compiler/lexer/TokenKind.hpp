@@ -44,6 +44,10 @@ enum class TokenKind
     Read,
     Write,
     Take,
+    While,
+    Loop,
+    Break,
+    Continue,
 
     EndOfFile,
     Invalid
@@ -88,6 +92,10 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Read: return "Read";
         case TokenKind::Write: return "Write";
         case TokenKind::Take: return "Take";
+        case TokenKind::While: return "While";
+        case TokenKind::Loop: return "Loop";
+        case TokenKind::Break: return "Break";
+        case TokenKind::Continue: return "Continue";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

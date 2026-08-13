@@ -126,6 +126,45 @@ struct IrDrop final : IrInst
     int value;
 };
 
+// `while`/`loop`, kept structured like IrBranch: a nested conditionBlock
+// (empty for infinite `loop`) and body instead of separate labeled blocks.
+// `dest` (from IrInst) is the loop's own produced value - only meaningful
+// for `loop` (used when consumed as an expression); `while` never produces
+// one. See docs/language/0028-loops.md for the full design, in particular
+// why loop-carried mutation is represented via `carried` (consumed by the
+// LLVM backend as alloca/load/store, not phi nodes) rather than anything
+// resembling strict SSA at this level.
+struct IrLoop final : IrInst
+{
+    std::vector<std::unique_ptr<IrInst>> conditionBlock; // empty for infinite `loop`
+    int conditionValue = -1; // register in conditionBlock; -1 = infinite
+    std::vector<std::unique_ptr<IrInst>> body;
+    // (register holding a name's value just before the loop, register
+    // holding it at the end of one static body traversal) per name mutated
+    // inside the loop body - populated by diffing an IrScope snapshot taken
+    // before/after lowering body.
+    std::vector<std::pair<int, int>> carried;
+};
+
+// `break [value]`, always targets the innermost enclosing IrLoop. `carried`
+// mirrors IrLoop::carried but snapshotted at *this* point in the body rather
+// than the body's natural end - a break can fire before any/all
+// reassignments happen, so the LLVM backend needs to know exactly which
+// carried variables changed (and to what) by the time control reaches here,
+// to correctly update their storage before jumping to the loop's exit.
+struct IrBreak final : IrInst
+{
+    int value = -1; // -1 = bare `break`
+    std::vector<std::pair<int, int>> carried;
+};
+
+// `continue`, always targets the innermost enclosing IrLoop. `carried`: see
+// IrBreak - same reasoning, needed before jumping back to the loop header.
+struct IrContinue final : IrInst
+{
+    std::vector<std::pair<int, int>> carried;
+};
+
 struct IrFunction
 {
     std::string name;
@@ -140,6 +179,10 @@ struct IrProgram
 {
     std::vector<IrFunction> functions;
     std::vector<std::unique_ptr<IrInst>> topLevel;
+    // (name, final register) for each top-level assignment, in source order -
+    // mirrors how `ax run` reports top-level bindings, and is what a
+    // generated `main` (LlvmIrEmitter) prints.
+    std::vector<std::pair<std::string, int>> topLevelBindings;
     // struct name -> its fields, in declared order, as (fieldName, fieldType) pairs.
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> structs;
 };

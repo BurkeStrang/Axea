@@ -107,6 +107,13 @@ namespace
             }
             return;
         }
+
+        if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+        {
+            std::cout << pad << "Loop\n";
+            printExpr(*loopExpr->body, indent + 2);
+            return;
+        }
     }
 
     void printStmt(const Stmt& stmt, int indent)
@@ -149,6 +156,30 @@ namespace
         {
             std::cout << pad << (incDec->increment ? "Increment\n" : "Decrement\n");
             printExpr(*incDec->target, indent + 2);
+            return;
+        }
+
+        if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+        {
+            std::cout << pad << "While\n";
+            printExpr(*whileStmt->condition, indent + 2);
+            printExpr(*whileStmt->body, indent + 2);
+            return;
+        }
+
+        if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+        {
+            std::cout << pad << "Break\n";
+            if (breakStmt->value)
+            {
+                printExpr(*breakStmt->value, indent + 2);
+            }
+            return;
+        }
+
+        if (dynamic_cast<const ContinueStmt*>(&stmt))
+        {
+            std::cout << pad << "Continue\n";
             return;
         }
 
@@ -261,6 +292,65 @@ namespace
                 printIrInst(*elseInst, indent + 2);
             }
             std::cout << pad << "} (-> %" << branch->elseValue << ")\n";
+            return;
+        }
+
+        if (const auto* loop = dynamic_cast<const IrLoop*>(&inst))
+        {
+            std::cout << pad << "%" << loop->dest << " = loop";
+            if (!loop->conditionBlock.empty() || loop->conditionValue != -1)
+            {
+                std::cout << " while {\n";
+                for (const auto& condInst : loop->conditionBlock)
+                {
+                    printIrInst(*condInst, indent + 2);
+                }
+                std::cout << pad << "} (-> %" << loop->conditionValue << ") {\n";
+            }
+            else
+            {
+                std::cout << " {\n";
+            }
+            for (const auto& bodyInst : loop->body)
+            {
+                printIrInst(*bodyInst, indent + 2);
+            }
+            std::cout << pad << "}";
+            if (!loop->carried.empty())
+            {
+                std::cout << " carried:";
+                for (const auto& [before, after] : loop->carried)
+                {
+                    std::cout << " (%" << before << " -> %" << after << ")";
+                }
+            }
+            std::cout << "\n";
+            return;
+        }
+
+        if (const auto* breakInst = dynamic_cast<const IrBreak*>(&inst))
+        {
+            std::cout << pad << "break";
+            if (breakInst->value != -1)
+            {
+                std::cout << " %" << breakInst->value;
+            }
+            for (const auto& [before, after] : breakInst->carried)
+            {
+                std::cout << " (%" << before << " -> %" << after << ")";
+            }
+            std::cout << "\n";
+            return;
+        }
+
+        if (const auto* continueInst = dynamic_cast<const IrContinue*>(&inst))
+        {
+            std::cout << pad << "continue";
+            for (const auto& [before, after] : continueInst->carried)
+            {
+                std::cout << " (%" << before << " -> %" << after << ")";
+            }
+            std::cout << "\n";
             return;
         }
 

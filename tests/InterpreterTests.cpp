@@ -205,3 +205,77 @@ TEST("Interpreter decrement works on a plain parameter")
 {
     EXPECT_EQ(std::get<std::int64_t>(run("f(n: i32) -> i32 { n--  return n }  x = f(5)")), 4);
 }
+
+TEST("Interpreter runs a while loop, mutating an outer variable via plain assignment")
+{
+    const std::string source = "sumTo(limit: i32) -> i32 { "
+                               "  n = 0  total = 0 "
+                               "  while n < limit { n = n + 1  total = total + n } "
+                               "  return total "
+                               "} "
+                               "x = sumTo(5)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 15);
+}
+
+TEST("Interpreter runs an infinite loop that exits via break with a value")
+{
+    const std::string source = "findFirstOver(limit: i32) -> i32 { "
+                               "  n = 0 "
+                               "  return loop { "
+                               "    n = n + 1 "
+                               "    if n > limit { break n } "
+                               "  } "
+                               "} "
+                               "x = findFirstOver(8)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter continue skips the rest of the current iteration")
+{
+    // Sums only odd numbers from 1 to limit.
+    const std::string source = "sumOdds(limit: i32) -> i32 { "
+                               "  n = 0  total = 0 "
+                               "  while n < limit { "
+                               "    n = n + 1 "
+                               "    if n / 2 * 2 == n { continue } "
+                               "    total = total + n "
+                               "  } "
+                               "  return total "
+                               "} "
+                               "x = sumOdds(6)"; // 1 + 3 + 5 = 9
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter nested loops: an inner break does not affect the outer loop")
+{
+    const std::string source = "f() -> i32 { "
+                               "  total = 0 "
+                               "  i = 0 "
+                               "  while i < 3 { "
+                               "    i = i + 1 "
+                               "    j = 0 "
+                               "    while true { "
+                               "      j = j + 1 "
+                               "      if j > 2 { break } "
+                               "      total = total + 1 "
+                               "    } "
+                               "  } "
+                               "  return total "
+                               "} "
+                               "x = f()"; // 3 outer iterations * 2 inner increments = 6
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter bare break exits a while loop early, discarding no useful value")
+{
+    const std::string source = "f() -> i32 { "
+                               "  n = 0 "
+                               "  while true { "
+                               "    n = n + 1 "
+                               "    if n == 4 { break } "
+                               "  } "
+                               "  return n "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
+}

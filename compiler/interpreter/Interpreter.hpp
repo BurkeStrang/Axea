@@ -33,6 +33,8 @@ public:
     void define(const std::string& name, Value value); // declares/shadows in this scope
     void assign(const std::string& name, Value value); // mutates an existing binding, walking up
     Value get(const std::string& name) const;
+    bool
+    contains(const std::string& name) const; // walks the chain; used to decide define vs assign
 
     const std::unordered_map<std::string, Value>& bindings() const;
 

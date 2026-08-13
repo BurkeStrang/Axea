@@ -373,3 +373,128 @@ TEST("IrGenerator lowers a function whose entire body is an if/else where both b
     EXPECT_TRUE(containsReturn(branch->thenBlock));
     EXPECT_TRUE(containsReturn(branch->elseBlock));
 }
+
+TEST("IrGenerator lowers a while loop with a conditionBlock and detects carried variables")
+{
+    auto program = generateIr("sumTo(limit: i32) -> i32 { "
+                              "  n = 0  total = 0 "
+                              "  while n < limit { n = n + 1  total = total + n } "
+                              "  return total "
+                              "}");
+    const auto& sumTo = functionNamed(program, "sumTo");
+
+    const IrLoop* loop = nullptr;
+    for (const auto& inst : sumTo.body)
+    {
+        if (const auto* l = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            loop = l;
+        }
+    }
+    EXPECT_TRUE(loop != nullptr);
+    EXPECT_TRUE(!loop->conditionBlock.empty());
+    EXPECT_TRUE(loop->conditionValue != -1);
+    EXPECT_EQ(loop->carried.size(), static_cast<std::size_t>(2)); // n and total both carried
+}
+
+TEST("IrGenerator lowers an infinite loop with no conditionBlock")
+{
+    auto program = generateIr("f() -> i32 { return loop { break 1 } }");
+    const auto& f = functionNamed(program, "f");
+
+    const IrLoop* loop = nullptr;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* l = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            loop = l;
+        }
+    }
+    EXPECT_TRUE(loop != nullptr);
+    EXPECT_TRUE(loop->conditionBlock.empty());
+    EXPECT_EQ(loop->conditionValue, -1);
+    EXPECT_TRUE(loop->carried.empty());
+}
+
+TEST("IrGenerator records a continue's own carried snapshot, distinct from the loop's own")
+{
+    auto program = generateIr("f() { "
+                              "  n = 0 "
+                              "  while n < 10 { "
+                              "    n = n + 1 "
+                              "    if n == 3 { continue } "
+                              "    n = n + 100 "
+                              "  } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+
+    const IrLoop* loop = nullptr;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* l = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            loop = l;
+        }
+    }
+    EXPECT_TRUE(loop != nullptr);
+
+    const IrContinue* continueInst = nullptr;
+    for (const auto& inst : loop->body)
+    {
+        if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get()))
+        {
+            for (const auto& thenInst : branch->thenBlock)
+            {
+                if (const auto* c = dynamic_cast<const IrContinue*>(thenInst.get()))
+                {
+                    continueInst = c;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(continueInst != nullptr);
+    // At the continue, only `n`'s first increment has happened yet - not the
+    // `+ 100` that comes after it in the body.
+    EXPECT_EQ(continueInst->carried.size(), static_cast<std::size_t>(1));
+    EXPECT_TRUE(continueInst->carried.front().second != loop->carried.front().second);
+}
+
+TEST("IrGenerator records a break's own carried snapshot")
+{
+    auto program = generateIr("f() -> i32 { "
+                              "  n = 0 "
+                              "  return loop { "
+                              "    n = n + 1 "
+                              "    if n > 3 { break n } "
+                              "  } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+
+    const IrLoop* loop = nullptr;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* l = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            loop = l;
+        }
+    }
+    EXPECT_TRUE(loop != nullptr);
+
+    const IrBreak* breakInst = nullptr;
+    for (const auto& inst : loop->body)
+    {
+        if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get()))
+        {
+            for (const auto& thenInst : branch->thenBlock)
+            {
+                if (const auto* b = dynamic_cast<const IrBreak*>(thenInst.get()))
+                {
+                    breakInst = b;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(breakInst != nullptr);
+    EXPECT_TRUE(breakInst->value != -1);
+    EXPECT_EQ(breakInst->carried.size(), static_cast<std::size_t>(1));
+}

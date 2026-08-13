@@ -77,6 +77,29 @@ int IrScope::find(const std::string& name) const
     throw std::runtime_error("undefined variable: " + name);
 }
 
+bool IrScope::contains(const std::string& name) const
+{
+    if (registers_.contains(name))
+    {
+        return true;
+    }
+    return parent_ && parent_->contains(name);
+}
+
+std::unordered_map<std::string, int> IrScope::snapshot() const
+{
+    std::unordered_map<std::string, int> result;
+    if (parent_)
+    {
+        result = parent_->snapshot();
+    }
+    for (const auto& [name, registerId] : registers_)
+    {
+        result[name] = registerId; // inner scope's own binding shadows the parent's
+    }
+    return result;
+}
+
 int IrGenerator::freshRegister(Context& ctx)
 {
     return (*ctx.registerCount)++;
@@ -225,6 +248,11 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(branch));
     }
 
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        return lowerLoop(nullptr, *loopExpr->body, scope, ctx);
+    }
+
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
         IrScope blockScope(&scope);
@@ -261,7 +289,21 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
         const int value = lowerExpr(*assignment->value, scope, ctx);
-        scope.define(assignment->name, value);
+        // Mutates an already-existing binding (in this scope or any
+        // enclosing one, subject to the same barrier rule as assign()
+        // itself), the same as `++`/`--` already do; only a genuinely new
+        // name defines a fresh local. Matters most for loops: a loop body's
+        // `n = n + 1` needs to actually update the outer `n`, not shadow a
+        // throwaway per-traversal copy (mirrors the same fix in
+        // Interpreter::execute; see docs/language/0028-loops.md).
+        if (scope.contains(assignment->name))
+        {
+            scope.assign(assignment->name, value);
+        }
+        else
+        {
+            scope.define(assignment->name, value);
+        }
         if (ctx.function && ctx.structLocals &&
             isObviouslyStructTyped(*assignment->value, *ctx.function))
         {
@@ -345,6 +387,94 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         }
         return;
     }
+
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        lowerLoop(whileStmt->condition.get(),
+                  *whileStmt->body,
+                  scope,
+                  ctx); // dest discarded - `while` never produces a value
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        auto inst = std::make_unique<IrBreak>();
+        // Order matters: the value expression is lowered (and may itself
+        // reassign carried variables, e.g. `break n++`) before the carried
+        // snapshot is taken, so the snapshot reflects everything up to and
+        // including this statement.
+        inst->value = breakStmt->value ? lowerExpr(*breakStmt->value, scope, ctx) : -1;
+        inst->carried = currentLoopCarriedDiff(scope);
+        emitVoid(ctx, std::move(inst));
+        return;
+    }
+
+    if (dynamic_cast<const ContinueStmt*>(&stmt))
+    {
+        auto inst = std::make_unique<IrContinue>();
+        inst->carried = currentLoopCarriedDiff(scope);
+        emitVoid(ctx, std::move(inst));
+        return;
+    }
+}
+
+std::vector<std::pair<int, int>> IrGenerator::currentLoopCarriedDiff(IrScope& scope) const
+{
+    std::vector<std::pair<int, int>> result;
+    if (loopPreSnapshotStack_.empty())
+    {
+        return result; // unreachable in a well-typed program - TypeChecker already
+                       // rejects break/continue outside a loop
+    }
+    const auto& preSnapshot = loopPreSnapshotStack_.back();
+    const auto currentSnapshot = scope.snapshot();
+    for (const auto& [name, preReg] : preSnapshot)
+    {
+        const auto it = currentSnapshot.find(name);
+        if (it != currentSnapshot.end() && it->second != preReg)
+        {
+            result.emplace_back(preReg, it->second);
+        }
+    }
+    return result;
+}
+
+int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& scope, Context& ctx)
+{
+    auto loopInst = std::make_unique<IrLoop>();
+
+    if (condition)
+    {
+        Context condCtx{
+            &loopInst->conditionBlock, ctx.registerCount, ctx.function, ctx.structLocals};
+        loopInst->conditionValue = lowerExpr(*condition, scope, condCtx);
+    }
+
+    // `body` is always a BlockExpr; lowerExpr's own BlockExpr handling
+    // already creates its own nested (non-barrier) scope and drops its own
+    // struct locals - nothing extra needed here beyond diffing what it did
+    // to `scope` itself, since assign() walks all the way up through that
+    // nested scope into `scope` for any name that already lived here.
+    const auto preSnapshot = scope.snapshot();
+    loopPreSnapshotStack_.push_back(
+        preSnapshot); // innermost loop's snapshot, for nested break/continue
+    Context bodyCtx{&loopInst->body, ctx.registerCount, ctx.function, ctx.structLocals};
+    lowerExpr(body, scope, bodyCtx); // trailing block value discarded - only `break value` produces
+                                     // the loop's own value
+    loopPreSnapshotStack_.pop_back();
+    const auto postSnapshot = scope.snapshot();
+
+    for (const auto& [name, preReg] : preSnapshot)
+    {
+        const auto it = postSnapshot.find(name);
+        if (it != postSnapshot.end() && it->second != preReg)
+        {
+            loopInst->carried.emplace_back(preReg, it->second);
+        }
+    }
+
+    return emit(ctx, std::move(loopInst));
 }
 
 IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
@@ -460,6 +590,8 @@ IrGenerator::generate(const Program& program,
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             lowerStmt(*assignment, topScope, topCtx);
+            irProgram.topLevelBindings.emplace_back(assignment->name,
+                                                    topScope.find(assignment->name));
         }
     }
 

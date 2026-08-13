@@ -210,16 +210,21 @@ Token Lexer::lexIdentifierOrKeyword()
 
     auto token = makeToken(TokenKind::Identifier, start, startLine, startColumn);
 
-    static const std::unordered_map<std::string, TokenKind> keywords{{"if", TokenKind::If},
-                                                                     {"else", TokenKind::Else},
-                                                                     {"struct", TokenKind::Struct},
-                                                                     {"pub", TokenKind::Pub},
-                                                                     {"true", TokenKind::True},
-                                                                     {"false", TokenKind::False},
-                                                                     {"return", TokenKind::Return},
-                                                                     {"read", TokenKind::Read},
-                                                                     {"write", TokenKind::Write},
-                                                                     {"take", TokenKind::Take}};
+    static const std::unordered_map<std::string, TokenKind> keywords{
+        {"if", TokenKind::If},
+        {"else", TokenKind::Else},
+        {"struct", TokenKind::Struct},
+        {"pub", TokenKind::Pub},
+        {"true", TokenKind::True},
+        {"false", TokenKind::False},
+        {"return", TokenKind::Return},
+        {"read", TokenKind::Read},
+        {"write", TokenKind::Write},
+        {"take", TokenKind::Take},
+        {"while", TokenKind::While},
+        {"loop", TokenKind::Loop},
+        {"break", TokenKind::Break},
+        {"continue", TokenKind::Continue}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {

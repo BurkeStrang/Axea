@@ -123,7 +123,7 @@ void TypeChecker::check(const Program& program)
         }
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
-            checkStmt(*assignment, globalEnv, nullptr);
+            checkStmt(*assignment, globalEnv, nullptr, nullptr);
         }
     }
 }
@@ -138,9 +138,11 @@ void TypeChecker::checkFunction(const FunctionDecl& function)
 
     const Type expectedReturn = function.returnType ? resolveType(*function.returnType) : kUnit;
     const auto& block = static_cast<const BlockExpr&>(*function.body);
-    checkBlock(
-        block, env, &expectedReturn); // validates every return's value type, and the internal
-                                      // correctness of any leftover discarded trailing expression
+    checkBlock(block,
+               env,
+               &expectedReturn,
+               nullptr); // validates every return's value type, and the internal
+                         // correctness of any leftover discarded trailing expression
 
     if (!(expectedReturn == kUnit) && !definitelyReturns(block))
     {
@@ -183,25 +185,30 @@ bool TypeChecker::definitelyReturnsBranch(const IfExpr& ifExpr) const
 
 Type TypeChecker::checkBlock(const BlockExpr& block,
                              TypeEnv& parentEnv,
-                             const Type* expectedReturnType)
+                             const Type* expectedReturnType,
+                             std::vector<Type>* currentLoopBreakTypes)
 {
     TypeEnv env(&parentEnv);
     for (const auto& statement : block.statements)
     {
-        checkStmt(*statement, env, expectedReturnType);
+        checkStmt(*statement, env, expectedReturnType, currentLoopBreakTypes);
     }
     if (block.result)
     {
-        return checkExpr(*block.result, env, expectedReturnType);
+        return checkExpr(*block.result, env, expectedReturnType, currentLoopBreakTypes);
     }
     return kUnit;
 }
 
-void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expectedReturnType)
+void TypeChecker::checkStmt(const Stmt& stmt,
+                            TypeEnv& env,
+                            const Type* expectedReturnType,
+                            std::vector<Type>* currentLoopBreakTypes)
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        const Type valueType = checkExpr(*assignment->value, env, expectedReturnType);
+        const Type valueType =
+            checkExpr(*assignment->value, env, expectedReturnType, currentLoopBreakTypes);
         if (assignment->declaredType)
         {
             const Type declared = resolveType(*assignment->declaredType);
@@ -223,7 +230,9 @@ void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expected
             throw std::runtime_error("'return' used outside a function");
         }
         const Type valueType =
-            returnStmt->value ? checkExpr(*returnStmt->value, env, expectedReturnType) : kUnit;
+            returnStmt->value
+                ? checkExpr(*returnStmt->value, env, expectedReturnType, currentLoopBreakTypes)
+                : kUnit;
         if (!(valueType == *expectedReturnType))
         {
             throw std::runtime_error("'return' produces " + typeName(valueType) +
@@ -234,15 +243,19 @@ void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expected
 
     if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
     {
-        checkExpr(*exprStmt->expr, env, expectedReturnType);
+        checkExpr(*exprStmt->expr, env, expectedReturnType, currentLoopBreakTypes);
         return;
     }
 
     if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
     {
-        const Type fieldType =
-            checkFieldType(*fieldAssign->object, fieldAssign->field, env, expectedReturnType);
-        const Type valueType = checkExpr(*fieldAssign->value, env, expectedReturnType);
+        const Type fieldType = checkFieldType(*fieldAssign->object,
+                                              fieldAssign->field,
+                                              env,
+                                              expectedReturnType,
+                                              currentLoopBreakTypes);
+        const Type valueType =
+            checkExpr(*fieldAssign->value, env, expectedReturnType, currentLoopBreakTypes);
         if (!(fieldType == valueType))
         {
             throw std::runtime_error("field '" + fieldAssign->field + "' expects " +
@@ -253,11 +266,59 @@ void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expected
 
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
-        const Type targetType = checkExpr(*incDec->target, env, expectedReturnType);
+        const Type targetType =
+            checkExpr(*incDec->target, env, expectedReturnType, currentLoopBreakTypes);
         if (!(targetType == kI32))
         {
             throw std::runtime_error("'++'/'--' requires an i32 target, found " +
                                      typeName(targetType));
+        }
+        return;
+    }
+
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        const Type conditionType =
+            checkExpr(*whileStmt->condition, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(conditionType == kBool))
+        {
+            throw std::runtime_error("while condition must be bool, found " +
+                                     typeName(conditionType));
+        }
+        std::vector<Type>
+            breakTypes; // fresh per loop - a break here can never target an outer loop
+        checkBlock(
+            static_cast<const BlockExpr&>(*whileStmt->body), env, expectedReturnType, &breakTypes);
+        for (const Type& breakType : breakTypes)
+        {
+            if (!(breakType == kUnit))
+            {
+                throw std::runtime_error(
+                    "'break' with a value is only allowed inside 'loop', not 'while'");
+            }
+        }
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (!currentLoopBreakTypes)
+        {
+            throw std::runtime_error("'break' used outside a loop");
+        }
+        const Type valueType =
+            breakStmt->value
+                ? checkExpr(*breakStmt->value, env, expectedReturnType, currentLoopBreakTypes)
+                : kUnit;
+        currentLoopBreakTypes->push_back(valueType);
+        return;
+    }
+
+    if (dynamic_cast<const ContinueStmt*>(&stmt))
+    {
+        if (!currentLoopBreakTypes)
+        {
+            throw std::runtime_error("'continue' used outside a loop");
         }
         return;
     }
@@ -268,9 +329,10 @@ void TypeChecker::checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expected
 Type TypeChecker::checkFieldType(const Expr& object,
                                  const std::string& field,
                                  TypeEnv& env,
-                                 const Type* expectedReturnType)
+                                 const Type* expectedReturnType,
+                                 std::vector<Type>* currentLoopBreakTypes)
 {
-    const Type objectType = checkExpr(object, env, expectedReturnType);
+    const Type objectType = checkExpr(object, env, expectedReturnType, currentLoopBreakTypes);
     if (objectType.kind != TypeKind::Struct)
     {
         throw std::runtime_error("field access on non-struct type " + typeName(objectType));
@@ -287,7 +349,10 @@ Type TypeChecker::checkFieldType(const Expr& object,
     throw std::runtime_error("struct '" + objectType.structName + "' has no field '" + field + "'");
 }
 
-Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expectedReturnType)
+Type TypeChecker::checkExpr(const Expr& expr,
+                            TypeEnv& env,
+                            const Type* expectedReturnType,
+                            std::vector<Type>* currentLoopBreakTypes)
 {
     if (dynamic_cast<const IntegerExpr*>(&expr))
     {
@@ -311,24 +376,54 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
 
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
-        return checkBlock(*block, env, expectedReturnType);
+        return checkBlock(*block, env, expectedReturnType, currentLoopBreakTypes);
     }
 
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
     {
-        const Type conditionType = checkExpr(*ifExpr->condition, env, expectedReturnType);
+        const Type conditionType =
+            checkExpr(*ifExpr->condition, env, expectedReturnType, currentLoopBreakTypes);
         if (!(conditionType == kBool))
         {
             throw std::runtime_error("if condition must be bool, found " + typeName(conditionType));
         }
-        const Type thenType = checkExpr(*ifExpr->thenBranch, env, expectedReturnType);
-        const Type elseType = checkExpr(*ifExpr->elseBranch, env, expectedReturnType);
+        const Type thenType =
+            checkExpr(*ifExpr->thenBranch, env, expectedReturnType, currentLoopBreakTypes);
+        const Type elseType =
+            checkExpr(*ifExpr->elseBranch, env, expectedReturnType, currentLoopBreakTypes);
         if (!(thenType == elseType))
         {
             throw std::runtime_error("if branches have incompatible types: then is " +
                                      typeName(thenType) + ", else is " + typeName(elseType));
         }
         return thenType;
+    }
+
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        std::vector<Type> breakTypes; // fresh per loop - shadows any outer loop's collector
+        checkBlock(
+            static_cast<const BlockExpr&>(*loopExpr->body), env, expectedReturnType, &breakTypes);
+        if (breakTypes.empty())
+        {
+            // A loop with no `break` anywhere never actually produces a
+            // value (it's really `never`), but TypeKind::Never has no
+            // checking logic wired up anywhere in this codebase yet - `unit`
+            // is the pragmatic, harmless choice (documented imprecision, see
+            // docs/language/0028-loops.md).
+            return kUnit;
+        }
+        const Type& first = breakTypes.front();
+        for (const Type& breakType : breakTypes)
+        {
+            if (!(breakType == first))
+            {
+                throw std::runtime_error(
+                    "'break' values in the same loop must all have the same type, found " +
+                    typeName(first) + " and " + typeName(breakType));
+            }
+        }
+        return first;
     }
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
@@ -349,7 +444,8 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
 
         for (std::size_t i = 0; i < call->arguments.size(); ++i)
         {
-            const Type argType = checkExpr(*call->arguments[i], env, expectedReturnType);
+            const Type argType =
+                checkExpr(*call->arguments[i], env, expectedReturnType, currentLoopBreakTypes);
             const Type paramType = resolveType(function.params[i].type);
             if (!(argType == paramType))
             {
@@ -364,7 +460,8 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
-        return checkFieldType(*field->object, field->field, env, expectedReturnType);
+        return checkFieldType(
+            *field->object, field->field, env, expectedReturnType, currentLoopBreakTypes);
     }
 
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
@@ -400,7 +497,8 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
                                          "' is missing field '" + declaredField.name + "'");
             }
 
-            const Type initType = checkExpr(*initializer, env, expectedReturnType);
+            const Type initType =
+                checkExpr(*initializer, env, expectedReturnType, currentLoopBreakTypes);
             const Type declaredFieldType = resolveType(declaredField.type);
             if (!(initType == declaredFieldType))
             {
@@ -415,8 +513,10 @@ Type TypeChecker::checkExpr(const Expr& expr, TypeEnv& env, const Type* expected
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
     {
-        const Type leftType = checkExpr(*binary->left, env, expectedReturnType);
-        const Type rightType = checkExpr(*binary->right, env, expectedReturnType);
+        const Type leftType =
+            checkExpr(*binary->left, env, expectedReturnType, currentLoopBreakTypes);
+        const Type rightType =
+            checkExpr(*binary->right, env, expectedReturnType, currentLoopBreakTypes);
 
         switch (binary->op)
         {

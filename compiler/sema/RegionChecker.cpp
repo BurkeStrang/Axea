@@ -88,11 +88,13 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     // for anything but unit (docs/language/0023), so the body's own
     // top-level trailing value is no longer itself a return and must not be
     // wrapped in requireOwned. Still walk it for that recursive side effect.
-    regionOfExpr(*function.body, env, function);
+    regionOfExpr(*function.body, env, function, nullptr);
 }
 
-RegionInfo
-RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl& function)
+RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
+                                       RegionEnv& env,
+                                       const FunctionDecl& function,
+                                       std::vector<RegionInfo>* currentLoopBreakRegions)
 {
     if (dynamic_cast<const IntegerExpr*>(&expr) || dynamic_cast<const BoolExpr*>(&expr) ||
         dynamic_cast<const StringExpr*>(&expr))
@@ -107,7 +109,8 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
-        const RegionInfo objectInfo = regionOfExpr(*field->object, env, function);
+        const RegionInfo objectInfo =
+            regionOfExpr(*field->object, env, function, currentLoopBreakRegions);
         if (!objectInfo.structType.empty())
         {
             const auto it = structs_.find(objectInfo.structType);
@@ -139,7 +142,8 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
         bool anyBorrowed = false;
         for (const auto& [fieldName, fieldExpr] : literal->fields)
         {
-            const RegionInfo fieldInfo = regionOfExpr(*fieldExpr, env, function);
+            const RegionInfo fieldInfo =
+                regionOfExpr(*fieldExpr, env, function, currentLoopBreakRegions);
             if (fieldInfo.kind == Region::Borrowed && !anyBorrowed)
             {
                 anyBorrowed = true;
@@ -157,7 +161,7 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
     {
         for (const auto& argument : call->arguments)
         {
-            regionOfExpr(*argument, env, function);
+            regionOfExpr(*argument, env, function, currentLoopBreakRegions);
         }
 
         std::string structType;
@@ -175,16 +179,18 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
     {
-        regionOfExpr(*binary->left, env, function);
-        regionOfExpr(*binary->right, env, function);
+        regionOfExpr(*binary->left, env, function, currentLoopBreakRegions);
+        regionOfExpr(*binary->right, env, function, currentLoopBreakRegions);
         return RegionInfo{Region::Owned, "", ""}; // arithmetic/comparison always yields a primitive
     }
 
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
     {
-        regionOfExpr(*ifExpr->condition, env, function);
-        const RegionInfo thenInfo = regionOfExpr(*ifExpr->thenBranch, env, function);
-        const RegionInfo elseInfo = regionOfExpr(*ifExpr->elseBranch, env, function);
+        regionOfExpr(*ifExpr->condition, env, function, currentLoopBreakRegions);
+        const RegionInfo thenInfo =
+            regionOfExpr(*ifExpr->thenBranch, env, function, currentLoopBreakRegions);
+        const RegionInfo elseInfo =
+            regionOfExpr(*ifExpr->elseBranch, env, function, currentLoopBreakRegions);
         if (thenInfo.kind == Region::Borrowed)
         {
             return thenInfo;
@@ -196,16 +202,33 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
         return thenInfo;
     }
 
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        std::vector<RegionInfo> breakRegions; // fresh per loop - shadows any outer loop's collector
+        regionOfExpr(*loopExpr->body, env, function, &breakRegions);
+        // Mirrors IfExpr just above: conservatively Borrowed if *any*
+        // reachable break could be - a single unsound break anywhere makes
+        // the whole loop's contributed value unsound to return as-is.
+        for (const RegionInfo& info : breakRegions)
+        {
+            if (info.kind == Region::Borrowed)
+            {
+                return info;
+            }
+        }
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
         RegionEnv blockEnv(&env);
         for (const auto& statement : block->statements)
         {
-            regionOfStmt(*statement, blockEnv, function);
+            regionOfStmt(*statement, blockEnv, function, currentLoopBreakRegions);
         }
         if (block->result)
         {
-            return regionOfExpr(*block->result, blockEnv, function);
+            return regionOfExpr(*block->result, blockEnv, function, currentLoopBreakRegions);
         }
         return RegionInfo{Region::Owned, "", ""};
     }
@@ -213,11 +236,15 @@ RegionChecker::regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl
     return RegionInfo{Region::Owned, "", ""};
 }
 
-void RegionChecker::regionOfStmt(const Stmt& stmt, RegionEnv& env, const FunctionDecl& function)
+void RegionChecker::regionOfStmt(const Stmt& stmt,
+                                 RegionEnv& env,
+                                 const FunctionDecl& function,
+                                 std::vector<RegionInfo>* currentLoopBreakRegions)
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        env.define(assignment->name, regionOfExpr(*assignment->value, env, function));
+        env.define(assignment->name,
+                   regionOfExpr(*assignment->value, env, function, currentLoopBreakRegions));
         return;
     }
 
@@ -225,29 +252,54 @@ void RegionChecker::regionOfStmt(const Stmt& stmt, RegionEnv& env, const Functio
     {
         if (returnStmt->value)
         {
-            requireOwned(regionOfExpr(*returnStmt->value, env, function), function);
+            requireOwned(regionOfExpr(*returnStmt->value, env, function, currentLoopBreakRegions),
+                         function);
         }
         return;
     }
 
     if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
     {
-        regionOfExpr(*exprStmt->expr, env, function);
+        regionOfExpr(*exprStmt->expr, env, function, currentLoopBreakRegions);
         return;
     }
 
     if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
     {
-        regionOfExpr(*fieldAssign->object, env, function);
-        regionOfExpr(*fieldAssign->value, env, function);
+        regionOfExpr(*fieldAssign->object, env, function, currentLoopBreakRegions);
+        regionOfExpr(*fieldAssign->value, env, function, currentLoopBreakRegions);
         return;
     }
 
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
-        regionOfExpr(*incDec->target, env, function);
+        regionOfExpr(*incDec->target, env, function, currentLoopBreakRegions);
         return;
     }
+
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        regionOfExpr(*whileStmt->condition, env, function, currentLoopBreakRegions);
+        // `while` never produces a value (break-with-value is rejected by
+        // TypeChecker already), so its own fresh collector's contents are
+        // discarded here - only the recursive walk (for nested returns)
+        // matters.
+        std::vector<RegionInfo> discarded;
+        regionOfExpr(*whileStmt->body, env, function, &discarded);
+        return;
+    }
+
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value && currentLoopBreakRegions)
+        {
+            currentLoopBreakRegions->push_back(
+                regionOfExpr(*breakStmt->value, env, function, currentLoopBreakRegions));
+        }
+        return;
+    }
+
+    // ContinueStmt: nothing to do.
 }
 
 void RegionChecker::check(
