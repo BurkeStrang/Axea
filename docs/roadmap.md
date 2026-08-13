@@ -21,8 +21,8 @@
 
 ## Phase 4
 
--   [ ] Regions
--   [ ] Escape Analysis
+-   [x] Regions
+-   [x] Escape Analysis
 
 ## Phase 5
 

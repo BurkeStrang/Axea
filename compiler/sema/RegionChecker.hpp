@@ -1,0 +1,71 @@
+#pragma once
+
+#include "ast/Expr.hpp"
+#include "ast/Stmt.hpp"
+
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+// Runs after CapabilityChecker (docs/language/0020-compiler-architecture.md's
+// "Escape Analysis" / "Region Analysis" stages). Checks that a borrowed
+// (read/write) struct parameter never escapes its function via a return
+// value, directly or nested inside a returned struct literal. See
+// docs/language/0011-region-inference.md for the algorithm and its
+// documented scope.
+enum class Region
+{
+    Owned,
+    Borrowed
+};
+
+constexpr std::string_view regionName(Region region)
+{
+    switch (region)
+    {
+        case Region::Owned: return "owned";
+        case Region::Borrowed: return "borrowed";
+    }
+    return "unknown";
+}
+
+struct RegionInfo
+{
+    Region kind;
+    std::string sourceParam; // populated when kind == Region::Borrowed, for error messages
+    std::string structType;  // resolved struct type name; empty when not struct-typed
+};
+
+class RegionEnv
+{
+public:
+    explicit RegionEnv(const RegionEnv* parent = nullptr);
+
+    void define(const std::string& name, RegionInfo info);
+    RegionInfo get(const std::string& name) const;
+
+private:
+    std::unordered_map<std::string, RegionInfo> bindings_;
+    const RegionEnv* parent_;
+};
+
+class RegionChecker
+{
+public:
+    void check(const Program& program,
+               const std::unordered_map<std::string, std::vector<Capability>>& capabilities);
+
+    const std::unordered_map<std::string, std::vector<Region>>& regions() const;
+
+private:
+    void registerDecls(const Program& program);
+    void checkFunction(const FunctionDecl& function, const std::vector<Capability>& capabilities);
+    RegionInfo regionOfExpr(const Expr& expr, RegionEnv& env, const FunctionDecl& function);
+    void regionOfStmt(const Stmt& stmt, RegionEnv& env, const FunctionDecl& function);
+    void requireOwned(const RegionInfo& info, const FunctionDecl& function) const;
+
+    std::unordered_map<std::string, const FunctionDecl*> functions_;
+    std::unordered_map<std::string, const StructDecl*> structs_;
+    std::unordered_map<std::string, std::vector<Region>> regions_;
+};

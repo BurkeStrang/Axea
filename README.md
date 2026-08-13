@@ -21,6 +21,7 @@ The compiler can:
 - type-check programs (symbol binding + a `TypeChecker` pass) before running them
 - infer `read`/`write`/`take` capabilities for function parameters and verify explicit capability declarations (`CapabilityChecker`)
 - check that a `take`-consumed parameter isn't used again afterward within the same block (ownership / use-after-move)
+- check that a borrowed (`read`/`write`) struct parameter never escapes its function via a return value, directly or nested inside a returned struct literal (`RegionChecker`)
 - dump tokens or the AST
 - interpret whole programs: functions (including recursion and early `return`), struct construction, field access, and field mutation (visible through shared struct references)
 
@@ -63,6 +64,8 @@ ctest --test-dir build --output-on-failure
 ./build/ax run examples/struct.ax
 ./build/ax run examples/capabilities.ax
 ./build/ax capabilities examples/capabilities.ax
+./build/ax run examples/regions.ax
+./build/ax regions examples/regions.ax
 ```
 
 Expected AST (`examples/hello.ax`):
@@ -104,6 +107,16 @@ Function(archive)
   Param(user: take)
 ```
 
+Expected `regions` output (`examples/regions.ax`):
+
+```text
+Function(make)
+  Param(x: owned)
+  Param(y: owned)
+Function(copy_point)
+  Param(p: borrowed)
+```
+
 ## Formatting
 
 Format all source files with clang-format:
@@ -134,7 +147,7 @@ git config core.hooksPath .githooks
 6. ~~Add symbol binding and type checking.~~ Done.
 7. ~~Add Axea's `read` / `write` / `take` capability analysis.~~ Done.
 8. ~~Add ownership analysis.~~ Done.
-9. Add regions and escape analysis.
+9. ~~Add regions and escape analysis.~~ Done.
 10. Design Axea IR.
 11. Add LLVM as a backend only after the frontend semantics are stable.
 12. Add standard library, tooling, and IDE support.

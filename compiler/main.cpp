@@ -4,6 +4,7 @@
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
+#include "sema/RegionChecker.hpp"
 #include "sema/TypeChecker.hpp"
 
 #include <fstream>
@@ -194,7 +195,7 @@ int main(int argc, char** argv)
 {
     if (argc != 3)
     {
-        std::cerr << "usage: ax <tokens|ast|run|capabilities> <file.ax>\n";
+        std::cerr << "usage: ax <tokens|ast|run|capabilities|regions> <file.ax>\n";
         return 1;
     }
 
@@ -239,6 +240,9 @@ int main(int argc, char** argv)
             CapabilityChecker capabilityChecker;
             capabilityChecker.check(program);
 
+            RegionChecker regionChecker;
+            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+
             Interpreter interpreter;
             interpreter.run(program);
 
@@ -279,6 +283,54 @@ int main(int argc, char** argv)
                 {
                     std::cout << "  Param(" << function->params[i].name << ": "
                               << capabilityName(capabilities[i]) << ")\n";
+                }
+            }
+            return 0;
+        }
+
+        if (command == "regions")
+        {
+            Parser parser(std::move(tokens));
+            auto program = parser.parseProgram();
+
+            TypeChecker typeChecker;
+            typeChecker.check(program);
+
+            CapabilityChecker capabilityChecker;
+            capabilityChecker.check(program);
+
+            RegionChecker regionChecker;
+            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+
+            auto isStructType = [&program](const std::string& typeName)
+            {
+                for (const auto& item : program.items)
+                {
+                    if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
+                    {
+                        if (structDecl->name == typeName)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            for (const auto& item : program.items)
+            {
+                const auto* function = dynamic_cast<const FunctionDecl*>(item.get());
+                if (!function || !function->returnType || !isStructType(*function->returnType))
+                {
+                    continue;
+                }
+
+                std::cout << "Function(" << function->name << ")\n";
+                const auto& regions = regionChecker.regions().at(function->name);
+                for (std::size_t i = 0; i < function->params.size(); ++i)
+                {
+                    std::cout << "  Param(" << function->params[i].name << ": "
+                              << regionName(regions[i]) << ")\n";
                 }
             }
             return 0;
