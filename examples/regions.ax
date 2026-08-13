@@ -6,12 +6,12 @@ struct Point
 
 make(x: i32, y: i32) -> Point
 {
-    Point { x: x  y: y }
+    return Point { x: x  y: y }
 }
 
 copy_point(p: Point) -> Point
 {
-    Point { x: p.x  y: p.y }
+    return Point { x: p.x  y: p.y }
 }
 
 p = make(3, 4)

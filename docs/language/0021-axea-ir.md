@@ -25,7 +25,7 @@ Axea IR is a per-function list of instructions using virtual registers (`%0`, `%
 ```ax
 pick(flag: bool) -> i32
 {
-    if flag { 1 } else { 2 }
+    return if flag { 1 } else { 2 }
 }
 ```
 
@@ -33,19 +33,19 @@ pick(flag: bool) -> i32
 Function(pick)
   Params: %0=flag
   region.enter
-  borrow.read %0
-  %2 = br %0 {
+  move %0
+  %3 = br %0 {
     region.enter
     %1 = const.i32 1
     region.exit
   } (-> %1) else {
     region.enter
+    %2 = const.i32 2
     region.exit
-  } (-> %-1)
-  ...
+  } (-> %2)
+  return %3
+  region.exit
 ```
-
-(Note the `else` block above is empty because this example never actually reaches it — it's for the `-> %-1` illustration; a real `if`/`else` here would show `%2 = const.i32 2` in the `else` block instead.)
 
 This mirrors the AST's own `IfExpr` shape, just with expressions flattened into three-address-code-style instructions instead of a tree. The language has no loops yet — the only control flow is `if`/`else` and early `return` — so there's no back-edge, no loop-carried value, nothing that actually *needs* a real CFG with block merging and phi nodes. Building that machinery now, for nothing downstream to consume, would be premature; turning this structured form into LLVM's actual SSA/CFG form is exactly what Phase 6 ("LLVM Backend") is for.
 
@@ -80,7 +80,7 @@ This is what makes it *Axea* IR rather than generic three-address code — every
 - **`Drop`**: a struct-typed local at the end of its own block, and an owned struct parameter at function exit. See "Known Imprecision" below for what this deliberately doesn't attempt.
 
 ```ax
-archive(take user: User) -> str { user.name }
+archive(take user: User) -> str { return user.name }
 ```
 
 ```text
@@ -89,8 +89,8 @@ Function(archive)
   region.enter
   move %0
   %1 = field.get %0.name
-  drop %0
   return %1
+  drop %0
   region.exit
 ```
 

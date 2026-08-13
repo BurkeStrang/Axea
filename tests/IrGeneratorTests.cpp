@@ -49,8 +49,8 @@ namespace
 
 TEST("IrGenerator lowers arithmetic and a call with correctly wired registers")
 {
-    auto program = generateIr("square(x: i32) -> i32 { x * x } "
-                              "add(a: i32, b: i32) -> i32 { square(a) + b }");
+    auto program = generateIr("square(x: i32) -> i32 { return x * x } "
+                              "add(a: i32, b: i32) -> i32 { return square(a) + b }");
     const auto& add = functionNamed(program, "add");
 
     const IrCall* call = nullptr;
@@ -86,7 +86,10 @@ TEST("IrGenerator lowers arithmetic and a call with correctly wired registers")
 
 TEST("IrGenerator lowers if/else into one Branch with two populated instruction lists")
 {
-    auto program = generateIr("pick(flag: bool) -> i32 { if flag { 1 } else { 2 } }");
+    // return wraps the whole if-expression (not pushed into each branch) so
+    // this still exercises Branch producing populated then/else values,
+    // exactly as before explicit return was required.
+    auto program = generateIr("pick(flag: bool) -> i32 { return if flag { 1 } else { 2 } }");
     const auto& pick = functionNamed(program, "pick");
 
     const IrBranch* branch = nullptr;
@@ -117,7 +120,7 @@ TEST("IrGenerator lowers if/else into one Branch with two populated instruction 
 
 TEST("IrGenerator desugars ++ on a name into const+binop and rebinds the name")
 {
-    auto program = generateIr("bump(n: i32) -> i32 { n++  n }");
+    auto program = generateIr("bump(n: i32) -> i32 { n++  return n }");
     const auto& bump = functionNamed(program, "bump");
 
     const IrConstInt* deltaConst = nullptr;
@@ -151,7 +154,7 @@ TEST("IrGenerator desugars ++ on a name into const+binop and rebinds the name")
 TEST("IrGenerator desugars ++ on a field target into get/const/binop/set")
 {
     auto program = generateIr("struct Point { x: i32 } "
-                              "bump(p: Point) -> i32 { p.x++  p.x }");
+                              "bump(p: Point) -> i32 { p.x++  return p.x }");
     const auto& bump = functionNamed(program, "bump");
 
     std::vector<const IrFieldGet*> gets;
@@ -179,8 +182,8 @@ TEST("IrGenerator desugars ++ on a field target into get/const/binop/set")
 TEST("IrGenerator emits BorrowRead for a read parameter and Move for a take parameter")
 {
     auto program = generateIr("struct User { name: str } "
-                              "peek(user: User) -> str { user.name } "
-                              "absorb(take user: User) -> str { user.name }");
+                              "peek(user: User) -> str { return user.name } "
+                              "absorb(take user: User) -> str { return user.name }");
     const auto& peek = functionNamed(program, "peek");
     const auto& absorb = functionNamed(program, "absorb");
 
@@ -209,7 +212,7 @@ TEST("IrGenerator emits BorrowRead for a read parameter and Move for a take para
 TEST("IrGenerator emits BorrowWrite for a write parameter")
 {
     auto program = generateIr("struct Point { x: i32 } "
-                              "bump(p: Point) -> i32 { p.x++  p.x }");
+                              "bump(p: Point) -> i32 { p.x++  return p.x }");
     const auto& bump = functionNamed(program, "bump");
 
     bool sawBorrowWrite = false;
@@ -229,7 +232,7 @@ TEST("IrGenerator drops a struct-typed local at its block's end")
     auto program = generateIr("struct Point { x: i32  y: i32 } "
                               "sum_point(x: i32, y: i32) -> i32 { "
                               "  p = Point { x: x  y: y } "
-                              "  p.x + p.y "
+                              "  return p.x + p.y "
                               "}");
     const auto& fn = functionNamed(program, "sum_point");
 
@@ -255,7 +258,7 @@ TEST("IrGenerator drops a struct-typed local at its block's end")
 TEST("IrGenerator drops an owned (take) struct parameter at function exit")
 {
     auto program = generateIr("struct Packet { id: i32 } "
-                              "absorb(take packet: Packet) -> i32 { packet.id }");
+                              "absorb(take packet: Packet) -> i32 { return packet.id }");
     const auto& fn = functionNamed(program, "absorb");
 
     bool sawDrop = false;
@@ -278,7 +281,7 @@ TEST("IrGenerator does not let a name mutated inside an if-branch escape past th
     // (see the IrScope "barrier" mechanism in IrGenerator.hpp/.cpp).
     auto program = generateIr("f(n: i32, flag: bool) -> i32 { "
                               "  if flag { n++ } "
-                              "  n "
+                              "  return n "
                               "}");
     const auto& fn = functionNamed(program, "f");
 
@@ -296,8 +299,10 @@ TEST("IrGenerator does not let a name mutated inside an if-branch escape past th
 
 TEST("IrGenerator lets a name mutated inside an if-branch persist for the rest of that same branch")
 {
+    // return wraps the whole if-expression (this test is specifically about
+    // Branch's thenValue/elseValue, not branch-level early return).
     auto program = generateIr("f(n: i32, flag: bool) -> i32 { "
-                              "  if flag { n++  n } else { n } "
+                              "  return if flag { n++  n } else { n } "
                               "}");
     const auto& fn = functionNamed(program, "f");
 
@@ -323,4 +328,48 @@ TEST("IrGenerator lets a name mutated inside an if-branch persist for the rest o
     EXPECT_EQ(branch->thenValue,
               incrementBinOp->dest); // the then-branch's trailing `n` sees the increment
     EXPECT_EQ(branch->elseValue, 0); // the else-branch's `n` is untouched by the then-branch
+}
+
+TEST("IrGenerator lowers a function whose entire body is an if/else where both branches return, "
+     "without appending a second trailing Return")
+{
+    // Regression coverage for the case docs/language/0027-explicit-return.md
+    // exists to make possible: previously unreachable under implicit-return
+    // semantics (the if-expression's own type was unit). generateFunction
+    // must not append its synthetic final Return after a Branch that's
+    // already fully covered by explicit returns on both sides.
+    auto program =
+        generateIr("sign(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { return 1 } }");
+    const auto& sign = functionNamed(program, "sign");
+
+    int returnCount = 0;
+    const IrBranch* branch = nullptr;
+    for (const auto& inst : sign.body)
+    {
+        if (dynamic_cast<const IrReturn*>(inst.get()))
+        {
+            ++returnCount;
+        }
+        if (const auto* b = dynamic_cast<const IrBranch*>(inst.get()))
+        {
+            branch = b;
+        }
+    }
+
+    EXPECT_EQ(returnCount, 0); // no top-level Return - both returns are nested inside the Branch
+    EXPECT_TRUE(branch != nullptr);
+
+    auto containsReturn = [](const std::vector<std::unique_ptr<IrInst>>& block)
+    {
+        for (const auto& inst : block)
+        {
+            if (dynamic_cast<const IrReturn*>(inst.get()))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    EXPECT_TRUE(containsReturn(branch->thenBlock));
+    EXPECT_TRUE(containsReturn(branch->elseBlock));
 }

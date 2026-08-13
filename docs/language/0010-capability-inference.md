@@ -49,7 +49,7 @@ struct User
 birthday(user: User) -> i32
 {
     user.age++
-    user.age
+    return user.age
 }
 ```
 
@@ -67,12 +67,12 @@ Nothing in the language can force a `take` requirement structurally — there's 
 ```ax
 send(take packet: Packet) -> i32
 {
-    packet.id
+    return packet.id
 }
 
 relay(packet: Packet) -> i32
 {
-    send(packet)     # relay's own `packet` is now inferred `take`
+    return send(packet)     # relay's own `packet` is now inferred `take`
 }
 ```
 
@@ -129,10 +129,10 @@ struct User
     age: i32
 }
 
-display(user: User) -> str  { user.name }        # read
-birthday(user: User) -> i32 { user.age++  user.age }  # write
-celebrate(user: User) -> i32 { birthday(user) }  # write, propagated
-archive(take user: User) -> str { user.name }    # take, declared
+display(user: User) -> str  { return user.name }        # read
+birthday(user: User) -> i32 { user.age++  return user.age }  # write
+celebrate(user: User) -> i32 { return birthday(user) }  # write, propagated
+archive(take user: User) -> str { return user.name }    # take, declared
 ```
 
 ```text

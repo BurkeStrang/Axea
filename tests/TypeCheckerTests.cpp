@@ -20,7 +20,7 @@ namespace
 TEST("TypeChecker accepts a well-typed program")
 {
     const std::string source = "struct Point { x: i32  y: i32 } "
-                               "square(n: i32) -> i32 { n * n } "
+                               "square(n: i32) -> i32 { return n * n } "
                                "p = Point { x: 1  y: 2 } "
                                "x = square(p.x) + p.y";
     check(source);
@@ -28,12 +28,12 @@ TEST("TypeChecker accepts a well-typed program")
 
 TEST("TypeChecker rejects wrong argument count")
 {
-    EXPECT_THROWS(check("f(a: i32, b: i32) -> i32 { a + b }  x = f(1)"));
+    EXPECT_THROWS(check("f(a: i32, b: i32) -> i32 { return a + b }  x = f(1)"));
 }
 
 TEST("TypeChecker rejects wrong argument type")
 {
-    EXPECT_THROWS(check(R"(f(a: i32) -> i32 { a }  x = f("oops"))"));
+    EXPECT_THROWS(check(R"(f(a: i32) -> i32 { return a }  x = f("oops"))"));
 }
 
 TEST("TypeChecker rejects a call to an undefined function")
@@ -96,14 +96,22 @@ TEST("TypeChecker rejects a declared type that does not match the initializer")
     EXPECT_THROWS(check(R"(x: i32 = "oops")"));
 }
 
-TEST("TypeChecker rejects a function whose body does not match its declared return type")
+TEST("TypeChecker rejects a return value that does not match the declared return type")
 {
-    EXPECT_THROWS(check(R"(f() -> i32 { "oops" })"));
+    EXPECT_THROWS(check(R"(f() -> i32 { return "oops" })"));
 }
 
-TEST("TypeChecker rejects a function whose body does not match an omitted (unit) return type")
+TEST("TypeChecker rejects a value-returning function whose body never explicitly returns")
 {
-    EXPECT_THROWS(check("f() { 1 }"));
+    EXPECT_THROWS(check("f() -> i32 { 1 }"));
+}
+
+TEST("TypeChecker allows a unit-returning function to fall off the end past a discarded expression")
+{
+    // Only value-producing functions must explicitly `return`
+    // (docs/language/0027-explicit-return.md) - a unit function can still
+    // fall off the end, and any trailing expression is simply discarded.
+    check("f() { 1 }");
 }
 
 TEST("TypeChecker rejects return used outside a function")
@@ -114,4 +122,19 @@ TEST("TypeChecker rejects return used outside a function")
 TEST("TypeChecker rejects a return value that does not match the function's return type")
 {
     EXPECT_THROWS(check(R"(f() -> i32 { if true { return "oops" } 1 })"));
+}
+
+TEST("TypeChecker accepts a function whose entire body is an if/else where both branches return")
+{
+    // The exact shape docs/language/0027-explicit-return.md's whole change
+    // is meant to make possible: neither branch produces a block-result
+    // value (both just `return`), so this previously failed to type-check
+    // under implicit-return semantics (the if-expression's own inferred
+    // type was unit, mismatching the declared i32).
+    check("sign(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { return 1 } }");
+}
+
+TEST("TypeChecker rejects an if/else where only one branch returns and the other falls through")
+{
+    EXPECT_THROWS(check("f(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { 1 } }"));
 }

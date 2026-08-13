@@ -91,7 +91,8 @@ TEST("Interpreter throws when arithmetic operand is not an integer")
 
 TEST("Interpreter calls a function and evaluates its block result")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("square(n: i32) -> i32 { n * n }  x = square(6)")), 36);
+    EXPECT_EQ(std::get<std::int64_t>(run("square(n: i32) -> i32 { return n * n }  x = square(6)")),
+              36);
 }
 
 TEST("Interpreter evaluates a fat-arrow function body")
@@ -103,7 +104,7 @@ TEST("Interpreter handles recursive calls via early return and forward reference
 {
     const std::string source = "factorial(n: i32) -> i32 { "
                                "  if n <= 1 { return 1 } "
-                               "  n * factorial(n - 1) "
+                               "  return n * factorial(n - 1) "
                                "} "
                                "x = factorial(5)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 120);
@@ -111,19 +112,19 @@ TEST("Interpreter handles recursive calls via early return and forward reference
 
 TEST("Interpreter functions do not see top-level globals")
 {
-    EXPECT_THROWS(runProgram("g = 100  f() -> i32 { g }  x = f()"));
+    EXPECT_THROWS(runProgram("g = 100  f() -> i32 { return g }  x = f()"));
 }
 
 TEST("Interpreter function parameters shadow same-named top-level variables independently")
 {
     // The top-level `n` and the parameter `n` never interact.
-    const std::string source = "n = 999  identity(n: i32) -> i32 { n }  x = identity(7)";
+    const std::string source = "n = 999  identity(n: i32) -> i32 { return n }  x = identity(7)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 7);
 }
 
 TEST("Interpreter throws on wrong argument count")
 {
-    EXPECT_THROWS(runProgram("f(a: i32, b: i32) -> i32 { a + b }  x = f(1)"));
+    EXPECT_THROWS(runProgram("f(a: i32, b: i32) -> i32 { return a + b }  x = f(1)"));
 }
 
 TEST("Interpreter throws on call to an undefined function")
@@ -173,7 +174,7 @@ TEST("toString formats a struct instance deterministically by declared field ord
 TEST("Interpreter field assignment mutates the shared struct instance")
 {
     const std::string source = "struct Point { x: i32 } "
-                               "update(p: Point) -> i32 { p.x = 99  p.x } "
+                               "update(p: Point) -> i32 { p.x = 99  return p.x } "
                                "p = Point { x: 1 } "
                                "called = update(p) "
                                "x = p.x";
@@ -183,7 +184,7 @@ TEST("Interpreter field assignment mutates the shared struct instance")
 TEST("Interpreter field increment mutates the shared struct instance")
 {
     const std::string source = "struct Point { x: i32 } "
-                               "bump(p: Point) -> i32 { p.x++  p.x } "
+                               "bump(p: Point) -> i32 { p.x++  return p.x } "
                                "p = Point { x: 1 } "
                                "called = bump(p) "
                                "x = p.x";
@@ -194,7 +195,7 @@ TEST("Interpreter increment of a plain parameter mutates it through nested block
 {
     const std::string source = "bump(n: i32) -> i32 { "
                                "  if n > 0 { n++ } "
-                               "  n "
+                               "  return n "
                                "} "
                                "x = bump(5)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
@@ -202,5 +203,5 @@ TEST("Interpreter increment of a plain parameter mutates it through nested block
 
 TEST("Interpreter decrement works on a plain parameter")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("f(n: i32) -> i32 { n--  n }  x = f(5)")), 4);
+    EXPECT_EQ(std::get<std::int64_t>(run("f(n: i32) -> i32 { n--  return n }  x = f(5)")), 4);
 }

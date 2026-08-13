@@ -82,7 +82,13 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         return;
     }
 
-    requireOwned(regionOfExpr(*function.body, env, function), function);
+    // Every individual `return` site is already checked independently,
+    // however deeply nested in if/else (regionOfStmt's ReturnStmt case,
+    // reached via this same walk) - functions require an explicit `return`
+    // for anything but unit (docs/language/0023), so the body's own
+    // top-level trailing value is no longer itself a return and must not be
+    // wrapped in requireOwned. Still walk it for that recursive side effect.
+    regionOfExpr(*function.body, env, function);
 }
 
 RegionInfo

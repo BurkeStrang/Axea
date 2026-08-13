@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -129,6 +130,7 @@ struct IrFunction
 {
     std::string name;
     std::vector<std::string> paramNames;
+    std::vector<std::string> paramTypes; // declared type names, parallel to paramNames
     std::optional<std::string> returnType;
     std::vector<std::unique_ptr<IrInst>> body;
     int registerCount = 0;
@@ -138,4 +140,6 @@ struct IrProgram
 {
     std::vector<IrFunction> functions;
     std::vector<std::unique_ptr<IrInst>> topLevel;
+    // struct name -> its fields, in declared order, as (fieldName, fieldType) pairs.
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> structs;
 };

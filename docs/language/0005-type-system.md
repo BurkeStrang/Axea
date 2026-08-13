@@ -847,11 +847,12 @@ Example:
 load_config(path: str) -> Config!
 {
     text = read_file(path)?
-    json.parse<Config>(text)?
+    return json.parse<Config>(text)?
 }
 ```
 
-The final expression is returned automatically.
+A value-producing function must return it explicitly (`0027-explicit-return.md`)
+— there is no implicit "the final expression is the return value" fallback.
 
 ---
 

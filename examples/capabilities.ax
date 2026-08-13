@@ -6,23 +6,23 @@ struct User
 
 display(user: User) -> str
 {
-    user.name
+    return user.name
 }
 
 birthday(user: User) -> i32
 {
     user.age++
-    user.age
+    return user.age
 }
 
 celebrate(user: User) -> i32
 {
-    birthday(user)
+    return birthday(user)
 }
 
 archive(take user: User) -> str
 {
-    user.name
+    return user.name
 }
 
 u = User { name: "Burke"  age: 35 }

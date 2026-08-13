@@ -31,14 +31,14 @@ namespace
 TEST("RegionChecker accepts a freshly constructed owned struct literal being returned")
 {
     checkRegions("struct Point { x: i32  y: i32 } "
-                 "make(x: i32, y: i32) -> Point { Point { x: x  y: y } } "
+                 "make(x: i32, y: i32) -> Point { return Point { x: x  y: y } } "
                  "p = make(1, 2)");
 }
 
 TEST("RegionChecker accepts a take parameter being returned directly")
 {
     checkRegions("struct Packet { id: i32 } "
-                 "consume(take packet: Packet) -> Packet { packet } "
+                 "consume(take packet: Packet) -> Packet { return packet } "
                  "p = Packet { id: 1 } "
                  "q = consume(p)");
 }
@@ -46,7 +46,7 @@ TEST("RegionChecker accepts a take parameter being returned directly")
 TEST("RegionChecker accepts a primitive field extracted from a borrowed parameter and returned")
 {
     checkRegions("struct User { name: str } "
-                 "get_name(user: User) -> str { user.name } "
+                 "get_name(user: User) -> str { return user.name } "
                  "u = User { name: \"Burke\" } "
                  "n = get_name(u)");
 }
@@ -55,7 +55,7 @@ TEST("RegionChecker accepts a struct literal built only from primitive fields of
      "parameter")
 {
     checkRegions("struct Point { x: i32  y: i32 } "
-                 "copy_point(p: Point) -> Point { Point { x: p.x  y: p.y } } "
+                 "copy_point(p: Point) -> Point { return Point { x: p.x  y: p.y } } "
                  "p = Point { x: 1  y: 2 } "
                  "q = copy_point(p)");
 }
@@ -63,8 +63,8 @@ TEST("RegionChecker accepts a struct literal built only from primitive fields of
 TEST("RegionChecker accepts a returned value that came from another function's call result")
 {
     checkRegions("struct Point { x: i32 } "
-                 "make(x: i32) -> Point { Point { x: x } } "
-                 "wrap(x: i32) -> Point { make(x) } "
+                 "make(x: i32) -> Point { return Point { x: x } } "
+                 "wrap(x: i32) -> Point { return make(x) } "
                  "p = wrap(5)");
 }
 
@@ -72,7 +72,7 @@ TEST("RegionChecker does not reject functions that don't return a struct, "
      "regardless of how they use their borrowed parameters")
 {
     checkRegions("struct User { name: str  age: i32 } "
-                 "birthday(user: User) -> i32 { user.age++  user.age } "
+                 "birthday(user: User) -> i32 { user.age++  return user.age } "
                  "u = User { name: \"Burke\"  age: 35 } "
                  "x = birthday(u)");
 }
@@ -80,7 +80,7 @@ TEST("RegionChecker does not reject functions that don't return a struct, "
 TEST("RegionChecker rejects returning a borrowed struct parameter directly")
 {
     const std::string source = "struct User { name: str } "
-                               "get_ref(user: User) -> User { user } "
+                               "get_ref(user: User) -> User { return user } "
                                "u = User { name: \"Burke\" } "
                                "x = get_ref(u)";
     EXPECT_THROWS(checkRegions(source));
@@ -90,7 +90,7 @@ TEST("RegionChecker rejects a returned struct literal containing a borrowed stru
 {
     const std::string source = "struct User { name: str } "
                                "struct Wrapper { inner: User } "
-                               "wrap(user: User) -> Wrapper { Wrapper { inner: user } } "
+                               "wrap(user: User) -> Wrapper { return Wrapper { inner: user } } "
                                "u = User { name: \"Burke\" } "
                                "w = wrap(u)";
     EXPECT_THROWS(checkRegions(source));
@@ -101,7 +101,7 @@ TEST("RegionChecker rejects a borrowed parameter returned early inside a nested 
     const std::string source = "struct User { name: str } "
                                "guard(user: User, flag: bool) -> User { "
                                "  if flag { return user } "
-                               "  User { name: \"fallback\" } "
+                               "  return User { name: \"fallback\" } "
                                "} "
                                "u = User { name: \"Burke\" } "
                                "x = guard(u, true)";
@@ -112,7 +112,7 @@ TEST("RegionChecker rejects an if-expression when either branch could be borrowe
 {
     const std::string source = "struct User { name: str } "
                                "pick(user: User, flag: bool) -> User { "
-                               "  if flag { user } else { User { name: \"fallback\" } } "
+                               "  return if flag { user } else { User { name: \"fallback\" } } "
                                "} "
                                "u = User { name: \"Burke\" } "
                                "x = pick(u, true)";

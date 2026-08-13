@@ -359,14 +359,29 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
         env.define(decl.params[i].name, std::move(args[i]));
     }
 
+    // Deliberately not the generic BlockExpr evaluation (which would return
+    // the trailing result expression's value) - functions require an
+    // explicit `return` for anything but unit (docs/language/0023), so a
+    // leftover trailing expression here is only ever a discarded value; its
+    // result must never leak out as the function's return.
+    const auto& body = static_cast<const BlockExpr&>(*decl.body);
     try
     {
-        return evaluate(*decl.body, env);
+        Environment bodyEnv(&env);
+        for (const auto& statement : body.statements)
+        {
+            execute(*statement, bodyEnv);
+        }
+        if (body.result)
+        {
+            evaluate(*body.result, bodyEnv);
+        }
     }
     catch (ReturnSignal& signal)
     {
         return std::move(signal.value);
     }
+    return Value{std::monostate{}};
 }
 
 const std::unordered_map<std::string, Value>& Interpreter::variables() const

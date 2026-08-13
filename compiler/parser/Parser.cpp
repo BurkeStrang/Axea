@@ -129,8 +129,15 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
     std::unique_ptr<Expr> body;
     if (match(TokenKind::FatArrow))
     {
+        // `=>` is sugar for `{ return expr }`, not for "the block's result" -
+        // functions require an explicit return (see
+        // docs/language/0027-explicit-return.md), and desugaring to an
+        // actual ReturnStmt keeps that true with no special-casing needed
+        // anywhere else in the pipeline.
         auto expr = parseExpression();
-        body = std::make_unique<BlockExpr>(std::vector<std::unique_ptr<Stmt>>{}, std::move(expr));
+        std::vector<std::unique_ptr<Stmt>> statements;
+        statements.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
+        body = std::make_unique<BlockExpr>(std::move(statements), nullptr);
     }
     else
     {

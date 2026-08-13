@@ -2,6 +2,35 @@
 
 #include <stdexcept>
 
+namespace
+{
+    // True if every path through this straight-line instruction list is
+    // guaranteed to hit a Return - either directly, or via a Branch whose
+    // thenBlock and elseBlock both alwaysTerminate. Mirrors
+    // TypeChecker::definitelyReturns (same shape, over lowered IR instead of
+    // AST - kept as a separate, pure implementation per this codebase's
+    // convention of each pass owning its own walk). Used so generateFunction
+    // never appends a second terminator after a body that's already fully
+    // covered by explicit `return`s (docs/language/0027-explicit-return.md).
+    bool alwaysTerminates(const std::vector<std::unique_ptr<IrInst>>& instructions)
+    {
+        for (const auto& inst : instructions)
+        {
+            if (dynamic_cast<const IrReturn*>(inst.get()))
+            {
+                return true;
+            }
+            if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get());
+                branch && alwaysTerminates(branch->thenBlock) &&
+                alwaysTerminates(branch->elseBlock))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+} // namespace
+
 IrScope::IrScope(IrScope* parent, bool isBarrier)
     : parent_(parent),
       isBarrier_(isBarrier)
@@ -328,6 +357,7 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     for (const auto& param : function.params)
     {
         irFunction.paramNames.push_back(param.name);
+        irFunction.paramTypes.push_back(param.type);
     }
 
     IrScope scope;
@@ -364,7 +394,7 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
         }
     }
 
-    const int result = lowerExpr(*function.body, scope, ctx);
+    lowerExpr(*function.body, scope, ctx);
 
     for (std::size_t i = 0; i < function.params.size(); ++i)
     {
@@ -376,9 +406,20 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
         }
     }
 
-    auto returnInst = std::make_unique<IrReturn>();
-    returnInst->value = result;
-    emitVoid(ctx, std::move(returnInst));
+    // Only reachable for a unit-returning function in a well-typed program -
+    // TypeChecker::definitelyReturns already guarantees any non-unit
+    // function's body always hits an explicit `return` on every path.
+    // Appending one here regardless would double-terminate an already fully
+    // covered body (e.g. `if cond { return a } else { return b } `'s merge
+    // block already ends in `unreachable`); when it does fire, it's always a
+    // bare/unit return - `function.body`'s trailing value, if any, was a
+    // discarded expression, not something to return.
+    if (!alwaysTerminates(irFunction.body))
+    {
+        auto returnInst = std::make_unique<IrReturn>();
+        returnInst->value = -1;
+        emitVoid(ctx, std::move(returnInst));
+    }
 
     emitVoid(ctx, std::make_unique<IrRegionExit>());
 
@@ -394,6 +435,16 @@ IrGenerator::generate(const Program& program,
     registerStructs(program);
 
     IrProgram irProgram;
+    for (const auto& [name, structDecl] : structs_)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        fields.reserve(structDecl->fields.size());
+        for (const auto& field : structDecl->fields)
+        {
+            fields.emplace_back(field.name, field.type);
+        }
+        irProgram.structs[name] = std::move(fields);
+    }
 
     IrScope topScope;
     int topRegisterCount = 0;

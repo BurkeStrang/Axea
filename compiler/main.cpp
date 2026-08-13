@@ -3,6 +3,7 @@
 #include "interpreter/Interpreter.hpp"
 #include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
+#include "llvmir/LlvmIrEmitter.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
 #include "sema/RegionChecker.hpp"
@@ -346,7 +347,7 @@ int main(int argc, char** argv)
 {
     if (argc != 3)
     {
-        std::cerr << "usage: ax <tokens|ast|run|capabilities|regions|ir> <file.ax>\n";
+        std::cerr << "usage: ax <tokens|ast|run|capabilities|regions|ir|llvm-ir> <file.ax>\n";
         return 1;
     }
 
@@ -518,6 +519,29 @@ int main(int argc, char** argv)
                     printIrInst(*inst, 2);
                 }
             }
+            return 0;
+        }
+
+        if (command == "llvm-ir")
+        {
+            Parser parser(std::move(tokens));
+            auto program = parser.parseProgram();
+
+            TypeChecker typeChecker;
+            typeChecker.check(program);
+
+            CapabilityChecker capabilityChecker;
+            capabilityChecker.check(program);
+
+            RegionChecker regionChecker;
+            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+
+            IrGenerator irGenerator;
+            auto irProgram = irGenerator.generate(
+                program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+
+            LlvmIrEmitter emitter;
+            std::cout << emitter.emit(irProgram);
             return 0;
         }
 

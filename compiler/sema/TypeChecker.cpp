@@ -138,14 +138,47 @@ void TypeChecker::checkFunction(const FunctionDecl& function)
 
     const Type expectedReturn = function.returnType ? resolveType(*function.returnType) : kUnit;
     const auto& block = static_cast<const BlockExpr&>(*function.body);
-    const Type actualReturn = checkBlock(block, env, &expectedReturn);
+    checkBlock(
+        block, env, &expectedReturn); // validates every return's value type, and the internal
+                                      // correctness of any leftover discarded trailing expression
 
-    if (!(actualReturn == expectedReturn))
+    if (!(expectedReturn == kUnit) && !definitelyReturns(block))
     {
-        throw std::runtime_error("function '" + function.name + "' returns " +
-                                 typeName(actualReturn) + " but declares " +
-                                 typeName(expectedReturn));
+        throw std::runtime_error("function '" + function.name +
+                                 "' does not return a value of type " + typeName(expectedReturn) +
+                                 " on all paths (did you forget 'return'?)");
     }
+}
+
+bool TypeChecker::definitelyReturns(const BlockExpr& block) const
+{
+    for (const auto& statement : block.statements)
+    {
+        if (dynamic_cast<const ReturnStmt*>(statement.get()))
+        {
+            return true;
+        }
+        if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(statement.get()))
+        {
+            if (const auto* ifExpr = dynamic_cast<const IfExpr*>(exprStmt->expr.get());
+                ifExpr && definitelyReturnsBranch(*ifExpr))
+            {
+                return true;
+            }
+        }
+    }
+    if (const auto* ifExpr = dynamic_cast<const IfExpr*>(block.result.get()))
+    {
+        return definitelyReturnsBranch(*ifExpr);
+    }
+    return false;
+}
+
+bool TypeChecker::definitelyReturnsBranch(const IfExpr& ifExpr) const
+{
+    const auto& thenBlock = static_cast<const BlockExpr&>(*ifExpr.thenBranch);
+    const auto& elseBlock = static_cast<const BlockExpr&>(*ifExpr.elseBranch);
+    return definitelyReturns(thenBlock) && definitelyReturns(elseBlock);
 }
 
 Type TypeChecker::checkBlock(const BlockExpr& block,

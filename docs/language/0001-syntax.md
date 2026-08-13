@@ -141,7 +141,7 @@ Basic function:
 ```ax
 square(x: i32) -> i32
 {
-    x * x
+    return x * x
 }
 ```
 
@@ -192,16 +192,19 @@ pub send(take packet: Packet)
 
 # Return Values
 
-The final expression of a block is returned automatically.
+A function that produces a value must return it with an explicit `return` —
+there is no implicit "the final expression of the block is the return value"
+fallback (see `0027-explicit-return.md`). A unit-returning function may still
+fall off the end of the block with no `return` at all.
 
 ```ax
 square(x: i32) -> i32
 {
-    x * x
+    return x * x
 }
 ```
 
-Explicit return remains available:
+Early return works the same way:
 
 ```ax
 find(x: i32) -> i32?
@@ -211,7 +214,7 @@ find(x: i32) -> i32?
         return none
     }
 
-    x
+    return x
 }
 ```
 

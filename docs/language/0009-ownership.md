@@ -20,13 +20,13 @@ Passing a parameter, by bare name, into another function's `take`-capability arg
 ```ax
 struct Packet { id: i32 }
 
-send(take packet: Packet) -> i32 { packet.id }
+send(take packet: Packet) -> i32 { return packet.id }
 
 relay(packet: Packet) -> i32
 {
     a = send(packet)
     b = send(packet)   # error: use of moved value 'packet'
-    a + b
+    return a + b
 }
 ```
 
@@ -53,7 +53,7 @@ relay(packet: Packet, flag: bool) -> i32
     {
         0
     }
-    send(packet)          # allowed: this block's own moved-set is still empty
+    return send(packet)   # allowed: this block's own moved-set is still empty
 }
 ```
 

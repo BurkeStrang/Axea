@@ -18,12 +18,13 @@ The compiler can:
 - tokenize basic Axea syntax
 - parse a sequence of top-level statements, function declarations, and struct declarations
 - parse arithmetic expressions with precedence, booleans, strings, comparison operators, `if`/`else if`/`else` expressions, blocks, function calls, field access, struct literals, field assignment, and `++`/`--`
-- type-check programs (symbol binding + a `TypeChecker` pass) before running them
+- type-check programs (symbol binding + a `TypeChecker` pass) before running them, including requiring value-producing functions to explicitly `return` on every path (no implicit "last expression" return)
 - infer `read`/`write`/`take` capabilities for function parameters and verify explicit capability declarations (`CapabilityChecker`)
 - check that a `take`-consumed parameter isn't used again afterward within the same block (ownership / use-after-move)
 - check that a borrowed (`read`/`write`) struct parameter never escapes its function via a return value, directly or nested inside a returned struct literal (`RegionChecker`)
 - lower a checked program into Axea IR — a structured, per-function instruction sequence with ownership/capability/region markers embedded directly in the instruction stream (`IrGenerator`)
-- dump tokens, the AST, or the IR
+- emit textual LLVM IR (`.ll`) from Axea IR — real basic blocks and phi nodes for `if`/`else`, heap-allocated (`malloc`) struct instances passed by pointer, and hoisted string-literal globals (`LlvmIrEmitter`)
+- dump tokens, the AST, the IR, or the emitted LLVM IR
 - interpret whole programs: functions (including recursion and early `return`), struct construction, field access, and field mutation (visible through shared struct references)
 
 Example:
@@ -38,7 +39,7 @@ struct User
 birthday(user: User) -> i32
 {
     user.age++
-    user.age
+    return user.age
 }
 
 u = User { name: "Burke"  age: 35 }
@@ -68,6 +69,7 @@ ctest --test-dir build --output-on-failure
 ./build/ax run examples/regions.ax
 ./build/ax regions examples/regions.ax
 ./build/ax ir examples/capabilities.ax
+./build/ax llvm-ir examples/capabilities.ax
 ```
 
 Expected AST (`examples/hello.ax`):
@@ -132,6 +134,17 @@ Function(archive)
   region.exit
 ```
 
+Expected `llvm-ir` output (`examples/capabilities.ax`, `archive` function):
+
+```llvm
+define i8* @archive(%User* %0) {
+entry:
+  %1 = getelementptr %User, %User* %0, i32 0, i32 0
+  %2 = load i8*, i8** %1
+  ret i8* %2
+}
+```
+
 ## Formatting
 
 Format all source files with clang-format:
@@ -164,7 +177,7 @@ git config core.hooksPath .githooks
 8. ~~Add ownership analysis.~~ Done.
 9. ~~Add regions and escape analysis.~~ Done.
 10. ~~Design Axea IR.~~ Done.
-11. Add LLVM as a backend only after the frontend semantics are stable.
+11. ~~Add LLVM as a backend only after the frontend semantics are stable.~~ Done (emits textual LLVM IR; not yet assembled/run through a real LLVM toolchain).
 12. Add standard library, tooling, and IDE support.
 
 See `docs/language/` for the full syntax, grammar, and type-system specifications this implementation follows.

@@ -136,8 +136,10 @@ TEST("Parser builds a function declaration with a block body")
     EXPECT_EQ(multiply->op, TokenKind::Star);
 }
 
-TEST("Parser normalizes a fat-arrow function body into a block")
+TEST("Parser normalizes a fat-arrow function body into an explicit return")
 {
+    // `=>` is sugar for `{ return expr }`, not for "the block's result" -
+    // functions require an explicit return (docs/language/0027-explicit-return.md).
     auto program = parseOne("square(x: i32) -> i32 => x * x");
 
     auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
@@ -145,8 +147,12 @@ TEST("Parser normalizes a fat-arrow function body into a block")
 
     auto* body = dynamic_cast<BlockExpr*>(function->body.get());
     EXPECT_TRUE(body != nullptr);
-    EXPECT_TRUE(body->statements.empty());
-    auto* multiply = dynamic_cast<BinaryExpr*>(body->result.get());
+    EXPECT_TRUE(body->result == nullptr);
+    EXPECT_EQ(body->statements.size(), static_cast<std::size_t>(1));
+
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(returnStmt != nullptr);
+    auto* multiply = dynamic_cast<BinaryExpr*>(returnStmt->value.get());
     EXPECT_TRUE(multiply != nullptr);
 }
 

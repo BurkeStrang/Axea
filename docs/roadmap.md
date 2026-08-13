@@ -30,7 +30,7 @@
 
 ## Phase 6
 
--   [ ] LLVM Backend
+-   [x] LLVM Backend
 
 ## Phase 7
 

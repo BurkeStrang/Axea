@@ -78,6 +78,12 @@ public:
 private:
     void registerSignatures(const Program& program);
     void checkFunction(const FunctionDecl& function);
+    // True if every path through the block hits an explicit `return` - a
+    // top-level `return`, or an if/else where both branches (recursively)
+    // definitely return. Mirrors how parseBlock decides ExprStmt vs. result
+    // purely by "is this immediately followed by '}'".
+    bool definitelyReturns(const BlockExpr& block) const;
+    bool definitelyReturnsBranch(const IfExpr& ifExpr) const;
     Type checkBlock(const BlockExpr& block, TypeEnv& parentEnv, const Type* expectedReturnType);
     Type checkExpr(const Expr& expr, TypeEnv& env, const Type* expectedReturnType);
     void checkStmt(const Stmt& stmt, TypeEnv& env, const Type* expectedReturnType);
