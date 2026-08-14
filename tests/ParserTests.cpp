@@ -523,6 +523,15 @@ TEST("Parser parses an array type annotation into the canonical no-spaces form")
     EXPECT_EQ(*assignment->declaredType, "[i32;4]");
 }
 
+TEST("Parser parses a slice<T> parameter type into the canonical form")
+{
+    auto program = parseOne("sum(values: slice<i32>) -> i32 { return values[0] }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "slice<i32>");
+}
+
 TEST("Parser builds an index expression, chaining with field access")
 {
     auto program = parseOne("f(a: A) -> i32 { a.items[0].x  1 }");
@@ -608,4 +617,173 @@ TEST("Parser desugars for-in-over-an-array into a bound/counter setup comparing 
     EXPECT_TRUE(inductionBind->forceDefine);
     auto* inductionIndex = dynamic_cast<IndexExpr*>(inductionBind->value.get());
     EXPECT_TRUE(inductionIndex != nullptr);
+}
+
+TEST("Parser builds a List<T> construction expression")
+{
+    auto program = parseOne("x = List<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* listNew = dynamic_cast<ListNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(listNew != nullptr);
+    EXPECT_EQ(listNew->elementType, "i32");
+}
+
+TEST("Parser parses a List<T> parameter type into the canonical form")
+{
+    auto program = parseOne("sum(values: List<i32>) -> i32 { return values[0] }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "List<i32>");
+}
+
+TEST("Parser builds a Stack<T> construction expression")
+{
+    auto program = parseOne("x = Stack<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* stackNew = dynamic_cast<StackNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(stackNew != nullptr);
+    EXPECT_EQ(stackNew->elementType, "i32");
+}
+
+TEST("Parser parses a Stack<T> parameter type into the canonical form")
+{
+    auto program = parseOne("useStack(s: Stack<i32>) -> i32 { return s.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "Stack<i32>");
+}
+
+TEST("Parser builds Stack<T> push/pop/peek method-call expressions")
+{
+    auto program = parseOne("f() { s = Stack<i32>()  s.push(1)  s.peek() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* pushStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(pushStmt != nullptr);
+    auto* pushCall = dynamic_cast<MethodCallExpr*>(pushStmt->expr.get());
+    EXPECT_TRUE(pushCall != nullptr);
+    EXPECT_EQ(pushCall->method, "push");
+
+    auto* peekResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(peekResult != nullptr);
+    EXPECT_EQ(peekResult->method, "peek");
+    EXPECT_TRUE(peekResult->arguments.empty());
+}
+
+TEST("Parser builds a Map<K,V> construction expression")
+{
+    auto program = parseOne("x = Map<i32,i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* mapNew = dynamic_cast<MapNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(mapNew != nullptr);
+    EXPECT_EQ(mapNew->keyType, "i32");
+    EXPECT_EQ(mapNew->valueType, "i32");
+}
+
+TEST("Parser builds a Set<T> construction expression")
+{
+    auto program = parseOne("x = Set<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* setNew = dynamic_cast<SetNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(setNew != nullptr);
+    EXPECT_EQ(setNew->elementType, "i32");
+}
+
+TEST("Parser builds nested construction syntax for List/Map/Set (K/V can themselves be generic)")
+{
+    // A single Identifier token isn't enough here - the value type is
+    // itself a nested generic shape (see
+    // docs/language/0034-maps-and-sets.md's generic rewrite).
+    auto program = parseOne("x = Map<i32, List<i32>>()  y = List<List<i32>>()  "
+                            "z = Set<[i32;3]>()");
+
+    auto* mapAssign = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* mapNew = dynamic_cast<MapNewExpr*>(mapAssign->value.get());
+    EXPECT_TRUE(mapNew != nullptr);
+    EXPECT_EQ(mapNew->keyType, "i32");
+    EXPECT_EQ(mapNew->valueType, "List<i32>");
+
+    auto* listAssign = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* listNew = dynamic_cast<ListNewExpr*>(listAssign->value.get());
+    EXPECT_TRUE(listNew != nullptr);
+    EXPECT_EQ(listNew->elementType, "List<i32>");
+
+    auto* setAssign = dynamic_cast<AssignmentStmt*>(program.items.at(2).get());
+    auto* setNew2 = dynamic_cast<SetNewExpr*>(setAssign->value.get());
+    EXPECT_TRUE(setNew2 != nullptr);
+    EXPECT_EQ(setNew2->elementType, "[i32;3]");
+}
+
+TEST("Parser parses Map<K,V> and Set<T> parameter types into the canonical form")
+{
+    auto program = parseOne("useMap(m: Map<i32,i32>) -> i32 { return m.length } "
+                            "useSet(s: Set<i32>) -> i32 { return s.length }");
+
+    auto* mapFn = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(mapFn != nullptr);
+    EXPECT_EQ(mapFn->params[0].type, "Map<i32,i32>");
+
+    auto* setFn = dynamic_cast<FunctionDecl*>(program.items.at(1).get());
+    EXPECT_TRUE(setFn != nullptr);
+    EXPECT_EQ(setFn->params[0].type, "Set<i32>");
+}
+
+TEST("Parser builds Map/Set method-call expressions")
+{
+    auto program = parseOne("f() { m = Map<i32,i32>()  m.set(1, 2)  s = Set<i32>()  s.add(1) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* mapSetStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(mapSetStmt != nullptr);
+    auto* mapSetCall = dynamic_cast<MethodCallExpr*>(mapSetStmt->expr.get());
+    EXPECT_TRUE(mapSetCall != nullptr);
+    EXPECT_EQ(mapSetCall->method, "set");
+    EXPECT_EQ(mapSetCall->arguments.size(), static_cast<std::size_t>(2));
+
+    auto* setAddResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(setAddResult != nullptr);
+    EXPECT_EQ(setAddResult->method, "add");
+    EXPECT_EQ(setAddResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a method-call expression, distinct from field access")
+{
+    // A trailing expression with nothing after it becomes the block's
+    // result, not a pushed statement (same as any other expression) - so
+    // the method call ends up as `body->result` here, not `statements[1]`.
+    auto program = parseOne("f() { numbers = List<i32>()  numbers.push(4) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* methodCall = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(methodCall != nullptr);
+    EXPECT_EQ(methodCall->method, "push");
+    EXPECT_EQ(methodCall->arguments.size(), static_cast<std::size_t>(1));
+
+    auto* object = dynamic_cast<NameExpr*>(methodCall->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "numbers");
+}
+
+TEST("Parser builds a zero-argument method-call expression usable as a value")
+{
+    auto program = parseOne("f() -> i32 { numbers = List<i32>()  return numbers.pop() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(1).get());
+    auto* methodCall = dynamic_cast<MethodCallExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(methodCall != nullptr);
+    EXPECT_EQ(methodCall->method, "pop");
+    EXPECT_TRUE(methodCall->arguments.empty());
 }

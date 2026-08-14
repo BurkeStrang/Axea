@@ -160,3 +160,83 @@ struct IndexExpr final : Expr
     std::unique_ptr<Expr> object;
     std::unique_ptr<Expr> index;
 };
+
+// `List<elem>()` - always empty parens this phase (construction only, no
+// initial elements). `elementType` is a single identifier, same one-level
+// restriction arrays/slices already have. See docs/language/0033-lists.md.
+struct ListNewExpr final : Expr
+{
+    explicit ListNewExpr(std::string elementType)
+        : elementType(std::move(elementType))
+    {
+    }
+
+    std::string elementType;
+};
+
+// `object.method(args)` - e.g. `list.push(x)`, `list.pop()`. Distinct from
+// FieldExpr (`object.field`, no parens): parsePostfix decides which based on
+// whether '(' follows the identifier after '.'. "push"/"pop" are the only
+// recognized methods this phase (both intrinsic to List<T>, not a general
+// user-defined method system) - anything else is a TypeChecker error, not a
+// parser one, mirroring how ".length" vs. any other field name is resolved
+// for arrays/slices.
+struct MethodCallExpr final : Expr
+{
+    MethodCallExpr(std::unique_ptr<Expr> object,
+                   std::string method,
+                   std::vector<std::unique_ptr<Expr>> arguments)
+        : object(std::move(object)),
+          method(std::move(method)),
+          arguments(std::move(arguments))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::string method;
+    std::vector<std::unique_ptr<Expr>> arguments;
+};
+
+// `Map<key,value>()` - always empty parens (construction only, no initial
+// entries). The parser accepts any type syntactically here (mirrors
+// ListNewExpr/parseTypeName's own "parser stays general" convention) - only
+// TypeChecker rejects anything but i32/i32 this phase, with a clear error
+// (see docs/language/0034-maps-and-sets.md), rather than the parser silently
+// discarding what was actually written.
+struct MapNewExpr final : Expr
+{
+    MapNewExpr(std::string keyType, std::string valueType)
+        : keyType(std::move(keyType)),
+          valueType(std::move(valueType))
+    {
+    }
+
+    std::string keyType;
+    std::string valueType;
+};
+
+// `Set<elem>()` - always empty parens. Same "parser permissive, TypeChecker
+// enforces i32-only" reasoning as MapNewExpr.
+struct SetNewExpr final : Expr
+{
+    explicit SetNewExpr(std::string elementType)
+        : elementType(std::move(elementType))
+    {
+    }
+
+    std::string elementType;
+};
+
+// `Stack<elem>()` - always empty parens (construction only). A LIFO
+// collection backed internally by List<T>'s own machinery (see
+// docs/language/0035-stacks.md) - fielded identically to ListNewExpr, same
+// one-level element-type restriction.
+struct StackNewExpr final : Expr
+{
+    explicit StackNewExpr(std::string elementType)
+        : elementType(std::move(elementType))
+    {
+    }
+
+    std::string elementType;
+};

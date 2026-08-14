@@ -1,0 +1,31 @@
+build() -> Stack<i32>
+{
+    numbers = Stack<i32>()
+    numbers.push(10)
+    numbers.push(20)
+    numbers.push(30)
+    return numbers
+}
+
+pushOne(numbers: Stack<i32>)
+{
+    numbers.push(99)
+}
+
+drain(numbers: Stack<i32>) -> i32
+{
+    total = 0
+    while numbers.length > 0
+    {
+        total = total + numbers.pop()
+    }
+    return total
+}
+
+numbers = build()
+top = numbers.peek()
+called = pushOne(numbers)
+afterPush = numbers.length
+topAfterPush = numbers.peek()
+total = drain(numbers)
+countAfterDrain = numbers.length

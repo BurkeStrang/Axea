@@ -160,6 +160,30 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        inferExpr(*methodCall->object, function, changed);
+        for (const auto& argument : methodCall->arguments)
+        {
+            inferExpr(*argument, function, changed);
+        }
+        // "push"/"pop" (List, docs/language/0033-lists.md), "set"/"remove"
+        // (Map), and "add"/"remove" (Set, docs/language/0034-maps-and-sets.md)
+        // all mutate the receiver's own header fields in place; "get"/
+        // "contains" don't. Mirrors IndexAssignStmt/FieldAssignStmt raising
+        // Write on their own object below.
+        if (methodCall->method == "push" || methodCall->method == "pop" ||
+            methodCall->method == "set" || methodCall->method == "remove" ||
+            methodCall->method == "add")
+        {
+            if (const auto paramIndex = rootParamIndex(*methodCall->object, function))
+            {
+                raise(function.name, *paramIndex, Capability::Write, changed);
+            }
+        }
+        return;
+    }
+
     // IntegerExpr, BoolExpr, StringExpr, NameExpr: no sub-expressions, and a
     // bare name reference by itself is a read, which is already the floor.
 }
@@ -354,6 +378,16 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
             {
                 moved.insert(argName->name);
             }
+        }
+        return;
+    }
+
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        checkMovesInExpr(*methodCall->object, function, moved);
+        for (const auto& argument : methodCall->arguments)
+        {
+            checkMovesInExpr(*argument, function, moved);
         }
         return;
     }

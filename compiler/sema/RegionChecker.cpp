@@ -17,6 +17,72 @@ namespace
     {
         return type.substr(1, type.find(';') - 1);
     }
+
+    bool isListTypeString(const std::string& type)
+    {
+        return type.starts_with("List<");
+    }
+
+    // "List<elem>" -> "elem" - the canonical form Parser::parseTypeName
+    // always produces (see docs/language/0033-lists.md). Mirrors
+    // arrayElementTypeName above.
+    std::string listElementTypeName(const std::string& type)
+    {
+        return type.substr(5, type.size() - 6);
+    }
+
+    bool isStackTypeString(const std::string& type)
+    {
+        return type.starts_with("Stack<");
+    }
+
+    // "Stack<elem>" -> "elem" - mirrors listElementTypeName above (see
+    // docs/language/0035-stacks.md).
+    std::string stackElementTypeName(const std::string& type)
+    {
+        return type.substr(6, type.size() - 7);
+    }
+
+    bool isMapTypeString(const std::string& type)
+    {
+        return type.starts_with("Map<");
+    }
+
+    bool isSetTypeString(const std::string& type)
+    {
+        return type.starts_with("Set<");
+    }
+
+    // "Map<K,V>" -> "V". Own bracket-depth-aware top-level-comma split (per
+    // this codebase's "each pass owns its own walk" convention - TypeChecker
+    // has its own copy of this same logic, independently, for the same
+    // reason: K/V can themselves be nested generics containing commas, e.g.
+    // Map<i32,Map<i32,i32>>, since docs/language/0034-maps-and-sets.md's
+    // generic rewrite). Only V is ever extracted here - RegionChecker only
+    // needs this to propagate struct-aliasing through `.get()`'s result
+    // (mirrors array/List's own elementStructType extraction); nothing ever
+    // returns K itself, so K's own struct-ness is irrelevant here.
+    std::string mapValueTypeName(const std::string& type)
+    {
+        const std::string args = type.substr(4, type.size() - 5); // strip "Map<" and trailing ">"
+        int depth = 0;
+        for (std::size_t i = 0; i < args.size(); ++i)
+        {
+            if (args[i] == '<' || args[i] == '[')
+            {
+                ++depth;
+            }
+            else if (args[i] == '>' || args[i] == ']')
+            {
+                --depth;
+            }
+            else if (args[i] == ',' && depth == 0)
+            {
+                return args.substr(i + 1);
+            }
+        }
+        return ""; // malformed - unreachable for a well-checked program
+    }
 } // namespace
 
 RegionEnv::RegionEnv(const RegionEnv* parent)
@@ -82,6 +148,10 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         const std::string structType = structs_.contains(param.type) ? param.type : "";
         std::string elementStructType;
         const bool isArray = isArrayTypeString(param.type);
+        const bool isList = isListTypeString(param.type);
+        const bool isStack = isStackTypeString(param.type);
+        const bool isMap = isMapTypeString(param.type);
+        const bool isSet = isSetTypeString(param.type);
         if (isArray)
         {
             const std::string elementName = arrayElementTypeName(param.type);
@@ -90,12 +160,47 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
                 elementStructType = elementName;
             }
         }
-        // Struct-typed and array-typed parameters both carry aliasing risk
-        // (both are heap-allocated, reference-semantics values - see
-        // docs/language/0031-arrays.md); a primitive parameter is always
-        // Owned regardless of its read/write/take capability.
+        else if (isList)
+        {
+            const std::string elementName = listElementTypeName(param.type);
+            if (structs_.contains(elementName))
+            {
+                elementStructType = elementName;
+            }
+        }
+        else if (isStack)
+        {
+            // Same reasoning as List above - `.peek()` (unlike `.pop()`,
+            // which removes) can hand back a value aliasing the stack's own
+            // stored instance (see docs/language/0035-stacks.md).
+            const std::string elementName = stackElementTypeName(param.type);
+            if (structs_.contains(elementName))
+            {
+                elementStructType = elementName;
+            }
+        }
+        else if (isMap)
+        {
+            // Only V (not K) - `.get()` is the only Map operation that can
+            // hand back a value aliasing the map's own stored instance (see
+            // docs/language/0034-maps-and-sets.md's generic rewrite); K is
+            // never itself returned, so K's struct-ness doesn't matter here.
+            // Set needs no equivalent: none of add/contains/remove ever
+            // return the stored element.
+            const std::string valueName = mapValueTypeName(param.type);
+            if (structs_.contains(valueName))
+            {
+                elementStructType = valueName;
+            }
+        }
+        // Struct-, array-, List-, Stack-, Map-, and Set-typed parameters all
+        // carry aliasing risk (all are heap-allocated, reference-semantics
+        // values - see docs/language/0031-arrays.md, 0033-lists.md,
+        // 0034-maps-and-sets.md, and 0035-stacks.md); a primitive parameter
+        // is always Owned regardless of its read/write/take capability.
         const bool borrowed =
-            (!structType.empty() || isArray) && capabilities[i] != Capability::Take;
+            (!structType.empty() || isArray || isList || isStack || isMap || isSet) &&
+            capabilities[i] != Capability::Take;
         env.define(param.name,
                    RegionInfo{borrowed ? Region::Borrowed : Region::Owned,
                               borrowed ? param.name : "",
@@ -105,10 +210,13 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     }
     regions_[function.name] = std::move(paramRegions);
 
-    // Nothing can leak through a non-struct, non-array return type:
-    // primitives are always copied by value, and unit carries no value at all.
+    // Nothing can leak through a non-struct, non-array, non-List, non-Stack,
+    // non-Map, non-Set return type: primitives are always copied by value,
+    // and unit carries no value at all.
     if (!function.returnType ||
-        (!structs_.contains(*function.returnType) && !isArrayTypeString(*function.returnType)))
+        (!structs_.contains(*function.returnType) && !isArrayTypeString(*function.returnType) &&
+         !isListTypeString(*function.returnType) && !isStackTypeString(*function.returnType) &&
+         !isMapTypeString(*function.returnType) && !isSetTypeString(*function.returnType)))
     {
         return;
     }
@@ -214,6 +322,27 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", "", elementStructType};
     }
 
+    if (dynamic_cast<const ListNewExpr*>(&expr))
+    {
+        // A brand-new list starts empty - nothing to alias yet, always Owned
+        // (see docs/language/0033-lists.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const MapNewExpr*>(&expr) || dynamic_cast<const SetNewExpr*>(&expr))
+    {
+        // Same reasoning as ListNewExpr above - a brand-new Map/Set starts
+        // empty, always Owned (see docs/language/0034-maps-and-sets.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const StackNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new stack starts empty, always
+        // Owned (see docs/language/0035-stacks.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
     {
         regionOfExpr(*index->index, env, function, currentLoopBreakRegions);
@@ -249,6 +378,38 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         // borrow through its return, the callee's own check rejects it
         // independently - the caller never needs to re-verify it.
         return RegionInfo{Region::Owned, "", structType};
+    }
+
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        const RegionInfo objectInfo =
+            regionOfExpr(*methodCall->object, env, function, currentLoopBreakRegions);
+        for (const auto& argument : methodCall->arguments)
+        {
+            regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+        }
+        // "push" returns unit. "pop" removes and returns an element - once
+        // removed, nothing else in the list still aliases it, so it's always
+        // Owned (never Borrowed), but if the list held structs, the popped
+        // value's own structType still needs to propagate so a chained
+        // `.field` on it resolves correctly (mirrors IndexExpr's identical
+        // propagation for a struct-typed array/slice element).
+        //
+        // "get" (Map<K,V>, docs/language/0034-maps-and-sets.md) and "peek"
+        // (Stack<T>, docs/language/0035-stacks.md) are the exceptions to
+        // "Owned unless removed": unlike pop/remove, neither removes - the
+        // container still holds the same instance afterward, so a
+        // struct-typed element aliases the container exactly the way an
+        // array/slice index read does. Reusing pop's "always Owned" rule
+        // here would silently let a borrowed Map<K, StructV>/Stack<StructT>
+        // parameter's stored struct escape a function's return.
+        if ((methodCall->method == "get" || methodCall->method == "peek") &&
+            !objectInfo.elementStructType.empty())
+        {
+            return RegionInfo{
+                objectInfo.kind, objectInfo.sourceParam, objectInfo.elementStructType};
+        }
+        return RegionInfo{Region::Owned, "", objectInfo.elementStructType};
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))

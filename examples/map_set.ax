@@ -1,0 +1,96 @@
+build() -> Map<i32,i32>
+{
+    m = Map<i32,i32>()
+    m.set(1, 10)
+    m.set(2, 20)
+    m.set(3, 30)
+    return m
+}
+
+fillMore(m: Map<i32,i32>)
+{
+    m.set(4, 40)
+    m.set(5, 50)
+    m.set(6, 60)
+    m.set(7, 70)
+}
+
+buildSet() -> Set<i32>
+{
+    s = Set<i32>()
+    s.add(1)
+    s.add(2)
+    s.add(3)
+    return s
+}
+
+fillMoreSet(s: Set<i32>)
+{
+    s.add(4)
+    s.add(5)
+    s.add(6)
+    s.add(7)
+}
+
+m = build()
+before = m.length
+called = fillMore(m)
+after = m.length
+v1 = m.get(1)
+v7 = m.get(7)
+has3 = m.contains(3)
+removed = m.remove(3)
+has3After = m.contains(3)
+
+s = buildSet()
+sBefore = s.length
+calledSet = fillMoreSet(s)
+sAfter = s.length
+hasFour = s.contains(4)
+removedFour = s.remove(4)
+hasFourAfter = s.contains(4)
+
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+wordCounts() -> Map<str,i32>
+{
+    counts = Map<str,i32>()
+    counts.set("apple", 3)
+    counts.set("banana", 5)
+    counts.set("apple", 4)
+    return counts
+}
+
+uniquePoints() -> Set<Point>
+{
+    seen = Set<Point>()
+    seen.add(Point { x: 1  y: 1 })
+    seen.add(Point { x: 1  y: 1 })
+    seen.add(Point { x: 2  y: 2 })
+    return seen
+}
+
+locations() -> Map<str,Point>
+{
+    places = Map<str,Point>()
+    places.set("origin", Point { x: 0  y: 0 })
+    places.set("home", Point { x: 3  y: 4 })
+    return places
+}
+
+counts = wordCounts()
+appleCount = counts.get("apple")
+wordTotal = counts.length
+
+points = uniquePoints()
+pointCount = points.length
+hasOrigin = points.contains(Point { x: 1  y: 1 })
+
+places = locations()
+home = places.get("home")
+homeX = home.x
+homeY = home.y

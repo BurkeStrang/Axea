@@ -95,6 +95,131 @@ struct IrIndexSet final : IrInst
     int value;
 };
 
+// `List<elem>()` - a fresh, empty, growable list (see docs/language/0033-lists.md).
+// `elementTypeName` is carried explicitly (unlike IrArrayNew, which infers it
+// from its own elements) - a brand-new empty list has no elements to infer
+// the type from.
+struct IrListNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `list.push(value)` - no dest (void); mutates `list`'s own header fields in
+// place. IndexGet/IndexSet/FieldGet(".length") are all reused unchanged for
+// List (see docs/language/0033-lists.md) - only push/pop need dedicated
+// instructions, since they're the only operations that change a list's shape
+// rather than just reading/writing an existing slot.
+struct IrListPush final : IrInst
+{
+    int list;
+    int value;
+};
+
+// `list.pop()` - dest is the removed element.
+struct IrListPop final : IrInst
+{
+    int list;
+};
+
+// `Stack<T>()` - a LIFO collection backed internally by List<T>'s own
+// machinery (see docs/language/0035-stacks.md). Carries elementTypeName
+// exactly like IrListNew - a brand-new empty stack has nothing to infer it
+// from.
+struct IrStackNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `stack.push(value)` - no dest (void); mirrors IrListPush exactly.
+struct IrStackPush final : IrInst
+{
+    int stack;
+    int value;
+};
+
+// `stack.pop()` - dest is the removed element; mirrors IrListPop exactly.
+struct IrStackPop final : IrInst
+{
+    int stack;
+};
+
+// `stack.peek()` - dest is the top element, *not* removed (the one
+// genuinely new operation List<T> doesn't have - see
+// docs/language/0035-stacks.md).
+struct IrStackPeek final : IrInst
+{
+    int stack;
+};
+
+// `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's
+// generic rewrite). Carries the concrete K/V type strings explicitly - like
+// IrListNew's own elementTypeName, a brand-new empty Map has nothing to infer
+// them from - so LlvmIrEmitter can look up (or register, on first sight) the
+// right monomorphized instantiation.
+struct IrMapNew final : IrInst
+{
+    std::string keyTypeName;
+    std::string valueTypeName;
+};
+
+// `map.set(key, value)` - no dest (unit); inserts or updates in place.
+struct IrMapSet final : IrInst
+{
+    int map;
+    int key;
+    int value;
+};
+
+// `map.get(key)` - dest is the value (or an unspecified sentinel if the key
+// is absent in compiled code; the interpreter throws instead - see
+// docs/language/0034-maps-and-sets.md).
+struct IrMapGet final : IrInst
+{
+    int map;
+    int key;
+};
+
+// `map.contains(key)` - dest is a bool.
+struct IrMapContains final : IrInst
+{
+    int map;
+    int key;
+};
+
+// `map.remove(key)` - no dest (unit); no-op if the key is absent.
+struct IrMapRemove final : IrInst
+{
+    int map;
+    int key;
+};
+
+// `Set<T>()` - a fresh, empty hash set. Same reasoning as IrMapNew above.
+struct IrSetNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `set.add(value)` - no dest (unit); no-op if already present.
+struct IrSetAdd final : IrInst
+{
+    int set;
+    int value;
+};
+
+// `set.contains(value)` - dest is a bool.
+struct IrSetContains final : IrInst
+{
+    int set;
+    int value;
+};
+
+// `set.remove(value)` - no dest (unit); no-op if absent.
+struct IrSetRemove final : IrInst
+{
+    int set;
+    int value;
+};
+
 // `if`/`else`, kept structured: two nested instruction lists rather than
 // separate labeled blocks, since the language has no loops yet and this
 // avoids needing real CFG merging/phi nodes for something nothing downstream

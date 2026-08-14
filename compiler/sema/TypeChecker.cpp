@@ -4,9 +4,38 @@
 
 namespace
 {
-    const Type kBool{TypeKind::Bool, ""};
-    const Type kI32{TypeKind::I32, ""};
-    const Type kUnit{TypeKind::Unit, ""};
+    // Builds a Type with only `kind`/`structName` set, value-initializing
+    // every other field (elementKind/elementStructName/arraySize/
+    // elementTypeName/valueTypeName) - avoids -Wmissing-field-initializers,
+    // which (unlike leaving every field default via `Type{}`) does fire on
+    // any *partial* aggregate init, no matter how many trailing fields are
+    // provided.
+    Type simpleType(TypeKind kind, std::string structName = "")
+    {
+        Type type{};
+        type.kind = kind;
+        type.structName = std::move(structName);
+        return type;
+    }
+
+    // Same reasoning as simpleType above, for Array/Slice/List's flat
+    // one-level element representation.
+    Type arrayLikeType(TypeKind kind,
+                       TypeKind elementKind,
+                       std::string elementStructName,
+                       int arraySize = 0)
+    {
+        Type type{};
+        type.kind = kind;
+        type.elementKind = elementKind;
+        type.elementStructName = std::move(elementStructName);
+        type.arraySize = arraySize;
+        return type;
+    }
+
+    const Type kBool = simpleType(TypeKind::Bool);
+    const Type kI32 = simpleType(TypeKind::I32);
+    const Type kUnit = simpleType(TypeKind::Unit);
 
     void requireInt(const Type& left, const Type& right)
     {
@@ -36,6 +65,91 @@ namespace
                                      std::to_string(arrayType.arraySize));
         }
     }
+
+    bool isIndexable(const Type& type)
+    {
+        return type.kind == TypeKind::Array || type.kind == TypeKind::Slice ||
+               type.kind == TypeKind::List;
+    }
+
+    // slice<T> is deliberately scoped to function parameters only this phase
+    // (see docs/language/0032-slices.md) - a slice value never needs to
+    // survive past a single call, which is what keeps RegionChecker untouched
+    // and avoids needing slice support in ax run's top-level-binding printer.
+    // Called at every type-resolution site that is *not* a parameter.
+    void rejectSliceOutsideParameter(const Type& type, const std::string& context)
+    {
+        if (type.kind == TypeKind::Slice)
+        {
+            throw std::runtime_error("slice<T> is only supported as a function parameter type, "
+                                     "not as " +
+                                     context);
+        }
+    }
+
+    // Unlike slice<T>, List<T> is a real owned heap value (like struct/array)
+    // and may freely be a parameter, return type, or local declared type -
+    // it's only rejected as a struct field type this phase, purely to keep
+    // this pass's surface area bounded, not for any deeper architectural
+    // reason (see docs/language/0033-lists.md).
+    void rejectListAsFieldType(const Type& type)
+    {
+        if (type.kind == TypeKind::List)
+        {
+            throw std::runtime_error(
+                "List<T> is not supported as a struct field type in this phase");
+        }
+    }
+
+    // Same "kept restricted purely to bound this pass's surface area, not
+    // for any deeper architectural reason" rationale as
+    // rejectListAsFieldType above - see docs/language/0034-maps-and-sets.md.
+    void rejectMapOrSetAsFieldType(const Type& type)
+    {
+        if (type.kind == TypeKind::Map || type.kind == TypeKind::Set)
+        {
+            throw std::runtime_error(typeName(type) +
+                                     " is not supported as a struct field type in this phase");
+        }
+    }
+
+    // Same rationale again - see docs/language/0035-stacks.md.
+    void rejectStackAsFieldType(const Type& type)
+    {
+        if (type.kind == TypeKind::Stack)
+        {
+            throw std::runtime_error(
+                "Stack<T> is not supported as a struct field type in this phase");
+        }
+    }
+
+    // Finds the first *top-level* comma in `text` - i.e. one not nested
+    // inside a further `<...>`/`[...]` type argument list (e.g. a Map value
+    // type that's itself `Map<i32,i32>`, or `[i32;4]`'s own bracket pair).
+    // Needed the instant Map/Set's K/V can be arbitrarily nested (see
+    // docs/language/0034-maps-and-sets.md's generic rewrite) - the naive
+    // `text.find(',')` this replaces broke as soon as a value type could
+    // itself contain a comma.
+    std::size_t findTopLevelComma(const std::string& text)
+    {
+        int depth = 0;
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == '<' || text[i] == '[')
+            {
+                ++depth;
+            }
+            else if (text[i] == '>' || text[i] == ']')
+            {
+                --depth;
+            }
+            else if (text[i] == ',' && depth == 0)
+            {
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
 } // namespace
 
 std::string typeName(const Type& type)
@@ -49,9 +163,30 @@ std::string typeName(const Type& type)
         case TypeKind::Struct: return type.structName;
         case TypeKind::Array:
         {
-            const Type element{type.elementKind, type.elementStructName};
+            const Type element = simpleType(type.elementKind, type.elementStructName);
             return "[" + typeName(element) + "; " + std::to_string(type.arraySize) + "]";
         }
+        case TypeKind::Slice:
+        {
+            const Type element = simpleType(type.elementKind, type.elementStructName);
+            return "slice<" + typeName(element) + ">";
+        }
+        case TypeKind::List:
+        {
+            const Type element = simpleType(type.elementKind, type.elementStructName);
+            return "List<" + typeName(element) + ">";
+        }
+        case TypeKind::Stack:
+        {
+            const Type element = simpleType(type.elementKind, type.elementStructName);
+            return "Stack<" + typeName(element) + ">";
+        }
+        // elementTypeName/valueTypeName are always already-canonical strings
+        // (see docs/language/0034-maps-and-sets.md's generic rewrite), so
+        // reconstruction is trivial - unlike Array/Slice/List's flat
+        // elementKind tag, there's no nested Type to recurse into here.
+        case TypeKind::Map: return "Map<" + type.elementTypeName + "," + type.valueTypeName + ">";
+        case TypeKind::Set: return "Set<" + type.elementTypeName + ">";
         default: return "<unsupported type>";
     }
 }
@@ -107,19 +242,176 @@ Type TypeChecker::resolveType(const std::string& name) const
             throw std::runtime_error("nested array types are not supported: " + name);
         }
 
-        return Type{
-            TypeKind::Array, "", elementType.kind, elementType.structName, std::stoi(sizeText)};
+        return arrayLikeType(
+            TypeKind::Array, elementType.kind, elementType.structName, std::stoi(sizeText));
+    }
+
+    // "slice<elem>" - the canonical form Parser::parseTypeName always
+    // produces (see docs/language/0032-slices.md).
+    if (name.starts_with("slice<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(6, name.size() - 7);
+        const Type elementType = resolveType(elementName); // one level deep only - no nested slices
+        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice)
+        {
+            throw std::runtime_error("nested array/slice element types are not supported: " + name);
+        }
+
+        return arrayLikeType(TypeKind::Slice, elementType.kind, elementType.structName);
+    }
+
+    // "List<elem>" - the canonical form Parser::parseTypeName always
+    // produces (see docs/language/0033-lists.md).
+    if (name.starts_with("List<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(5, name.size() - 6);
+        const Type elementType = resolveType(elementName); // one level deep only - no nested lists
+        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
+            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack)
+        {
+            throw std::runtime_error(
+                "nested array/slice/List/Stack element types are not supported: " + name);
+        }
+
+        return arrayLikeType(TypeKind::List, elementType.kind, elementType.structName);
+    }
+
+    // "Stack<elem>" - a LIFO collection backed internally by List<T>'s own
+    // machinery (see docs/language/0035-stacks.md) - same one-level element
+    // restriction as List<elem> above, for the same reason (and extended to
+    // also reject a nested Stack<Stack<T>>, for symmetry).
+    if (name.starts_with("Stack<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(6, name.size() - 7);
+        const Type elementType = resolveType(elementName);
+        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
+            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack)
+        {
+            throw std::runtime_error(
+                "nested array/slice/List/Stack element types are not supported: " + name);
+        }
+
+        return arrayLikeType(TypeKind::Stack, elementType.kind, elementType.structName);
+    }
+
+    // "Set<elem>" - the canonical form Parser::parseTypeName always produces
+    // (see docs/language/0034-maps-and-sets.md's generic rewrite, modeled on
+    // Rust: the element type needs real Hash+Eq, monomorphized per distinct
+    // shape actually used - see LlvmIrEmitter). `elementTypeName` stores the
+    // canonical string (`typeName` of the resolved element type, not the raw
+    // source text) so two differently-spelled-but-equivalent Set<T>s still
+    // compare equal via the defaulted operator==.
+    if (name.starts_with("Set<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(4, name.size() - 5);
+        const Type elementType = resolveType(elementName);
+        rejectSliceOutsideParameter(elementType, "a Set element type");
+        std::unordered_set<std::string> visitedStructs;
+        if (!isHashable(elementType, visitedStructs))
+        {
+            throw std::runtime_error(
+                "Set<T> requires a hashable element type (i32, bool, str, or a struct/array/"
+                "List composed entirely of hashable types), found Set<" +
+                typeName(elementType) + ">");
+        }
+        Type result{};
+        result.kind = TypeKind::Set;
+        result.elementTypeName = typeName(elementType);
+        return result;
+    }
+
+    // "Map<key,value>" - the canonical form Parser::parseTypeName always
+    // produces. Same Hash+Eq requirement on the key as Set<T> above; V has no
+    // such requirement (never hashed or compared - only ever stored) and may
+    // be any resolvable type except slice<T> (still parameter-only).
+    if (name.starts_with("Map<") && name.back() == '>')
+    {
+        const std::string args = name.substr(4, name.size() - 5);
+        const auto comma = findTopLevelComma(args);
+        if (comma == std::string::npos)
+        {
+            throw std::runtime_error("malformed Map type: " + name);
+        }
+        const std::string keyName = args.substr(0, comma);
+        const std::string valueName = args.substr(comma + 1);
+        const Type keyType = resolveType(keyName);
+        const Type valueType = resolveType(valueName);
+        rejectSliceOutsideParameter(keyType, "a Map key type");
+        rejectSliceOutsideParameter(valueType, "a Map value type");
+        std::unordered_set<std::string> visitedStructs;
+        if (!isHashable(keyType, visitedStructs))
+        {
+            throw std::runtime_error(
+                "Map<K,V> requires a hashable key type (i32, bool, str, or a struct/array/List "
+                "composed entirely of hashable types), found Map<" +
+                typeName(keyType) + "," + typeName(valueType) + ">");
+        }
+        Type result{};
+        result.kind = TypeKind::Map;
+        result.elementTypeName = typeName(keyType);
+        result.valueTypeName = typeName(valueType);
+        return result;
     }
 
     if (const auto it = primitives.find(name); it != primitives.end())
     {
-        return Type{it->second, ""};
+        return simpleType(it->second);
     }
     if (structs_.contains(name))
     {
-        return Type{TypeKind::Struct, name};
+        return simpleType(TypeKind::Struct, name);
     }
     throw std::runtime_error("unsupported type: " + name);
+}
+
+bool TypeChecker::isHashable(const Type& type,
+                             std::unordered_set<std::string>& visitedStructs) const
+{
+    switch (type.kind)
+    {
+        case TypeKind::I32:
+        case TypeKind::Bool:
+        case TypeKind::String: return true;
+
+        // Array/List/Stack all use the flat elementKind/elementStructName
+        // representation (untouched by this phase's Map/Set rewrite) - so
+        // their element's Type is directly reconstructible, no re-resolve
+        // needed. Stack<T> is hashable under the same rule as List<T> - it's
+        // backed by the identical mechanism (see docs/language/0035-stacks.md).
+        case TypeKind::Array:
+        case TypeKind::List:
+        case TypeKind::Stack:
+        {
+            const Type element = simpleType(type.elementKind, type.elementStructName);
+            return isHashable(element, visitedStructs);
+        }
+
+        case TypeKind::Struct:
+        {
+            // A self-/mutually-recursive struct chain is already possible
+            // today (structs are always by-pointer) - revisiting a struct
+            // still being checked means "not provably hashable", not an
+            // infinite loop.
+            if (!visitedStructs.insert(type.structName).second)
+            {
+                return false;
+            }
+            const StructDecl& decl = *structs_.at(type.structName);
+            for (const auto& field : decl.fields)
+            {
+                if (!isHashable(resolveType(field.type), visitedStructs))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Map, Set, slice, unit, and everything else: not hashable (mirrors
+        // Rust - HashMap/HashSet don't implement Hash themselves either, no
+        // canonical order to hash over).
+        default: return false;
+    }
 }
 
 void TypeChecker::registerSignatures(const Program& program)
@@ -142,18 +434,23 @@ void TypeChecker::registerSignatures(const Program& program)
     {
         for (const auto& param : function->params)
         {
-            resolveType(param.type);
+            resolveType(param.type); // slice<T> is allowed here - it's a parameter
         }
         if (function->returnType)
         {
-            resolveType(*function->returnType);
+            rejectSliceOutsideParameter(resolveType(*function->returnType),
+                                        "a function return type");
         }
     }
     for (const auto& [name, structDecl] : structs_)
     {
         for (const auto& field : structDecl->fields)
         {
-            resolveType(field.type);
+            const Type fieldType = resolveType(field.type);
+            rejectSliceOutsideParameter(fieldType, "a struct field type");
+            rejectListAsFieldType(fieldType);
+            rejectMapOrSetAsFieldType(fieldType);
+            rejectStackAsFieldType(fieldType);
         }
     }
 }
@@ -260,6 +557,7 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         if (assignment->declaredType)
         {
             const Type declared = resolveType(*assignment->declaredType);
+            rejectSliceOutsideParameter(declared, "a local variable's declared type");
             if (!(declared == valueType))
             {
                 throw std::runtime_error("variable '" + assignment->name + "' declared as " +
@@ -316,9 +614,9 @@ void TypeChecker::checkStmt(const Stmt& stmt,
     {
         const Type objectType =
             checkExpr(*indexAssign->object, env, expectedReturnType, currentLoopBreakTypes);
-        if (objectType.kind != TypeKind::Array)
+        if (!isIndexable(objectType))
         {
-            throw std::runtime_error("indexed assignment into non-array type " +
+            throw std::runtime_error("indexed assignment into non-array/slice type " +
                                      typeName(objectType));
         }
         const Type indexType =
@@ -327,9 +625,12 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         {
             throw std::runtime_error("array index must be i32, found " + typeName(indexType));
         }
-        checkLiteralIndexBounds(*indexAssign->index, objectType);
+        if (objectType.kind == TypeKind::Array) // no static size to check a slice's index against
+        {
+            checkLiteralIndexBounds(*indexAssign->index, objectType);
+        }
 
-        const Type elementType{objectType.elementKind, objectType.elementStructName};
+        const Type elementType = simpleType(objectType.elementKind, objectType.elementStructName);
         const Type valueType =
             checkExpr(*indexAssign->value, env, expectedReturnType, currentLoopBreakTypes);
         if (!(valueType == elementType))
@@ -410,13 +711,39 @@ Type TypeChecker::checkFieldType(const Expr& object,
 {
     const Type objectType = checkExpr(object, env, expectedReturnType, currentLoopBreakTypes);
 
-    if (objectType.kind == TypeKind::Array)
+    if (isIndexable(objectType))
     {
         if (field == "length")
         {
             return kI32;
         }
-        throw std::runtime_error("array has no field '" + field + "' (did you mean 'length'?)");
+        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
+                                 "' (did you mean 'length'?)");
+    }
+
+    // Map<K,V>/Set<T> aren't indexable (unordered - no `[i]`), so this is a
+    // standalone case rather than folded into isIndexable above (see
+    // docs/language/0034-maps-and-sets.md).
+    if (objectType.kind == TypeKind::Map || objectType.kind == TypeKind::Set)
+    {
+        if (field == "length")
+        {
+            return kI32;
+        }
+        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
+                                 "' (did you mean 'length'?)");
+    }
+
+    // Stack<T> isn't indexable either - LIFO access only, via push/pop/peek,
+    // no `[i]` (see docs/language/0035-stacks.md).
+    if (objectType.kind == TypeKind::Stack)
+    {
+        if (field == "length")
+        {
+            return kI32;
+        }
+        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
+                                 "' (did you mean 'length'?)");
     }
 
     if (objectType.kind != TypeKind::Struct)
@@ -452,7 +779,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (dynamic_cast<const StringExpr*>(&expr))
     {
-        return Type{TypeKind::String, ""};
+        return simpleType(TypeKind::String);
     }
 
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
@@ -533,7 +860,17 @@ Type TypeChecker::checkExpr(const Expr& expr,
             const Type argType =
                 checkExpr(*call->arguments[i], env, expectedReturnType, currentLoopBreakTypes);
             const Type paramType = resolveType(function.params[i].type);
-            if (!(argType == paramType))
+            // An array of *any* size implicitly converts to a slice of the
+            // same element type at a call boundary - the whole point of
+            // slice<T> (docs/language/0032-slices.md). An existing slice
+            // passed straight through to another slice parameter needs no
+            // special-casing: ordinary Slice == Slice equality already
+            // covers that forwarding case.
+            const bool arrayToSliceCoercion =
+                paramType.kind == TypeKind::Slice && argType.kind == TypeKind::Array &&
+                argType.elementKind == paramType.elementKind &&
+                argType.elementStructName == paramType.elementStructName;
+            if (!(argType == paramType) && !arrayToSliceCoercion)
             {
                 throw std::runtime_error("argument " + std::to_string(i + 1) + " to '" +
                                          call->callee + "' expects " + typeName(paramType) +
@@ -542,6 +879,178 @@ Type TypeChecker::checkExpr(const Expr& expr,
         }
 
         return function.returnType ? resolveType(*function.returnType) : kUnit;
+    }
+
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        const Type objectType =
+            checkExpr(*methodCall->object, env, expectedReturnType, currentLoopBreakTypes);
+
+        if (objectType.kind == TypeKind::List)
+        {
+            const Type elementType =
+                simpleType(objectType.elementKind, objectType.elementStructName);
+
+            if (methodCall->method == "push")
+            {
+                if (methodCall->arguments.size() != 1)
+                {
+                    throw std::runtime_error("'push' expects 1 argument, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                const Type argType = checkExpr(
+                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+                if (!(argType == elementType))
+                {
+                    throw std::runtime_error("'push' expects " + typeName(elementType) + ", got " +
+                                             typeName(argType));
+                }
+                return kUnit;
+            }
+
+            if (methodCall->method == "pop")
+            {
+                if (!methodCall->arguments.empty())
+                {
+                    throw std::runtime_error("'pop' expects 0 arguments, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                return elementType;
+            }
+
+            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
+                                     typeName(objectType));
+        }
+
+        // Stack<T> (see docs/language/0035-stacks.md) - push/pop mirror
+        // List<T>'s own byte-for-byte; peek is the one new operation, same
+        // shape as pop (0 arguments, returns elementType) but - unlike pop -
+        // doesn't remove (see RegionChecker for why that distinction
+        // matters for struct-typed T).
+        if (objectType.kind == TypeKind::Stack)
+        {
+            const Type elementType =
+                simpleType(objectType.elementKind, objectType.elementStructName);
+
+            if (methodCall->method == "push")
+            {
+                if (methodCall->arguments.size() != 1)
+                {
+                    throw std::runtime_error("'push' expects 1 argument, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                const Type argType = checkExpr(
+                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+                if (!(argType == elementType))
+                {
+                    throw std::runtime_error("'push' expects " + typeName(elementType) + ", got " +
+                                             typeName(argType));
+                }
+                return kUnit;
+            }
+
+            if (methodCall->method == "pop" || methodCall->method == "peek")
+            {
+                if (!methodCall->arguments.empty())
+                {
+                    throw std::runtime_error("'" + methodCall->method +
+                                             "' expects 0 arguments, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                return elementType;
+            }
+
+            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
+                                     typeName(objectType));
+        }
+
+        // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
+        // rewrite) - K/V are checked against their own resolved types
+        // (elementTypeName/valueTypeName, re-resolved on demand), not a
+        // hardcoded i32 the way this used to be fixed.
+        if (objectType.kind == TypeKind::Map)
+        {
+            const Type keyType = resolveType(objectType.elementTypeName);
+            const Type valueType = resolveType(objectType.valueTypeName);
+
+            if (methodCall->method == "set")
+            {
+                if (methodCall->arguments.size() != 2)
+                {
+                    throw std::runtime_error("'set' expects 2 arguments, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                const Type givenKeyType = checkExpr(
+                    *methodCall->arguments[0], env, expectedReturnType, currentLoopBreakTypes);
+                const Type givenValueType = checkExpr(
+                    *methodCall->arguments[1], env, expectedReturnType, currentLoopBreakTypes);
+                if (!(givenKeyType == keyType) || !(givenValueType == valueType))
+                {
+                    throw std::runtime_error("'set' expects (" + typeName(keyType) + ", " +
+                                             typeName(valueType) + "), got (" +
+                                             typeName(givenKeyType) + ", " +
+                                             typeName(givenValueType) + ")");
+                }
+                return kUnit;
+            }
+
+            if (methodCall->method == "get" || methodCall->method == "contains" ||
+                methodCall->method == "remove")
+            {
+                if (methodCall->arguments.size() != 1)
+                {
+                    throw std::runtime_error("'" + methodCall->method +
+                                             "' expects 1 argument, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                const Type givenKeyType = checkExpr(
+                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+                if (!(givenKeyType == keyType))
+                {
+                    throw std::runtime_error("'" + methodCall->method + "' expects " +
+                                             typeName(keyType) + ", got " + typeName(givenKeyType));
+                }
+                if (methodCall->method == "get")
+                {
+                    return valueType;
+                }
+                return methodCall->method == "contains" ? kBool : kUnit;
+            }
+
+            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
+                                     typeName(objectType));
+        }
+
+        if (objectType.kind == TypeKind::Set)
+        {
+            const Type elementType = resolveType(objectType.elementTypeName);
+
+            if (methodCall->method == "add" || methodCall->method == "contains" ||
+                methodCall->method == "remove")
+            {
+                if (methodCall->arguments.size() != 1)
+                {
+                    throw std::runtime_error("'" + methodCall->method +
+                                             "' expects 1 argument, got " +
+                                             std::to_string(methodCall->arguments.size()));
+                }
+                const Type givenType = checkExpr(
+                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+                if (!(givenType == elementType))
+                {
+                    throw std::runtime_error("'" + methodCall->method + "' expects " +
+                                             typeName(elementType) + ", got " +
+                                             typeName(givenType));
+                }
+                return methodCall->method == "contains" ? kBool : kUnit;
+            }
+
+            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
+                                     typeName(objectType));
+        }
+
+        throw std::runtime_error("no such method '" + methodCall->method + "' on " +
+                                 typeName(objectType));
     }
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
@@ -594,7 +1103,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
             }
         }
 
-        return Type{TypeKind::Struct, literal->typeName};
+        return simpleType(TypeKind::Struct, literal->typeName);
     }
 
     if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
@@ -619,20 +1128,60 @@ Type TypeChecker::checkExpr(const Expr& expr,
             }
         }
 
-        return Type{TypeKind::Array,
-                    "",
-                    elementType.kind,
-                    elementType.structName,
-                    static_cast<int>(arrayLiteral->elements.size())};
+        return arrayLikeType(TypeKind::Array,
+                             elementType.kind,
+                             elementType.structName,
+                             static_cast<int>(arrayLiteral->elements.size()));
+    }
+
+    if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
+    {
+        const Type elementType = resolveType(listNew->elementType);
+        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
+            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack)
+        {
+            throw std::runtime_error(
+                "nested array/slice/List/Stack element types are not supported: " +
+                typeName(elementType));
+        }
+        return arrayLikeType(TypeKind::List, elementType.kind, elementType.structName);
+    }
+
+    if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
+    {
+        const Type elementType = resolveType(stackNew->elementType);
+        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
+            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack)
+        {
+            throw std::runtime_error(
+                "nested array/slice/List/Stack element types are not supported: " +
+                typeName(elementType));
+        }
+        return arrayLikeType(TypeKind::Stack, elementType.kind, elementType.structName);
+    }
+
+    if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
+    {
+        // Reuses resolveType's own hashability enforcement for
+        // "Map<key,value>" - constructing the exact same canonical string
+        // form Parser::parseTypeName would, so the error (if any) is
+        // identical regardless of whether Map<K,V> appears in type or
+        // expression position (see docs/language/0034-maps-and-sets.md).
+        return resolveType("Map<" + mapNew->keyType + "," + mapNew->valueType + ">");
+    }
+
+    if (const auto* setNew = dynamic_cast<const SetNewExpr*>(&expr))
+    {
+        return resolveType("Set<" + setNew->elementType + ">");
     }
 
     if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
     {
         const Type objectType =
             checkExpr(*index->object, env, expectedReturnType, currentLoopBreakTypes);
-        if (objectType.kind != TypeKind::Array)
+        if (!isIndexable(objectType))
         {
-            throw std::runtime_error("indexing into non-array type " + typeName(objectType));
+            throw std::runtime_error("indexing into non-array/slice type " + typeName(objectType));
         }
         const Type indexType =
             checkExpr(*index->index, env, expectedReturnType, currentLoopBreakTypes);
@@ -640,9 +1189,12 @@ Type TypeChecker::checkExpr(const Expr& expr,
         {
             throw std::runtime_error("array index must be i32, found " + typeName(indexType));
         }
-        checkLiteralIndexBounds(*index->index, objectType);
+        if (objectType.kind == TypeKind::Array) // no static size to check a slice's index against
+        {
+            checkLiteralIndexBounds(*index->index, objectType);
+        }
 
-        return Type{objectType.elementKind, objectType.elementStructName};
+        return simpleType(objectType.elementKind, objectType.elementStructName);
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))

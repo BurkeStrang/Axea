@@ -1,0 +1,30 @@
+build() -> List<i32>
+{
+    numbers = List<i32>()
+    numbers.push(10)
+    numbers.push(20)
+    numbers.push(30)
+    return numbers
+}
+
+sum(numbers: List<i32>) -> i32
+{
+    total = 0
+    for v in numbers
+    {
+        total = total + v
+    }
+    return total
+}
+
+appendOne(numbers: List<i32>)
+{
+    numbers.push(99)
+}
+
+numbers = build()
+total = sum(numbers)
+called = appendOne(numbers)
+totalAfterAppend = sum(numbers)
+last = numbers.pop()
+count = numbers.length

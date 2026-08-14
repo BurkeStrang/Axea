@@ -400,3 +400,308 @@ TEST("Interpreter toString formats an array literally, matching array-literal sy
 {
     EXPECT_EQ(toString(run("x = [1, 2, 3]")), "[1, 2, 3]");
 }
+
+TEST("Interpreter accepts arrays of different sizes through the same slice<T> parameter")
+{
+    const std::string source = "sum(values: slice<i32>) -> i32 { "
+                               "  total = 0 "
+                               "  for v in values { total = total + v } "
+                               "  return total "
+                               "} "
+                               "f() -> i32 { return sum([1, 2, 3]) + sum([1, 2, 3, 4, 5]) } "
+                               "x = f()"; // 6 + 15 = 21
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 21);
+}
+
+TEST("Interpreter's .length on a slice reports the actual passed-in array's size, not a fixed one")
+{
+    const std::string source = "len(values: slice<i32>) -> i32 { return values.length } "
+                               "f() -> i32 { return len([1, 2]) + len([1, 2, 3, 4, 5, 6, 7]) } "
+                               "x = f()"; // 2 + 7 = 9
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter index-assignment through a slice parameter writes through to the caller's array")
+{
+    const std::string source = "zeroFirst(values: slice<i32>) { values[0] = 0 } "
+                               "a = [1, 2, 3] "
+                               "called = zeroFirst(a) "
+                               "x = a[0]";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
+}
+
+TEST("Interpreter forwards an existing slice to another slice parameter without double-wrapping")
+{
+    const std::string source =
+        "helper(values: slice<i32>) -> i32 { return values[0] + values.length } "
+        "wrapper(values: slice<i32>) -> i32 { return helper(values) } "
+        "x = wrapper([7, 8, 9])"; // 7 + 3 = 10
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
+}
+
+TEST("Interpreter pushes, indexes, and reads .length on a List<T>")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = List<i32>() "
+                               "  numbers.push(10) "
+                               "  numbers.push(20) "
+                               "  numbers.push(30) "
+                               "  return numbers[0] + numbers[2] + numbers.length "
+                               "} "
+                               "x = f()"; // 10 + 30 + 3 = 43
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 43);
+}
+
+TEST("Interpreter pop removes and returns the last element, shrinking .length")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = List<i32>() "
+                               "  numbers.push(1) "
+                               "  numbers.push(2) "
+                               "  numbers.push(3) "
+                               "  last = numbers.pop() "
+                               "  return last * 100 + numbers.length "
+                               "} "
+                               "x = f()"; // 300 + 2 = 302
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 302);
+}
+
+TEST("Interpreter throws on pop from an empty List")
+{
+    EXPECT_THROWS(runProgram("x = List<i32>().pop()"));
+}
+
+TEST("Interpreter index-assignment on a List mutates it in place")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = List<i32>() "
+                               "  numbers.push(1) "
+                               "  numbers[0] = 99 "
+                               "  return numbers[0] "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter for-in-over-a-List sums its elements")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = List<i32>() "
+                               "  numbers.push(1) "
+                               "  numbers.push(2) "
+                               "  numbers.push(3) "
+                               "  total = 0 "
+                               "  for v in numbers { total = total + v } "
+                               "  return total "
+                               "} "
+                               "x = f()"; // 6
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter push through a List<T> parameter writes through to the caller")
+{
+    const std::string source = "appendOne(numbers: List<i32>) { numbers.push(99) } "
+                               "a = List<i32>() "
+                               "called = appendOne(a) "
+                               "x = a[0]";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter toString formats a List like an array")
+{
+    EXPECT_EQ(toString(run("x = List<i32>()")), "[]");
+}
+
+TEST("Interpreter pushes, peeks, and pops on a Stack<T>, reading .length")
+{
+    const std::string source = "f() -> i32 { "
+                               "  s = Stack<i32>() "
+                               "  s.push(10) "
+                               "  s.push(20) "
+                               "  s.push(30) "
+                               "  top = s.peek() "
+                               "  last = s.pop() "
+                               "  return top * 100 + last * 10 + s.length "
+                               "} "
+                               "x = f()"; // 3000 + 300 + 2 = 3302
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3302);
+}
+
+TEST("Interpreter peek does not remove, unlike pop")
+{
+    const std::string source = "f() -> i32 { "
+                               "  s = Stack<i32>() "
+                               "  s.push(1) "
+                               "  s.push(2) "
+                               "  a = s.peek() "
+                               "  b = s.peek() "
+                               "  return a + b + s.length "
+                               "} "
+                               "x = f()"; // 2 + 2 + 2 = 6, peek is idempotent
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter throws on pop from an empty Stack")
+{
+    EXPECT_THROWS(runProgram("x = Stack<i32>().pop()"));
+}
+
+TEST("Interpreter throws on peek of an empty Stack")
+{
+    EXPECT_THROWS(runProgram("x = Stack<i32>().peek()"));
+}
+
+TEST("Interpreter push through a Stack<T> parameter writes through to the caller")
+{
+    const std::string source = "pushOne(s: Stack<i32>) { s.push(99) } "
+                               "a = Stack<i32>() "
+                               "called = pushOne(a) "
+                               "x = a.peek()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter toString formats a Stack like an array (order-preserving, unlike Map/Set)")
+{
+    EXPECT_EQ(toString(run("x = Stack<i32>()")), "[]");
+}
+
+TEST("Interpreter List<T> and Stack<T> push/pop resolve independently on the same-shaped element "
+     "type")
+{
+    const std::string source = "f() -> i32 { "
+                               "  l = List<i32>() "
+                               "  l.push(1) "
+                               "  s = Stack<i32>() "
+                               "  s.push(2) "
+                               "  return l.pop() * 10 + s.pop() "
+                               "} "
+                               "x = f()"; // 10 + 2 = 12
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 12);
+}
+
+TEST("Interpreter set/get/contains/remove round-trip on a Map<i32,i32>")
+{
+    const std::string source = "f() -> i32 { "
+                               "  m = Map<i32,i32>() "
+                               "  m.set(1, 100) "
+                               "  m.set(2, 200) "
+                               "  m.set(1, 999) " // update, not a duplicate
+                               "  before = m.contains(2) "
+                               "  m.remove(2) "
+                               "  after = m.contains(2) "
+                               "  removedDelta = if before { 10 } else { 0 } "
+                               "  keptDelta = if after { 1 } else { 0 } "
+                               "  return m.get(1) + m.length * 1000 + removedDelta + keptDelta "
+                               "} "
+                               "x = f()"; // 999 + 1000 + 10 + 0 = 2009
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2009);
+}
+
+TEST("Interpreter Map.get throws on a missing key")
+{
+    EXPECT_THROWS(runProgram("x = Map<i32,i32>().get(1)"));
+}
+
+TEST("Interpreter add/contains/remove round-trip on a Set<i32>")
+{
+    const std::string source = "f() -> i32 { "
+                               "  s = Set<i32>() "
+                               "  s.add(5) "
+                               "  s.add(6) "
+                               "  s.add(5) " // duplicate add is a no-op
+                               "  before = s.contains(6) "
+                               "  s.remove(6) "
+                               "  after = s.contains(6) "
+                               "  removedDelta = if before { 10 } else { 0 } "
+                               "  keptDelta = if after { 1 } else { 0 } "
+                               "  return s.length * 1000 + removedDelta + keptDelta "
+                               "} "
+                               "x = f()"; // 1000 + 10 + 0 = 1010
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 1010);
+}
+
+TEST("Interpreter 'set' through a Map<i32,i32> parameter writes through to the caller")
+{
+    const std::string source = "put(m: Map<i32,i32>) { m.set(1, 42) } "
+                               "a = Map<i32,i32>() "
+                               "called = put(a) "
+                               "x = a.get(1)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
+}
+
+TEST("Interpreter 'add' through a Set<i32> parameter writes through to the caller")
+{
+    const std::string source = "addOne(s: Set<i32>) { s.add(7) } "
+                               "a = Set<i32>() "
+                               "called = addOne(a) "
+                               "x = a.length";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 1);
+}
+
+TEST("Interpreter toString formats Map/Set by count, not contents")
+{
+    EXPECT_EQ(toString(run("x = Map<i32,i32>()")), "Map(0 entries)");
+    EXPECT_EQ(toString(run("x = Set<i32>()")), "Set(0 entries)");
+}
+
+TEST("Interpreter Map<str,i32> hashes/compares str keys by content, not identity")
+{
+    const std::string source = "f() -> i32 { "
+                               "  m = Map<str,i32>() "
+                               "  m.set(\"a\", 1) "
+                               "  m.set(\"a\", 999) " // separately-constructed but equal key
+                               "  m.set(\"b\", 2) "
+                               "  return m.get(\"a\") * 1000 + m.length "
+                               "} "
+                               "x = f()"; // 999000 + 2
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 999002);
+}
+
+TEST("Interpreter Set<Point> hashes/compares struct keys structurally, not by identity")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "f() -> i32 { "
+                               "  s = Set<Point>() "
+                               "  s.add(Point { x: 1  y: 2 }) "
+                               "  s.add(Point { x: 1  y: 2 }) " // separately-constructed, equal
+                               "  s.add(Point { x: 3  y: 4 }) "
+                               "  hasSame = s.contains(Point { x: 1  y: 2 }) "
+                               "  delta = if hasSame { 100 } else { 0 } "
+                               "  return s.length * 1000 + delta "
+                               "} "
+                               "x = f()"; // 2000 + 100
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2100);
+}
+
+TEST("Interpreter Map<i32,Point>.get() returns an alias to the map's own stored struct")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "f() -> i32 { "
+                               "  m = Map<i32,Point>() "
+                               "  m.set(1, Point { x: 1 }) "
+                               "  p = m.get(1) "
+                               "  p.x = 99 "
+                               "  return m.get(1).x "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
+}
+
+TEST("Interpreter Map<K,V> supports arbitrary V: struct, array, List, nested Map")
+{
+    const std::string source =
+        "struct Point { x: i32 } "
+        "f() -> i32 { "
+        "  m1 = Map<i32,Point>()  m1.set(1, Point { x: 10 }) "
+        "  m2 = Map<i32,[i32;2]>()  m2.set(1, [1, 2]) "
+        "  m3 = Map<i32,List<i32>>() "
+        "  inner = List<i32>()  inner.push(7) "
+        "  m3.set(1, inner) "
+        "  m4 = Map<i32,Map<i32,i32>>() "
+        "  innerMap = Map<i32,i32>()  innerMap.set(5, 50) "
+        "  m4.set(1, innerMap) "
+        "  return m1.get(1).x + m2.get(1)[0] + m3.get(1)[0] + m4.get(1).get(5) "
+        "} "
+        "x = f()"; // 10 + 1 + 7 + 50
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 68);
+}

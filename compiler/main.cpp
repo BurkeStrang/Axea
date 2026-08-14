@@ -132,6 +132,41 @@ namespace
             printExpr(*index->index, indent + 2);
             return;
         }
+
+        if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
+        {
+            std::cout << pad << "ListNew(" << listNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
+        {
+            std::cout << pad << "MapNew(" << mapNew->keyType << ", " << mapNew->valueType << ")\n";
+            return;
+        }
+
+        if (const auto* setNew = dynamic_cast<const SetNewExpr*>(&expr))
+        {
+            std::cout << pad << "SetNew(" << setNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
+        {
+            std::cout << pad << "StackNew(" << stackNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+        {
+            std::cout << pad << "MethodCall(" << methodCall->method << ")\n";
+            printExpr(*methodCall->object, indent + 2);
+            for (const auto& argument : methodCall->arguments)
+            {
+                printExpr(*argument, indent + 2);
+            }
+            return;
+        }
     }
 
     void printStmt(const Stmt& stmt, int indent)
@@ -328,6 +363,117 @@ namespace
         {
             std::cout << pad << "index.set %" << indexSet->object << "[%" << indexSet->index
                       << "] = %" << indexSet->value << "\n";
+            return;
+        }
+
+        if (const auto* listNew = dynamic_cast<const IrListNew*>(&inst))
+        {
+            std::cout << pad << "%" << listNew->dest << " = list.new " << listNew->elementTypeName
+                      << "\n";
+            return;
+        }
+
+        if (const auto* listPush = dynamic_cast<const IrListPush*>(&inst))
+        {
+            std::cout << pad << "%" << listPush->dest << " = list.push %" << listPush->list << ", %"
+                      << listPush->value << "\n";
+            return;
+        }
+
+        if (const auto* listPop = dynamic_cast<const IrListPop*>(&inst))
+        {
+            std::cout << pad << "%" << listPop->dest << " = list.pop %" << listPop->list << "\n";
+            return;
+        }
+
+        if (const auto* stackNew = dynamic_cast<const IrStackNew*>(&inst))
+        {
+            std::cout << pad << "%" << stackNew->dest << " = stack.new "
+                      << stackNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* stackPush = dynamic_cast<const IrStackPush*>(&inst))
+        {
+            std::cout << pad << "%" << stackPush->dest << " = stack.push %" << stackPush->stack
+                      << ", %" << stackPush->value << "\n";
+            return;
+        }
+
+        if (const auto* stackPop = dynamic_cast<const IrStackPop*>(&inst))
+        {
+            std::cout << pad << "%" << stackPop->dest << " = stack.pop %" << stackPop->stack
+                      << "\n";
+            return;
+        }
+
+        if (const auto* stackPeek = dynamic_cast<const IrStackPeek*>(&inst))
+        {
+            std::cout << pad << "%" << stackPeek->dest << " = stack.peek %" << stackPeek->stack
+                      << "\n";
+            return;
+        }
+
+        if (const auto* mapNew = dynamic_cast<const IrMapNew*>(&inst))
+        {
+            std::cout << pad << "%" << mapNew->dest << " = map.new " << mapNew->keyTypeName << ", "
+                      << mapNew->valueTypeName << "\n";
+            return;
+        }
+
+        if (const auto* mapSet = dynamic_cast<const IrMapSet*>(&inst))
+        {
+            std::cout << pad << "%" << mapSet->dest << " = map.set %" << mapSet->map << ", %"
+                      << mapSet->key << ", %" << mapSet->value << "\n";
+            return;
+        }
+
+        if (const auto* mapGet = dynamic_cast<const IrMapGet*>(&inst))
+        {
+            std::cout << pad << "%" << mapGet->dest << " = map.get %" << mapGet->map << ", %"
+                      << mapGet->key << "\n";
+            return;
+        }
+
+        if (const auto* mapContains = dynamic_cast<const IrMapContains*>(&inst))
+        {
+            std::cout << pad << "%" << mapContains->dest << " = map.contains %" << mapContains->map
+                      << ", %" << mapContains->key << "\n";
+            return;
+        }
+
+        if (const auto* mapRemove = dynamic_cast<const IrMapRemove*>(&inst))
+        {
+            std::cout << pad << "%" << mapRemove->dest << " = map.remove %" << mapRemove->map
+                      << ", %" << mapRemove->key << "\n";
+            return;
+        }
+
+        if (const auto* setNew = dynamic_cast<const IrSetNew*>(&inst))
+        {
+            std::cout << pad << "%" << setNew->dest << " = set.new " << setNew->elementTypeName
+                      << "\n";
+            return;
+        }
+
+        if (const auto* setAdd = dynamic_cast<const IrSetAdd*>(&inst))
+        {
+            std::cout << pad << "%" << setAdd->dest << " = set.add %" << setAdd->set << ", %"
+                      << setAdd->value << "\n";
+            return;
+        }
+
+        if (const auto* setContains = dynamic_cast<const IrSetContains*>(&inst))
+        {
+            std::cout << pad << "%" << setContains->dest << " = set.contains %" << setContains->set
+                      << ", %" << setContains->value << "\n";
+            return;
+        }
+
+        if (const auto* setRemove = dynamic_cast<const IrSetRemove*>(&inst))
+        {
+            std::cout << pad << "%" << setRemove->dest << " = set.remove %" << setRemove->set
+                      << ", %" << setRemove->value << "\n";
             return;
         }
 

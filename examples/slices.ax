@@ -1,0 +1,23 @@
+sum(read values: slice<i32>) -> i32
+{
+    total = 0
+    for v in values
+    {
+        total = total + v
+    }
+    return total
+}
+
+zeroFirst(write values: slice<i32>)
+{
+    values[0] = 0
+}
+
+// The same `sum` accepts arrays of any size - the whole point of slice<T>.
+small = [1, 2, 3]
+large = [1, 2, 3, 4, 5, 6, 7]
+smallSum = sum(small)
+largeSum = sum(large)
+
+cleared = zeroFirst(small)
+firstAfterClear = small[0]

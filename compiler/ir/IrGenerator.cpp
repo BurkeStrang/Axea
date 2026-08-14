@@ -114,6 +114,34 @@ std::optional<int> IrScope::findArrayLength(const std::string& name) const
     return parent_ ? parent_->findArrayLength(name) : std::nullopt;
 }
 
+void IrScope::defineIsSet(const std::string& name, bool isSet)
+{
+    isSetKinds_[name] = isSet;
+}
+
+std::optional<bool> IrScope::findIsSet(const std::string& name) const
+{
+    if (const auto it = isSetKinds_.find(name); it != isSetKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsSet(name) : std::nullopt;
+}
+
+void IrScope::defineIsStack(const std::string& name, bool isStack)
+{
+    isStackKinds_[name] = isStack;
+}
+
+std::optional<bool> IrScope::findIsStack(const std::string& name) const
+{
+    if (const auto it = isStackKinds_.find(name); it != isStackKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsStack(name) : std::nullopt;
+}
+
 int IrGenerator::freshRegister(Context& ctx)
 {
     return (*ctx.registerCount)++;
@@ -139,6 +167,13 @@ void IrGenerator::registerStructs(const Program& program)
         if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
             structs_[structDecl->name] = structDecl;
+        }
+        // Only the return type is needed here (see isSetExpr) - not a
+        // general function table, so this stays folded into registerStructs
+        // rather than becoming its own pass.
+        if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
+        {
+            functions_[function->name] = function;
         }
     }
 }
@@ -189,6 +224,112 @@ std::optional<int> IrGenerator::arrayLengthOf(const Expr& expr,
             }
         }
         return scope.findArrayLength(name->name);
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool>
+IrGenerator::isSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
+{
+    if (dynamic_cast<const SetNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const MapNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("Set<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("Map<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsSet(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("Set<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("Map<"))
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool>
+IrGenerator::isStackExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
+{
+    if (dynamic_cast<const StackNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const ListNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("Stack<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("List<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsStack(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("Stack<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("List<"))
+            {
+                return false;
+            }
+        }
     }
 
     return std::nullopt;
@@ -247,6 +388,119 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        // Resolved from the AST, before lowering `object` below, since
+        // isSetExpr/isStackExpr both inspect the expression shape itself
+        // (see their own doc comments) - needed only to disambiguate
+        // "contains"/"remove" between Map and Set
+        // (docs/language/0034-maps-and-sets.md) and "push"/"pop" between
+        // List and Stack (docs/language/0035-stacks.md); every other method
+        // name here is unambiguous by itself.
+        const std::optional<bool> setKind = isSetExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> stackKind = isStackExpr(*methodCall->object, ctx.function, scope);
+        const int object = lowerExpr(*methodCall->object, scope, ctx);
+
+        if (methodCall->method == "push")
+        {
+            // "push" is unit-typed (see docs/language/0033-lists.md), but
+            // still gets a real dest register via emit() rather than -1 -
+            // `x = numbers.push(4)` is legal (mirrors the established
+            // `called = f()` idiom for any unit-returning call), and that
+            // requires a real register to bind `x` to. Matches exactly how
+            // a unit-returning IrCall already works: LlvmIrEmitter types this
+            // register "void" and never calls ref() on it, only typeOf().
+            if (stackKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrStackPush>();
+                inst->stack = object;
+                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrListPush>();
+            inst->list = object;
+            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "pop")
+        {
+            if (stackKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrStackPop>();
+                inst->stack = object;
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrListPop>();
+            inst->list = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "peek")
+        {
+            // Unambiguous - only Stack<T> has peek.
+            auto inst = std::make_unique<IrStackPeek>();
+            inst->stack = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "set")
+        {
+            auto inst = std::make_unique<IrMapSet>();
+            inst->map = object;
+            inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
+            inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "get")
+        {
+            auto inst = std::make_unique<IrMapGet>();
+            inst->map = object;
+            inst->key = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "add")
+        {
+            auto inst = std::make_unique<IrSetAdd>();
+            inst->set = object;
+            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "contains")
+        {
+            const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            if (setKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSetContains>();
+                inst->set = object;
+                inst->value = argument;
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrMapContains>();
+            inst->map = object;
+            inst->key = argument;
+            return emit(ctx, std::move(inst));
+        }
+
+        // TypeChecker already rejected anything but push/pop/set/get/
+        // add/contains/remove here.
+        const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+        if (setKind.value_or(false))
+        {
+            auto inst = std::make_unique<IrSetRemove>();
+            inst->set = object;
+            inst->value = argument;
+            return emit(ctx, std::move(inst));
+        }
+        auto inst = std::make_unique<IrMapRemove>();
+        inst->map = object;
+        inst->key = argument;
+        return emit(ctx, std::move(inst));
+    }
+
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
         // `.length` on a fixed array is always compile-time-known (see
@@ -282,6 +536,35 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         }
         auto inst = std::make_unique<IrArrayNew>();
         inst->elements = std::move(elements);
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrListNew>();
+        inst->elementTypeName = listNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrStackNew>();
+        inst->elementTypeName = stackNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrMapNew>();
+        inst->keyTypeName = mapNew->keyType;
+        inst->valueTypeName = mapNew->valueType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* setNew = dynamic_cast<const SetNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrSetNew>();
+        inst->elementTypeName = setNew->elementType;
         return emit(ctx, std::move(inst));
     }
 
@@ -402,6 +685,20 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         if (const auto length = arrayLengthOf(*assignment->value, ctx.function, scope))
         {
             scope.defineArrayLength(assignment->name, *length);
+        }
+        // Records this name's Map-vs-Set kind, if known, so a later
+        // `.contains`/`.remove` on it can be resolved unambiguously (see
+        // isSetExpr and docs/language/0034-maps-and-sets.md) - mirrors
+        // arrayLengthOf's own placement immediately above.
+        if (const auto isSet = isSetExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsSet(assignment->name, *isSet);
+        }
+        // Same reasoning, for List-vs-Stack (see isStackExpr and
+        // docs/language/0035-stacks.md).
+        if (const auto isStack = isStackExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsStack(assignment->name, *isStack);
         }
         return;
     }

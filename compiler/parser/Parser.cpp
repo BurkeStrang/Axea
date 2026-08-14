@@ -59,17 +59,45 @@ const Token& Parser::expect(TokenKind kind, const char* message)
 
 std::string Parser::parseTypeName()
 {
-    if (!match(TokenKind::LeftBracket))
+    if (match(TokenKind::LeftBracket))
     {
-        return expect(TokenKind::Identifier, "expected type name").text;
+        const auto& element = expect(TokenKind::Identifier, "expected element type in array type");
+        expect(TokenKind::Semicolon, "expected ';' in array type");
+        const auto& size = expect(TokenKind::Integer, "expected array size in array type");
+        expect(TokenKind::RightBracket, "expected ']' after array type");
+
+        return "[" + element.text + ";" + size.text + "]";
     }
 
-    const auto& element = expect(TokenKind::Identifier, "expected element type in array type");
-    expect(TokenKind::Semicolon, "expected ';' in array type");
-    const auto& size = expect(TokenKind::Integer, "expected array size in array type");
-    expect(TokenKind::RightBracket, "expected ']' after array type");
+    const auto& name = expect(TokenKind::Identifier, "expected type name");
 
-    return "[" + element.text + ";" + size.text + "]";
+    // "slice<elem>" (docs/language/0032-slices.md) / "List<elem>"
+    // (docs/language/0033-lists.md) / "Set<elem>" (docs/language/0034-maps-and-sets.md)
+    // / "Stack<elem>" (docs/language/0035-stacks.md) - all reuse the existing
+    // Less/Greater tokens (no lexer changes needed: '<'/'>' only mean this
+    // here because we're in type position, never expression position).
+    if ((name.text == "slice" || name.text == "List" || name.text == "Set" ||
+         name.text == "Stack") &&
+        match(TokenKind::Less))
+    {
+        const std::string elementType = parseTypeName();
+        expect(TokenKind::Greater, "expected '>' after slice/List/Set/Stack element type");
+        return name.text + "<" + elementType + ">";
+    }
+
+    // "Map<key,value>" - the one two-type-argument shape (every other
+    // generic-looking type here takes exactly one) - see
+    // docs/language/0034-maps-and-sets.md.
+    if (name.text == "Map" && match(TokenKind::Less))
+    {
+        const std::string keyType = parseTypeName();
+        expect(TokenKind::Comma, "expected ',' between Map key and value types");
+        const std::string valueType = parseTypeName();
+        expect(TokenKind::Greater, "expected '>' after Map value type");
+        return "Map<" + keyType + "," + valueType + ">";
+    }
+
+    return name.text;
 }
 
 std::unique_ptr<Stmt> Parser::parseItem()
@@ -535,6 +563,24 @@ std::unique_ptr<Expr> Parser::parseExpression(int minPrecedence, bool allowStruc
     return left;
 }
 
+std::vector<std::unique_ptr<Expr>> Parser::parseArgumentList()
+{
+    std::vector<std::unique_ptr<Expr>> args;
+    if (current().kind != TokenKind::RightParen)
+    {
+        args.push_back(parseExpression());
+        while (match(TokenKind::Comma))
+        {
+            if (current().kind == TokenKind::RightParen)
+            {
+                break;
+            }
+            args.push_back(parseExpression());
+        }
+    }
+    return args;
+}
+
 std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
 {
     auto expr = parsePrimary(allowStructLiteral);
@@ -544,6 +590,18 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
         if (match(TokenKind::Dot))
         {
             const auto& field = expect(TokenKind::Identifier, "expected field name after '.'");
+
+            // `object.method(args)` vs. `object.field` (docs/language/0033-lists.md)
+            // - decided purely by whether '(' follows the identifier.
+            if (match(TokenKind::LeftParen))
+            {
+                auto args = parseArgumentList();
+                expect(TokenKind::RightParen, "expected ')' after method arguments");
+                expr =
+                    std::make_unique<MethodCallExpr>(std::move(expr), field.text, std::move(args));
+                continue;
+            }
+
             expr = std::make_unique<FieldExpr>(std::move(expr), field.text);
             continue;
         }
@@ -624,24 +682,80 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
 
     if (current().kind == TokenKind::Identifier)
     {
+        // `List<elem>()` construction (docs/language/0033-lists.md) - special-
+        // cased on the literal identifier "List", the same trick `slice`
+        // already uses in parseTypeName to sidestep the general
+        // generic-vs-comparison-operator ambiguity `<`/`>` would otherwise
+        // create in expression position. Checked before the general
+        // Identifier-then-'(' call branch below, since "List" followed by
+        // '<' would not match that branch's `peek() == LeftParen` check
+        // anyway - listed first here purely for readability.
+        if (current().text == "List" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'List'");
+            // A full recursive parseTypeName() call, not a single Identifier
+            // token - the element type can itself be a nested generic shape
+            // (e.g. `List<List<i32>>()`, `List<Map<i32,i32>>()`), which a
+            // single token can't parse (see docs/language/0034-maps-and-sets.md's
+            // generic-K/V rewrite).
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after List element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'List<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - List<elem>() takes no arguments this phase");
+            return std::make_unique<ListNewExpr>(elementType);
+        }
+
+        // `Set<elem>()` construction - same trick as List<elem>() above (see
+        // docs/language/0034-maps-and-sets.md).
+        if (current().text == "Set" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'Set'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after Set element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'Set<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - Set<elem>() takes no arguments this phase");
+            return std::make_unique<SetNewExpr>(elementType);
+        }
+
+        // `Stack<elem>()` construction - same trick as List<elem>() above
+        // (see docs/language/0035-stacks.md).
+        if (current().text == "Stack" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'Stack'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after Stack element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'Stack<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - Stack<elem>() takes no arguments this phase");
+            return std::make_unique<StackNewExpr>(elementType);
+        }
+
+        // `Map<key,value>()` construction - the one two-type-argument
+        // constructor here (mirrors parseTypeName's own Map<key,value> shape).
+        if (current().text == "Map" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'Map'");
+            const std::string keyType = parseTypeName();
+            expect(TokenKind::Comma, "expected ',' between Map key and value types");
+            const std::string valueType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after Map value type");
+            expect(TokenKind::LeftParen, "expected '(' after 'Map<key,value>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - Map<key,value>() takes no arguments this phase");
+            return std::make_unique<MapNewExpr>(keyType, valueType);
+        }
+
         if (peek().kind == TokenKind::LeftParen)
         {
             const auto& name = advance();
             expect(TokenKind::LeftParen, "expected '(' after function name");
-
-            std::vector<std::unique_ptr<Expr>> args;
-            if (current().kind != TokenKind::RightParen)
-            {
-                args.push_back(parseExpression());
-                while (match(TokenKind::Comma))
-                {
-                    if (current().kind == TokenKind::RightParen)
-                    {
-                        break;
-                    }
-                    args.push_back(parseExpression());
-                }
-            }
+            auto args = parseArgumentList();
             expect(TokenKind::RightParen, "expected ')' after arguments");
 
             return std::make_unique<CallExpr>(name.text, std::move(args));

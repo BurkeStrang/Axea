@@ -51,6 +51,12 @@ private:
     std::unique_ptr<Expr> parseExpression(int minPrecedence = 0, bool allowStructLiteral = true);
     std::unique_ptr<Expr> parsePostfix(bool allowStructLiteral);
     std::unique_ptr<Expr> parsePrimary(bool allowStructLiteral);
+    // Comma-separated expressions up to (not including) the closing ')' -
+    // shared by a bare function call and a method call's argument list
+    // (docs/language/0033-lists.md), which were previously two copies of the
+    // identical loop. Caller has already consumed '(' and is responsible for
+    // expecting the closing ')'.
+    std::vector<std::unique_ptr<Expr>> parseArgumentList();
     int precedence(TokenKind kind) const;
 
     std::vector<Token> tokens_;

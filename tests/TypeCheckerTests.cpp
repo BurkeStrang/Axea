@@ -246,3 +246,278 @@ TEST("TypeChecker rejects an index-assignment whose value does not match the ele
 {
     EXPECT_THROWS(check(R"(f(values: [i32; 3]) { values[0] = "oops" })"));
 }
+
+TEST("TypeChecker accepts an array of any size for a slice<T> parameter")
+{
+    check("sum(values: slice<i32>) -> i32 { return values[0] } "
+          "a = sum([1, 2, 3]) "
+          "b = sum([1, 2, 3, 4, 5])");
+}
+
+TEST("TypeChecker rejects an element-type mismatch when converting an array to a slice parameter")
+{
+    EXPECT_THROWS(check(R"(f(values: slice<i32>) -> i32 { return values[0] }  x = f(["a", "b"]))"));
+}
+
+TEST("TypeChecker accepts forwarding an existing slice to another slice parameter")
+{
+    check("helper(values: slice<i32>) -> i32 { return values[0] } "
+          "wrapper(values: slice<i32>) -> i32 { return helper(values) } "
+          "x = wrapper([1, 2, 3])");
+}
+
+TEST("TypeChecker rejects slice<T> as a function return type")
+{
+    EXPECT_THROWS(check("f(values: slice<i32>) -> slice<i32> { return values }"));
+}
+
+TEST("TypeChecker rejects slice<T> as a local variable's declared type")
+{
+    EXPECT_THROWS(check("f(values: slice<i32>) -> i32 { x: slice<i32> = values  return x[0] }"));
+}
+
+TEST("TypeChecker rejects slice<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { values: slice<i32> }"));
+}
+
+TEST("TypeChecker allows indexing, .length, index-assignment, and for-in on a slice parameter")
+{
+    check("f(values: slice<i32>) -> i32 { "
+          "  values[0] = 99 "
+          "  total = 0 "
+          "  for v in values { total = total + v } "
+          "  return total + values[0] + values.length "
+          "} "
+          "x = f([1, 2, 3])");
+}
+
+TEST("TypeChecker accepts push/pop/indexing/.length/for-in on a List<T>")
+{
+    check("f() -> i32 { "
+          "  numbers = List<i32>() "
+          "  numbers.push(4) "
+          "  numbers.push(5) "
+          "  last = numbers.pop() "
+          "  numbers[0] = 99 "
+          "  total = 0 "
+          "  for v in numbers { total = total + v } "
+          "  return total + numbers[0] + numbers.length + last "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects 'push' with the wrong element type")
+{
+    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.push(true) }"));
+}
+
+TEST("TypeChecker rejects 'push' with the wrong argument count")
+{
+    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.push(1, 2) }"));
+}
+
+TEST("TypeChecker rejects 'pop' with arguments")
+{
+    EXPECT_THROWS(check("f() -> i32 { numbers = List<i32>()  return numbers.pop(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method")
+{
+    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.size() }"));
+}
+
+TEST("TypeChecker rejects a method call on a non-List value")
+{
+    EXPECT_THROWS(check("f() { x = 5  x.push(1) }"));
+}
+
+TEST("TypeChecker accepts List<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> List<i32> { "
+          "  x: List<i32> = List<i32>() "
+          "  return x "
+          "} "
+          "use(numbers: List<i32>) -> i32 { return numbers.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects List<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: List<i32> }"));
+}
+
+TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T>")
+{
+    check("f() -> i32 { "
+          "  s = Stack<i32>() "
+          "  s.push(4) "
+          "  s.push(5) "
+          "  top = s.peek() "
+          "  last = s.pop() "
+          "  return top + last + s.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects 'push' with the wrong element type on a Stack<T>")
+{
+    EXPECT_THROWS(check("f() { s = Stack<i32>()  s.push(true) }"));
+}
+
+TEST("TypeChecker rejects 'peek' with arguments")
+{
+    EXPECT_THROWS(check("f() -> i32 { s = Stack<i32>()  return s.peek(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a Stack<T>")
+{
+    EXPECT_THROWS(check("f() { s = Stack<i32>()  s.size() }"));
+}
+
+TEST("TypeChecker accepts Stack<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> Stack<i32> { "
+          "  x: Stack<i32> = Stack<i32>() "
+          "  return x "
+          "} "
+          "use(s: Stack<i32>) -> i32 { return s.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects Stack<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: Stack<i32> }"));
+}
+
+TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
+{
+    check("f() -> i32 { "
+          "  m = Map<i32,i32>() "
+          "  m.set(1, 100) "
+          "  m.set(1, 999) "
+          "  v = m.get(1) "
+          "  hit: bool = m.contains(1) "
+          "  m.remove(1) "
+          "  return v + m.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts add/contains/remove/.length on a Set<i32>")
+{
+    check("f() -> i32 { "
+          "  s = Set<i32>() "
+          "  s.add(1) "
+          "  hit: bool = s.contains(1) "
+          "  s.remove(1) "
+          "  return s.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts str/bool as Map/Set key types (generic, Rust-style Hash+Eq)")
+{
+    check("f() { m = Map<str,i32>() }");
+    check("f() { m = Map<i32,str>() }");
+    check("f() { m = Map<bool,bool>() }");
+    check("f() { s = Set<str>() }");
+    check("f() { s = Set<bool>() }");
+}
+
+TEST("TypeChecker rejects Map/Set as a Map/Set key type (mirrors Rust: HashMap/HashSet aren't "
+     "Hash)")
+{
+    EXPECT_THROWS(check("f() { m = Map<Map<i32,i32>,i32>() }"));
+    EXPECT_THROWS(check("f() { s = Set<Set<i32>>() }"));
+}
+
+TEST("TypeChecker rejects slice<T> as a Map/Set key or value type")
+{
+    EXPECT_THROWS(check("f() { m = Map<slice<i32>,i32>() }"));
+    EXPECT_THROWS(check("f() { m = Map<i32,slice<i32>>() }"));
+}
+
+TEST("TypeChecker accepts a struct key if every field is itself hashable")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "f() { s = Set<Point>() }");
+}
+
+TEST("TypeChecker rejects a struct key if any field is not hashable (List<T> field)")
+{
+    // List<T> itself is already rejected as a struct field type
+    // (docs/language/0033-lists.md), so this struct never type-checks in
+    // the first place - confirms the rejection surfaces here too, not just
+    // at the struct declaration.
+    EXPECT_THROWS(check("struct Bag { items: List<i32> } "
+                        "f() { s = Set<Bag>() }"));
+}
+
+TEST("TypeChecker accepts a fixed array or List<T> key if the element is hashable")
+{
+    check("f() { s = Set<[i32;3]>() }");
+    check("f() { s = Set<List<i32>>() }");
+}
+
+TEST("TypeChecker accepts arbitrary V (struct, array, List, nested Map) with no hashability "
+     "requirement")
+{
+    check("struct Point { x: i32 } "
+          "f() { "
+          "  m1 = Map<i32,Point>() "
+          "  m2 = Map<i32,[i32;3]>() "
+          "  m3 = Map<i32,List<i32>>() "
+          "  m4 = Map<i32,Map<i32,i32>>() "
+          "}");
+}
+
+TEST("TypeChecker's Map<K,V>.get() returns V's real resolved type, not always i32")
+{
+    check("struct Point { x: i32 } "
+          "f() -> i32 { "
+          "  m = Map<i32,Point>() "
+          "  p = m.get(1) "
+          "  return p.x "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects 'set' with the wrong argument count or type")
+{
+    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(1) }"));
+    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(true, 1) }"));
+    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(1, true) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on Map/Set")
+{
+    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.size() }"));
+    EXPECT_THROWS(check("f() { s = Set<i32>()  s.push(1) }"));
+}
+
+TEST("TypeChecker rejects indexing into a Map or Set")
+{
+    EXPECT_THROWS(check("f() -> i32 { m = Map<i32,i32>()  return m[0] }"));
+    EXPECT_THROWS(check("f() -> i32 { s = Set<i32>()  return s[0] }"));
+}
+
+TEST("TypeChecker accepts Map<i32,i32>/Set<i32> as a parameter, return type, and local "
+     "declared type")
+{
+    check("build() -> Map<i32,i32> { "
+          "  x: Map<i32,i32> = Map<i32,i32>() "
+          "  return x "
+          "} "
+          "use(m: Map<i32,i32>) -> i32 { return m.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects Map<K,V>/Set<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { entries: Map<i32,i32> }"));
+    EXPECT_THROWS(check("struct Wrapper { items: Set<i32> }"));
+}

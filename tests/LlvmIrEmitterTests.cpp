@@ -78,6 +78,22 @@ TEST("LlvmIrEmitter every numbered SSA register is defined before any later-numb
         const std::size_t nextDefine = ir.find("define ", closeParen);
         const std::size_t functionEnd = nextDefine == std::string::npos ? ir.size() : nextDefine;
 
+        // Skip the hand-authored Map/Set hash-table runtime
+        // (emitMapSetRuntime, docs/language/0034-maps-and-sets.md): unlike
+        // every function above, generated via allocateRegister's dynamic
+        // numbering (the exact mechanism this test regression-checks),
+        // these are fixed, hand-verified LLVM text using named registers
+        // (%h, %key, %cptr, ...) - never subject to the numbering bug this
+        // test guards against.
+        const std::size_t atPos = ir.find('@', definePos);
+        const std::string calleeName = ir.substr(atPos + 1, openParen - atPos - 1);
+        if (calleeName.starts_with("axea.hash.") || calleeName.starts_with("axea.map.") ||
+            calleeName.starts_with("axea.set."))
+        {
+            definePos = nextDefine;
+            continue;
+        }
+
         // Parameters occupy the first N numbered slots, one per
         // comma-separated entry in the signature, before any "%N = "
         // definition in the body. (Counting '%' characters would overcount:
@@ -203,6 +219,311 @@ TEST("LlvmIrEmitter constant-folds .length instead of emitting a runtime load")
     // "add i32 0, 4" (the same trivial-constant shape every IrConstInt gets),
     // never a load through a GEP.
     EXPECT_TRUE(ir.find("add i32 0, 4") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter passes a slice<T> parameter as an anonymous fat-pointer struct by value")
+{
+    auto ir = emitLlvmIr("sum(values: slice<i32>) -> i32 { return values[0] }");
+    EXPECT_TRUE(ir.find("define i32 @sum({i32*, i32} %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter converts an array argument to a slice at the call site")
+{
+    auto ir = emitLlvmIr("sum(values: slice<i32>) -> i32 { return values[0] }  x = sum([1, 2, 3])");
+    // Flat-pointer GEP down to element 0, then build the {ptr, length} pair.
+    EXPECT_TRUE(ir.find("getelementptr [3 x i32], [3 x i32]*") != std::string::npos);
+    EXPECT_TRUE(ir.find("insertvalue {i32*, i32} undef, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("insertvalue {i32*, i32} %") != std::string::npos);
+    EXPECT_TRUE(ir.find(", i32 3, 1") != std::string::npos); // the array's own size, as the length
+    EXPECT_TRUE(ir.find("call i32 @sum({i32*, i32} %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter does not re-wrap a slice forwarded to another slice parameter")
+{
+    auto ir = emitLlvmIr("helper(values: slice<i32>) -> i32 { return values[0] } "
+                         "wrapper(values: slice<i32>) -> i32 { return helper(values) }");
+    // Inside wrapper, `values` is already {i32*, i32} - forwarding it must
+    // not emit a second GEP/insertvalue conversion sequence.
+    EXPECT_TRUE(ir.find("insertvalue") == std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @helper({i32*, i32} %0)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter indexes a slice via extractvalue and a single-index GEP, not the array's "
+     "two-index form")
+{
+    auto ir = emitLlvmIr("get(values: slice<i32>, i: i32) -> i32 { return values[i] }");
+    EXPECT_TRUE(ir.find("extractvalue {i32*, i32} %0, 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr i32, i32* %") != std::string::npos);
+    // Must not contain the array-shaped two-index GEP form anywhere.
+    EXPECT_TRUE(ir.find(", i32 0, i32 %1") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a slice's .length via extractvalue, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(values: slice<i32>) -> i32 { return values.length }");
+    EXPECT_TRUE(ir.find("extractvalue {i32*, i32} %0, 1") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents List<T> as a pointer to an anonymous {length, data} heap record")
+{
+    auto ir = emitLlvmIr("sum(numbers: List<i32>) -> i32 { return numbers[0] }");
+    EXPECT_TRUE(ir.find("define i32 @sum({i32, i32*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's List<T>() construction mallocs a header and zero-initializes it")
+{
+    auto ir = emitLlvmIr("f() -> i32 { numbers = List<i32>()  return numbers.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's push grows via malloc plus a hand-rolled copy loop, no phi")
+{
+    auto ir = emitLlvmIr("f() { numbers = List<i32>()  numbers.push(4) }");
+    // Two mallocs: one for the fresh empty list, one for push's grown buffer.
+    const auto firstMalloc = ir.find("call i8* @malloc(i64");
+    EXPECT_TRUE(firstMalloc != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64", firstMalloc + 1) != std::string::npos);
+    EXPECT_TRUE(ir.find("list.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("list.push.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("list.push.copy.done") != std::string::npos);
+    // Loop-carried state here uses alloca/load/store, not a phi node (see
+    // docs/language/0033-lists.md - unnamed sequential registers here can't
+    // forward-reference a not-yet-emitted value the way a phi would need).
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter pop has no bounds check, matching every other out-of-bounds case here")
+{
+    auto ir =
+        emitLlvmIr("f() -> i32 { numbers = List<i32>()  numbers.push(1)  return numbers.pop() }");
+    // Decrements length and loads the element at the old (pre-decrement)
+    // length - 1, with no runtime check that length was > 0 beforehand.
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter indexes a List via a header-then-flat-pointer GEP chain, not array's "
+     "direct two-index form")
+{
+    auto ir = emitLlvmIr("get(numbers: List<i32>, i: i32) -> i32 { return numbers[i] }");
+    // Field 1 (data pointer) of the header is loaded first...
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32*}, {i32, i32*}* %0, i32 0, i32 1") !=
+                std::string::npos);
+    // ...then a flat single-index GEP into it (same idiom slice indexing uses).
+    EXPECT_TRUE(ir.find("getelementptr i32, i32* %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a List's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(numbers: List<i32>) -> i32 { return numbers.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32*}, {i32, i32*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents Stack<T> as the exact same LLVM type as List<T>")
+{
+    auto ir = emitLlvmIr("useStack(s: Stack<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("define i32 @useStack({i32, i32*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Stack<T>() construction mallocs a header and zero-initializes it")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = Stack<i32>()  return s.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Stack push grows via malloc plus a hand-rolled copy loop, no phi")
+{
+    auto ir = emitLlvmIr("f() { s = Stack<i32>()  s.push(4) }");
+    EXPECT_TRUE(ir.find("stack.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("stack.push.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("stack.push.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter Stack pop has no bounds check")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = Stack<i32>()  s.push(1)  return s.pop() }");
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter Stack peek reads the top element without decrementing length")
+{
+    // Isolated to a function taking Stack<i32> as a *parameter* (no
+    // construction/push in the same function) - emitStackPeek's own output
+    // is then the function's entire body: computes length-1 (sub) to index
+    // the top element, but - unlike pop - never stores anything back (see
+    // docs/language/0035-stacks.md); pop's own decrement-and-store-back
+    // would introduce a "store i32 %..." into the length field that peek's
+    // pure-read shape never does.
+    auto ir = emitLlvmIr("f(s: Stack<i32>) -> i32 { return s.peek() }");
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("store") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a Stack's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(s: Stack<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32*}, {i32, i32*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter List<T> and Stack<T> push/pop resolve to distinct emit functions producing "
+     "the same underlying shape")
+{
+    auto ir = emitLlvmIr("useList(l: List<i32>) { l.push(1) } "
+                         "useStack(s: Stack<i32>) { s.push(1) }");
+    EXPECT_TRUE(ir.find("list.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("stack.push.copy.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter declares named self-referential types for Map/Set entries")
+{
+    // Monomorphized (see docs/language/0034-maps-and-sets.md's generic
+    // rewrite): the first Map/Set instantiation actually used gets id 0
+    // (Map's and Set's own id counters are independent, so both land on
+    // "0" here even though this program only builds a Map).
+    auto ir = emitLlvmIr("f() -> i32 { m = Map<i32,i32>()  return m.length }");
+    EXPECT_TRUE(ir.find("%axea.MapEntry.0 = type { i32, i32, %axea.MapEntry.0* }") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents Map<i32,i32>/Set<i32> as a pointer to a 3-field heap header")
+{
+    auto ir = emitLlvmIr("useMap(m: Map<i32,i32>) -> i32 { return m.length } "
+                         "useSet(s: Set<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("define i32 @useMap({i32, i32, %axea.MapEntry.0**}* %0) {") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define i32 @useSet({i32, i32, %axea.SetEntry.0**}* %0) {") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Map<i32,i32>() construction mallocs a header and an 8-slot bucket array")
+{
+    auto ir = emitLlvmIr("f() -> i32 { m = Map<i32,i32>()  return m.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
+    EXPECT_TRUE(ir.find("store i32 8, i32*") != std::string::npos); // bucketCount = 8
+    // 8 unrolled null-initializing stores into the fresh bucket array, within
+    // `f` itself - scoped to before the per-instantiation axea.map.0.*
+    // runtime functions (registerMapInstantiation), which contain a couple
+    // more of this same substring in their own, unrelated resize/remove
+    // logic.
+    const std::size_t runtimeStart = ir.find("define i32 @axea.hash.i32");
+    EXPECT_TRUE(runtimeStart != std::string::npos);
+    std::size_t nullStoreCount = 0;
+    for (std::size_t pos = ir.find("store %axea.MapEntry.0* null,");
+         pos != std::string::npos && pos < runtimeStart;
+         pos = ir.find("store %axea.MapEntry.0* null,", pos + 1))
+    {
+        ++nullStoreCount;
+    }
+    EXPECT_EQ(nullStoreCount, static_cast<std::size_t>(8));
+}
+
+TEST("LlvmIrEmitter's Map/Set operations call that instantiation's own axea.map.N/axea.set.N "
+     "runtime functions")
+{
+    auto ir = emitLlvmIr("f() { "
+                         "  m = Map<i32,i32>() "
+                         "  m.set(1, 2) "
+                         "  v = m.get(1) "
+                         "  hit = m.contains(1) "
+                         "  m.remove(1) "
+                         "  s = Set<i32>() "
+                         "  s.add(1) "
+                         "  shit = s.contains(1) "
+                         "  s.remove(1) "
+                         "}");
+    EXPECT_TRUE(ir.find("call void @axea.map.0.set(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.map.0.get(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i1 @axea.map.0.contains(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.map.0.remove(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.set.0.add(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i1 @axea.set.0.contains(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.set.0.remove(") != std::string::npos);
+    // Shared primitive key hash (i32 keys, both Map and Set), and each
+    // instantiation's own resize function.
+    EXPECT_TRUE(ir.find("define i32 @axea.hash.i32(i32 %key) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define void @axea.map.0.resize(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define void @axea.set.0.resize(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a Map/Set's .length via GEP+load field 0, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("mlen(m: Map<i32,i32>) -> i32 { return m.length } "
+                         "slen(s: Set<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, %axea.MapEntry.0**}, "
+                        "{i32, i32, %axea.MapEntry.0**}* %0, i32 0, i32 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, %axea.SetEntry.0**}, "
+                        "{i32, i32, %axea.SetEntry.0**}* %0, i32 0, i32 0") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter monomorphizes each distinct Map<K,V> shape into its own entry type/functions")
+{
+    // Map<i32,i32> and Map<i32,str> are two genuinely different
+    // instantiations (different V) - each gets its own numbered entry type
+    // and its own axea.map.N.* functions, coexisting correctly (see
+    // docs/language/0034-maps-and-sets.md's generic rewrite).
+    auto ir = emitLlvmIr("useA(m: Map<i32,i32>) -> i32 { return m.get(1) } "
+                         "useB(m: Map<i32,str>) -> str { return m.get(1) }");
+    EXPECT_TRUE(ir.find("%axea.MapEntry.0 = type { i32, i32, %axea.MapEntry.0* }") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("%axea.MapEntry.1 = type { i32, i8*, %axea.MapEntry.1* }") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define i32 @axea.map.0.get(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.map.1.get(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter generates a byte-walk hash/equality pair for str keys")
+{
+    auto ir = emitLlvmIr("f() -> i32 { m = Map<str,i32>()  m.set(\"a\", 1)  return m.get(\"a\") }");
+    EXPECT_TRUE(ir.find("define i32 @axea.hash.str(i8* %s) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i1 @axea.eq.str(i8* %a, i8* %b) {") != std::string::npos);
+    // .set/.get call through the shared str hash/eq, not an inline icmp
+    // (which would be pointer-identity comparison - wrong for string
+    // content equality).
+    EXPECT_TRUE(ir.find("call i1 @axea.eq.str(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter generates a recursive derive-hash/equality pair for a struct key")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "f() { s = Set<Point>()  s.add(Point { x: 1  y: 2 }) }");
+    EXPECT_TRUE(ir.find("define i32 @axea.hash.Point(%Point* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i1 @axea.eq.Point(%Point* %a, %Point* %b) {") != std::string::npos);
+    // Combines each field's own i32 hash (djb2-style: acc = acc*31 + fieldHash).
+    EXPECT_TRUE(ir.find("call i32 @axea.hash.i32(") != std::string::npos);
+    EXPECT_TRUE(ir.find("mul i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter generates an unrolled hash/equality pair for a fixed-array key")
+{
+    auto ir = emitLlvmIr("f() { s = Set<[i32;3]>()  s.add([1, 2, 3]) }");
+    EXPECT_TRUE(ir.find("define i32 @axea.hash.arr.0([3 x i32]* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i1 @axea.eq.arr.0([3 x i32]* %a, [3 x i32]* %b) {") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter generates a runtime-loop hash/equality pair for a List<T> key")
+{
+    auto ir = emitLlvmIr("f() { s = Set<List<i32>>()  l = List<i32>()  s.add(l) }");
+    EXPECT_TRUE(ir.find("define i32 @axea.hash.list.0({i32, i32*}* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i1 @axea.eq.list.0({i32, i32*}* %a, {i32, i32*}* %b) {") !=
+                std::string::npos);
+    // Length-mismatch short-circuit before any element walk.
+    EXPECT_TRUE(ir.find("icmp eq i32 %alen, %blen") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level Map/Set binding by count, not contents")
+{
+    auto ir = emitLlvmIr("m = Map<i32,i32>() s = Set<i32>()");
+    EXPECT_TRUE(ir.find("Map(") != std::string::npos);
+    EXPECT_TRUE(ir.find("Set(") != std::string::npos);
+    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
 }
 
 TEST("LlvmIrEmitter hoists a string literal into a module-level global constant")

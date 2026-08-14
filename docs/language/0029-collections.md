@@ -3,9 +3,17 @@
 > **Status:** Draft
 >
 > Fixed-size arrays (`[T; N]` - literals, indexing, `.length`, `for`-in
-> iteration) are implemented separately; see `0031-arrays.md`. Everything
-> else below (`List<T>`, `Map<K, V>`, sorting, comprehensions, ...) remains
-> future work, gated on real generics support.
+> iteration) are implemented separately; see `0031-arrays.md`. `slice<T>`
+> (array-to-slice conversion at a call boundary, parameter-only) is also
+> implemented separately; see `0032-slices.md`. `List<T>` (push/pop/indexing/
+> `.length`, no amortized growth yet) is also implemented separately; see
+> `0033-lists.md`. `Map<K,V>`/`Set<T>` (a real, resizing hash table, generic
+> over any hashable key type) is also implemented separately; see
+> `0034-maps-and-sets.md`. `Stack<T>` (push/pop/peek/`.length`, backed
+> internally by `List<T>`) is also implemented separately; see
+> `0035-stacks.md`. Everything else below (`LinkedList<T>`, `Deque<T>`,
+> `Queue<T>`, `PriorityQueue<T>`, `SortedMap<K,V>`/`SortedSet<T>`, sorting,
+> comprehensions, ...) remains future work.
 
 This document describes the proposed collection library for the Axea
 programming language.

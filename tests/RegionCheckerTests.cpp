@@ -159,3 +159,72 @@ TEST("RegionChecker accepts a primitive element read from a borrowed array param
     checkRegions("first(values: [i32; 3]) -> i32 { return values[0] } "
                  "x = first([1, 2, 3])");
 }
+
+TEST("RegionChecker rejects returning a struct value read via Map<K,V>.get() from a borrowed "
+     "Map parameter (generic K/V - see docs/language/0034-maps-and-sets.md)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "leak(m: Map<i32,Point>) -> Point { return m.get(1) } "
+                               "a = Map<i32,Point>() "
+                               "b = a.set(1, Point { x: 1 }) "
+                               "x = leak(a)";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts a take Map<K,V> parameter's .get() result being returned")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "consume(take m: Map<i32,Point>) -> Point { return m.get(1) } "
+                               "a = Map<i32,Point>() "
+                               "b = a.set(1, Point { x: 1 }) "
+                               "x = consume(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via Map<K,V>.get() from a borrowed parameter")
+{
+    checkRegions("first(m: Map<i32,i32>) -> i32 { return m.get(1) } "
+                 "a = Map<i32,i32>() "
+                 "b = a.set(1, 1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a struct value read via Stack<T>.peek() from a borrowed "
+     "Stack parameter (see docs/language/0035-stacks.md)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "leak(s: Stack<Point>) -> Point { return s.peek() } "
+                               "a = Stack<Point>() "
+                               "b = a.push(Point { x: 1 }) "
+                               "x = leak(a)";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts a take Stack<T> parameter's .peek() result being returned")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "consume(take s: Stack<Point>) -> Point { return s.peek() } "
+                               "a = Stack<Point>() "
+                               "b = a.push(Point { x: 1 }) "
+                               "x = consume(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts returning a struct value read via Stack<T>.pop() from a borrowed "
+     "parameter (pop removes - unlike peek, nothing still aliases it)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "take_top(s: Stack<Point>) -> Point { return s.pop() } "
+                               "a = Stack<Point>() "
+                               "b = a.push(Point { x: 1 }) "
+                               "x = take_top(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via Stack<T>.peek() from a borrowed parameter")
+{
+    checkRegions("first(s: Stack<i32>) -> i32 { return s.peek() } "
+                 "a = Stack<i32>() "
+                 "b = a.push(1) "
+                 "x = first(a)");
+}

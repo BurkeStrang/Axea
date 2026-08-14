@@ -173,3 +173,118 @@ TEST("CapabilityChecker infers read for a parameter that is only indexed for rea
                        "x = sum([1, 2, 3])");
     EXPECT_TRUE(capabilities.at("sum")[0] == Capability::Read);
 }
+
+TEST("CapabilityChecker infers write for a slice<T> parameter whose element is index-assigned")
+{
+    // Regression insurance that the existing type-agnostic IndexExpr-walking
+    // mechanism (added for arrays) really does apply to slice<T> too, not
+    // just in theory - see docs/language/0032-slices.md.
+    const auto capabilities = capabilitiesOf("zeroFirst(values: slice<i32>) { values[0] = 0 } "
+                                             "a = [1, 2, 3] "
+                                             "called = zeroFirst(a)");
+    EXPECT_TRUE(capabilities.at("zeroFirst")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a slice<T> parameter that is only indexed for reading")
+{
+    const auto capabilities = capabilitiesOf("sum(values: slice<i32>) -> i32 { return values[0] } "
+                                             "x = sum([1, 2, 3])");
+    EXPECT_TRUE(capabilities.at("sum")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a List<T> parameter that is pushed to")
+{
+    const auto capabilities = capabilitiesOf("appendOne(numbers: List<i32>) { numbers.push(1) } "
+                                             "a = List<i32>() "
+                                             "called = appendOne(a)");
+    EXPECT_TRUE(capabilities.at("appendOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a List<T> parameter that is popped")
+{
+    const auto capabilities =
+        capabilitiesOf("removeOne(numbers: List<i32>) -> i32 { return numbers.pop() } "
+                       "a = List<i32>() "
+                       "called = a.push(1) "
+                       "x = removeOne(a)");
+    EXPECT_TRUE(capabilities.at("removeOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a List<T> parameter that is only indexed for reading")
+{
+    const auto capabilities =
+        capabilitiesOf("first(numbers: List<i32>) -> i32 { return numbers[0] } "
+                       "a = List<i32>() "
+                       "called = a.push(1) "
+                       "x = first(a)");
+    EXPECT_TRUE(capabilities.at("first")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a Stack<T> parameter that is pushed to")
+{
+    const auto capabilities = capabilitiesOf("pushOne(s: Stack<i32>) { s.push(1) } "
+                                             "a = Stack<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Stack<T> parameter that is popped")
+{
+    const auto capabilities = capabilitiesOf("popOne(s: Stack<i32>) -> i32 { return s.pop() } "
+                                             "a = Stack<i32>() "
+                                             "called = a.push(1) "
+                                             "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a Stack<T> parameter that is only peeked")
+{
+    const auto capabilities = capabilitiesOf("peekOne(s: Stack<i32>) -> i32 { return s.peek() } "
+                                             "a = Stack<i32>() "
+                                             "called = a.push(1) "
+                                             "x = peekOne(a)");
+    EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a Map<i32,i32> parameter that is 'set'")
+{
+    const auto capabilities = capabilitiesOf("put(m: Map<i32,i32>) { m.set(1, 2) } "
+                                             "a = Map<i32,i32>() "
+                                             "called = put(a)");
+    EXPECT_TRUE(capabilities.at("put")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Map<i32,i32> parameter that is 'remove'd")
+{
+    const auto capabilities = capabilitiesOf("drop(m: Map<i32,i32>) { m.remove(1) } "
+                                             "a = Map<i32,i32>() "
+                                             "called = drop(a)");
+    EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a Map<i32,i32> parameter that is only 'get'/'contains'")
+{
+    const auto capabilities =
+        capabilitiesOf("peek(m: Map<i32,i32>) -> bool { return m.contains(1) } "
+                       "a = Map<i32,i32>() "
+                       "called = a.set(1, 2) "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a Set<i32> parameter that is 'add'ed to")
+{
+    const auto capabilities = capabilitiesOf("addOne(s: Set<i32>) { s.add(1) } "
+                                             "a = Set<i32>() "
+                                             "called = addOne(a)");
+    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a Set<i32> parameter that is only 'contains'")
+{
+    const auto capabilities = capabilitiesOf("peek(s: Set<i32>) -> bool { return s.contains(1) } "
+                                             "a = Set<i32>() "
+                                             "called = a.add(1) "
+                                             "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}

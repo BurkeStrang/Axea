@@ -63,8 +63,14 @@ private:
         std::vector<LoopEmitContext> loopStack;
     };
 
-    std::string llvmType(const std::string& axeaTypeName) const;
-    std::string llvmReturnType(const std::optional<std::string>& returnType) const;
+    // Not const: for Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's
+    // generic rewrite), this is also the single point of monomorphized-
+    // instantiation registration - the first time it resolves a given
+    // canonical "Map<K,V>"/"Set<T>" string, it registers a fresh entry-type
+    // ID (mirrors hoistString's own dedup-by-content pattern) and emits that
+    // instantiation's named type + runtime functions as a side effect.
+    std::string llvmType(const std::string& axeaTypeName);
+    std::string llvmReturnType(const std::optional<std::string>& returnType);
     std::string binOpMnemonic(TokenKind op) const;
     // Allocates a fresh, never-before-used LLVM register number - for
     // temporaries (GEP pointers, malloc size calcs) that have no
@@ -77,7 +83,7 @@ private:
     int defineRegister(int axeaReg, FunctionContext& fctx) const;
     std::string ref(int axeaReg, const FunctionContext& fctx) const;
     std::pair<std::size_t, std::string> fieldIndexAndType(const std::string& structName,
-                                                          const std::string& fieldName) const;
+                                                          const std::string& fieldName);
     std::string structNameFromPointerType(const std::string& pointerType) const;
     // "[N x T]*" -> "T" - mirrors structNameFromPointerType, used by
     // IrIndexGet's type inference and emitIndexGet/emitIndexSet's GEP
@@ -85,7 +91,67 @@ private:
     std::string arrayElementType(const std::string& pointerType) const;
     // "[N x T]*" -> N.
     int arraySizeFromPointerType(const std::string& pointerType) const;
+    // A slice<T> is the anonymous LLVM struct "{T*, i32}" ("fat pointer" -
+    // pointer + length, passed by value - see docs/language/0032-slices.md),
+    // distinguished from every other type string here by starting with '{'.
+    bool isSliceType(const std::string& type) const;
+    // "{T*, i32}" -> "T".
+    std::string sliceElementType(const std::string& type) const;
+    // A List<T> is "{i32, T*}*" - a *pointer* to a small anonymous heap
+    // record {length, data} (see docs/language/0033-lists.md), distinguished
+    // from slice<T> (also '{'-prefixed, but never pointer-suffixed - a slice
+    // is passed by value, never heap-allocated itself) by its trailing '*'.
+    bool isListType(const std::string& type) const;
+    // "{i32, T*}*" -> "T".
+    std::string listElementType(const std::string& type) const;
+    // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
+    // rewrite) are now many distinct monomorphized instantiations, each with
+    // its own numbered entry type (`%axea.MapEntry.<id>`/`%axea.SetEntry.<id>`)
+    // - so unlike the old single-fixed-shape exact-string match, these check
+    // the shared structural shape every instantiation's header has. Checked
+    // *before* isListType at every call site that could see either: a
+    // Map/Set header is also "{...}*"-shaped (3 fields, not 2), so it would
+    // otherwise spuriously match isListType's own looser test.
+    bool isMapType(const std::string& type) const;
+    bool isSetType(const std::string& type) const;
+    // "{i32, i32, %axea.MapEntry.<id>**}*" -> id (as text). Parsed straight
+    // out of the type string itself - no separate reverse-lookup table
+    // needed to go from "which register" to "which instantiation" once the
+    // register's own LLVM type is already known.
+    std::string mapSetInstantiationId(const std::string& type) const;
+    // A Map instantiation's V doesn't appear anywhere in its own header type
+    // string (unlike K, which every runtime function call site already gets
+    // via typeOf on the key register) - `.get()`'s own dest register needs
+    // it directly, so registerMapInstantiation records it per ID here.
+    std::string mapValueLlvmType(const std::string& mapHeaderType) const;
     std::string typeOf(int reg, const FunctionContext& fctx) const;
+
+    // Registers (if not already registered, memoized by the canonical
+    // "Map<K,V>"/"Set<T>" Axea string) a fresh monomorphized instantiation:
+    // assigns the next sequential ID, appends
+    // `%axea.MapEntry.<id> = type { K, V, %axea.MapEntry.<id>* }` to
+    // mapSetTypeDeclsText_, and appends that instantiation's own
+    // `@axea.map.<id>.set/get/contains/remove/resize` functions to
+    // mapSetRuntimeText_ (calling out to registerKeyRuntime for K's
+    // hash/equality). Returns the full header type string
+    // ("{i32, i32, %axea.MapEntry.<id>**}*"). See
+    // docs/language/0034-maps-and-sets.md.
+    std::string registerMapInstantiation(const std::string& keyAxeaType,
+                                         const std::string& valueAxeaType);
+    std::string registerSetInstantiation(const std::string& elementAxeaType);
+    // Registers (if not already registered, memoized by canonical Axea key
+    // type string) the hash/equality function pair for a given key type,
+    // returning their names (e.g. ("@axea.hash.i32", "@axea.eq.i32")).
+    // i32/bool/str get small fixed functions; struct keys get
+    // `@axea.hash.<StructName>`/`@axea.eq.<StructName>` (name-based, not
+    // numeric - generated once per distinct struct actually used as a key,
+    // recursing into each field's own registerKeyRuntime call, combining
+    // hashes and AND-ing equality); array/List keys get synthetic numeric
+    // IDs, recursing into their own element type's registerKeyRuntime call
+    // (arrays unroll - N is compile-time-known; List<T> needs a genuine
+    // runtime loop, since its length isn't). See
+    // docs/language/0034-maps-and-sets.md.
+    std::pair<std::string, std::string> registerKeyRuntime(const std::string& axeaKeyType);
 
     void inferTypes(const IrFunction& function, FunctionContext& fctx);
     void inferTypesInList(const std::vector<std::unique_ptr<IrInst>>& instructions,
@@ -103,7 +169,7 @@ private:
     // hand-emitted main/struct-print-helper text below, not by lowering.
     std::string stringPtrConstant(const std::string& text);
     void emitStringGlobals(std::ostringstream& out) const;
-    void emitStructTypeDecls(std::ostringstream& out) const;
+    void emitStructTypeDecls(std::ostringstream& out);
 
     // True if every path through this straight-line instruction list is
     // guaranteed to hit a Return, directly or via a Branch whose thenBlock
@@ -153,6 +219,54 @@ private:
     void emitArrayNew(const IrArrayNew& arrayNew, FunctionContext& fctx);
     void emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fctx);
     void emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fctx);
+    // A fresh, empty {length: 0, data: null} heap record - same malloc +
+    // null-GEP sizeof idiom as emitStructNew/emitArrayNew (see
+    // docs/language/0033-lists.md).
+    void emitListNew(const IrListNew& listNew, FunctionContext& fctx);
+    // The hand-verified grow-on-every-push sequence (no amortized growth
+    // this phase, a deliberate simplification - see docs/language/0033-lists.md):
+    // GEP+load the current length, malloc a fresh buffer sized to length + 1,
+    // a hand-rolled phi-based copy loop moving the old elements across (own
+    // label numbering via fctx.nextLabel++, same convention emitBranch/
+    // emitLoop already use), append the pushed value, then store the new
+    // length/data back into the header's own fields in place.
+    void emitListPush(const IrListPush& listPush, FunctionContext& fctx);
+    // No bounds check (matches every other out-of-bounds case in this
+    // backend - division, array/slice indexing: the interpreter checks,
+    // compiled code does not); no shrink/realloc (matches the "no capacity
+    // tracking" simplification - the buffer just stays at its previous size).
+    void emitListPop(const IrListPop& listPop, FunctionContext& fctx);
+    // Stack<T> (see docs/language/0035-stacks.md) - backed internally by
+    // List<T>'s own machinery. emitStackNew/Push/Pop are structurally
+    // identical to emitListNew/Push/Pop (separate functions, not shared,
+    // per this codebase's "separate over shared" convention - they're
+    // dispatched via distinct IR instruction types either way).
+    void emitStackNew(const IrStackNew& stackNew, FunctionContext& fctx);
+    void emitStackPush(const IrStackPush& stackPush, FunctionContext& fctx);
+    void emitStackPop(const IrStackPop& stackPop, FunctionContext& fctx);
+    // GEP+load the element at length-1, *without* the decrement-and-store-back
+    // emitStackPop does - the one genuinely new operation this feature needs.
+    void emitStackPeek(const IrStackPeek& stackPeek, FunctionContext& fctx);
+    // A fresh {count: 0, bucketCount: 8, buckets: <8 nulls>} heap header (see
+    // docs/language/0034-maps-and-sets.md) - same malloc + null-GEP sizeof
+    // idiom as emitListNew, plus a second malloc for the initial bucket
+    // array, zeroed via 8 unrolled stores (8 is a compile-time constant, so
+    // this is cheaper than a real loop).
+    void emitMapNew(const IrMapNew& mapNew, FunctionContext& fctx);
+    void emitSetNew(const IrSetNew& setNew, FunctionContext& fctx);
+    // Each of these is a single `call` into that instantiation's own shared
+    // runtime functions (registerMapInstantiation/registerSetInstantiation
+    // already emitted once, memoized per distinct (K,V)/(T) shape - see
+    // docs/language/0034-maps-and-sets.md's generic rewrite for why Map/Set
+    // don't inline their logic at each call site the way List's push/pop
+    // do).
+    void emitMapSet(const IrMapSet& mapSet, FunctionContext& fctx);
+    void emitMapGet(const IrMapGet& mapGet, FunctionContext& fctx);
+    void emitMapContains(const IrMapContains& mapContains, FunctionContext& fctx);
+    void emitMapRemove(const IrMapRemove& mapRemove, FunctionContext& fctx);
+    void emitSetAdd(const IrSetAdd& setAdd, FunctionContext& fctx);
+    void emitSetContains(const IrSetContains& setContains, FunctionContext& fctx);
+    void emitSetRemove(const IrSetRemove& setRemove, FunctionContext& fctx);
     void emitBranch(const IrBranch& branch, FunctionContext& fctx);
     // `while`/`loop`. See docs/language/0028-loops.md: loop-carried
     // variables become alloca/load/store (not phi), re-read at the top of
@@ -176,8 +290,43 @@ private:
 
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> structs_;
     std::unordered_map<std::string, std::optional<std::string>> functionReturnTypes_;
+    // Callee name -> its declared parameter type strings, in order - used
+    // only by IrCall emission to decide whether an argument needs an
+    // array -> slice conversion (see docs/language/0032-slices.md).
+    std::unordered_map<std::string, std::vector<std::string>> functionParamTypes_;
     std::vector<std::pair<std::string, std::string>>
         stringGlobals_; // (globalName, literalText), in discovery order
     std::unordered_map<std::string, std::string> stringGlobalByLiteral_;
     int nextGlobal_ = 0;
+
+    // Map<K,V>/Set<T> monomorphization (see docs/language/0034-maps-and-sets.md's
+    // generic rewrite). mapInstantiationIds_/setInstantiationIds_: canonical
+    // "Map<K,V>"/"Set<T>" Axea string -> assigned sequential ID (mirrors
+    // stringGlobalByLiteral_'s own dedup-by-content pattern above).
+    // mapSetTypeDeclsText_/mapSetRuntimeText_ accumulate every registered
+    // instantiation's named type + runtime functions, in registration order;
+    // snapshotted into the final module text only once every function and
+    // topLevel has been through inferTypes (which is what drives
+    // registration - see llvmType), so registration order relative to
+    // *writing* the final text doesn't matter.
+    std::unordered_map<std::string, int> mapInstantiationIds_;
+    // Map instantiation ID -> that instantiation's V, in LLVM type-string
+    // form - see mapValueLlvmType.
+    std::unordered_map<int, std::string> mapValueLlvmTypeById_;
+    std::unordered_map<std::string, int> setInstantiationIds_;
+    int nextMapInstantiationId_ = 0;
+    int nextSetInstantiationId_ = 0;
+    std::ostringstream mapSetTypeDeclsText_;
+    std::ostringstream mapSetRuntimeText_;
+
+    // Key hash/equality runtime (see registerKeyRuntime): canonical Axea key
+    // type string -> its (hashFnName, eqFnName) pair, memoized so a key type
+    // reused across several different Map/Set instantiations only gets one
+    // hash/equality implementation, not one per instantiation. Array/List
+    // keys get their own synthetic numeric IDs (a key *shape*, e.g. "[i32;4]"
+    // used as a key, is a different thing from a whole Map/Set instantiation
+    // - separate ID spaces).
+    std::unordered_map<std::string, std::pair<std::string, std::string>> keyRuntimeFns_;
+    int nextArrayKeyId_ = 0;
+    int nextListKeyId_ = 0;
 };

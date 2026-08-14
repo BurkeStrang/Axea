@@ -49,9 +49,28 @@ public:
     void defineArrayLength(const std::string& name, int length);
     std::optional<int> findArrayLength(const std::string& name) const;
 
+    // Parallel to the array-length map above, but records whether a
+    // Map<i32,i32>/Set<i32>-typed name is specifically a Set (true) or a Map
+    // (false) - needed only to disambiguate `.contains`/`.remove`, the two
+    // method names shared between Map and Set (see
+    // docs/language/0034-maps-and-sets.md and IrGenerator::isSetExpr).
+    void defineIsSet(const std::string& name, bool isSet);
+    std::optional<bool> findIsSet(const std::string& name) const;
+
+    // Same reasoning as defineIsSet/findIsSet above, but for List<T> vs
+    // Stack<T> (true = Stack, false = List) - needed only to disambiguate
+    // `.push`/`.pop`, the two method names List<T> and Stack<T> share (see
+    // docs/language/0035-stacks.md and IrGenerator::isStackExpr). A separate
+    // map, not a reuse of isSetKinds_ above: a name is never simultaneously
+    // a candidate for both disambiguations.
+    void defineIsStack(const std::string& name, bool isStack);
+    std::optional<bool> findIsStack(const std::string& name) const;
+
 private:
     std::unordered_map<std::string, int> registers_;
     std::unordered_map<std::string, int> arrayLengths_;
+    std::unordered_map<std::string, bool> isSetKinds_;
+    std::unordered_map<std::string, bool> isStackKinds_;
     IrScope* parent_;
     bool isBarrier_;
 };
@@ -120,7 +139,36 @@ private:
     std::optional<int>
     arrayLengthOf(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
+    // Best-effort resolution of whether a Map/Set-typed expression is
+    // specifically a Set (true) or a Map (false) - nullopt if it can't be
+    // determined from the shapes recognized below. Needed only for
+    // `.contains`/`.remove`, the two method names shared between
+    // Map<i32,i32> and Set<i32> (every other method - List's push/pop,
+    // Map's set/get, Set's add - is unambiguous by name alone; see
+    // docs/language/0034-maps-and-sets.md). Mirrors arrayLengthOf's own
+    // best-effort shape: recognizes a direct MapNewExpr/SetNewExpr, a
+    // Map/Set-typed function parameter, a call to a function with a
+    // Map/Set-typed return, or a name already recorded in scope's parallel
+    // isSet map (populated by lowerStmt's AssignmentStmt case).
+    std::optional<bool>
+    isSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a List/Stack-typed expression is
+    // specifically a Stack (true) or a List (false) - nullopt if it can't be
+    // determined. Needed only for `.push`/`.pop`, the two method names
+    // List<T> and Stack<T> share (`.peek` is unambiguous on its own - List
+    // has no peek - so it never needs this). A sibling resolver, not a
+    // generalization of isSetExpr itself, per this codebase's "each pass
+    // re-derives independently" convention - same best-effort shape:
+    // ListNewExpr/StackNewExpr literal, a List/Stack-typed function
+    // parameter, a call to a function with that return type, or a name
+    // already recorded in scope's parallel isStack map (populated by
+    // lowerStmt's AssignmentStmt case). See docs/language/0035-stacks.md.
+    std::optional<bool>
+    isStackExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
     std::unordered_map<std::string, const StructDecl*> structs_;
+    std::unordered_map<std::string, const FunctionDecl*> functions_;
     // Stack of pre-loop scope snapshots, one per currently-open loop (top =
     // innermost). Pushed/popped by lowerLoop; read by
     // currentLoopCarriedDiff for BreakStmt/ContinueStmt.
