@@ -168,13 +168,27 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
             inferExpr(*argument, function, changed);
         }
         // "push"/"pop" (List, docs/language/0033-lists.md), "set"/"remove"
-        // (Map), and "add"/"remove" (Set, docs/language/0034-maps-and-sets.md)
-        // all mutate the receiver's own header fields in place; "get"/
-        // "contains" don't. Mirrors IndexAssignStmt/FieldAssignStmt raising
-        // Write on their own object below.
+        // (Map), "add"/"remove" (Set, docs/language/0034-maps-and-sets.md),
+        // "push_front"/"push_back"/"pop_front"/"pop_back" (LinkedList/Deque,
+        // docs/language/0036-linked-lists.md, docs/language/0037-deques.md),
+        // "enqueue"/"dequeue" (Queue, docs/language/0038-queues.md),
+        // "append" (String, docs/language/0042-string.md), and
+        // "append_line"/"clear"/"reserve"/"finish" (Buffer,
+        // docs/language/0043-buffer.md - "finish" mutates too, resetting
+        // the buffer's own header fields even though its main purpose is
+        // to return a value, the same "mutates *and* returns" shape
+        // List<T>.pop() already established) all mutate the receiver's own
+        // header fields in place; "get"/"contains" don't. Mirrors
+        // IndexAssignStmt/FieldAssignStmt raising Write on their own object
+        // below.
         if (methodCall->method == "push" || methodCall->method == "pop" ||
             methodCall->method == "set" || methodCall->method == "remove" ||
-            methodCall->method == "add")
+            methodCall->method == "add" || methodCall->method == "push_front" ||
+            methodCall->method == "push_back" || methodCall->method == "pop_front" ||
+            methodCall->method == "pop_back" || methodCall->method == "enqueue" ||
+            methodCall->method == "dequeue" || methodCall->method == "append" ||
+            methodCall->method == "append_line" || methodCall->method == "clear" ||
+            methodCall->method == "reserve" || methodCall->method == "finish")
         {
             if (const auto paramIndex = rootParamIndex(*methodCall->object, function))
             {

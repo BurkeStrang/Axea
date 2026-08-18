@@ -66,11 +66,59 @@ public:
     void defineIsStack(const std::string& name, bool isStack);
     std::optional<bool> findIsStack(const std::string& name) const;
 
+    // Same reasoning again, for LinkedList<T> vs Deque<T> (true = Deque,
+    // false = LinkedList) - needed only to disambiguate push_front/
+    // push_back/pop_front/pop_back, the method names LinkedList<T> and
+    // Deque<T> share (see docs/language/0037-deques.md and
+    // IrGenerator::isDequeExpr). A separate map again, for the same reason
+    // isStackKinds_ isn't folded into isSetKinds_.
+    void defineIsDeque(const std::string& name, bool isDeque);
+    std::optional<bool> findIsDeque(const std::string& name) const;
+
+    // Same reasoning again, for List<T>/Stack<T> vs PriorityQueue<T> (true =
+    // PriorityQueue) - needed only to disambiguate push/pop/peek, the method
+    // names PriorityQueue<T> shares with List<T>/Stack<T> (see
+    // docs/language/0039-priority-queues.md and
+    // IrGenerator::isPriorityQueueExpr). A separate map again, for the same
+    // reason isStackKinds_ isn't folded into isSetKinds_.
+    void defineIsPriorityQueue(const std::string& name, bool isPriorityQueue);
+    std::optional<bool> findIsPriorityQueue(const std::string& name) const;
+
+    // Same reasoning again, for Map<K,V>/Set<T> vs SortedMap<K,V> (true =
+    // SortedMap) - needed only to disambiguate set/get/contains/remove, the
+    // method names SortedMap<K,V> shares with Map<K,V>/Set<T> (see
+    // docs/language/0040-sorted-maps.md and IrGenerator::isSortedMapExpr).
+    // A separate map again, for the same reason isStackKinds_ isn't folded
+    // into isSetKinds_.
+    void defineIsSortedMap(const std::string& name, bool isSortedMap);
+    std::optional<bool> findIsSortedMap(const std::string& name) const;
+
+    // Same reasoning again, for Set<T>/Map<K,V>/SortedMap<K,V> vs
+    // SortedSet<T> (true = SortedSet) - needed only to disambiguate
+    // add/contains/remove, the method names SortedSet<T> shares with Set<T>
+    // (add/contains/remove) and Map<K,V>/SortedMap<K,V> (contains/remove) -
+    // see docs/language/0041-sorted-sets.md and
+    // IrGenerator::isSortedSetExpr.
+    void defineIsSortedSet(const std::string& name, bool isSortedSet);
+    std::optional<bool> findIsSortedSet(const std::string& name) const;
+
+    // Same reasoning again, for String vs Buffer (true = Buffer) - needed
+    // only to disambiguate "append", the method name Buffer shares with
+    // String (see docs/language/0043-buffer.md and
+    // IrGenerator::isBufferExpr).
+    void defineIsBuffer(const std::string& name, bool isBuffer);
+    std::optional<bool> findIsBuffer(const std::string& name) const;
+
 private:
     std::unordered_map<std::string, int> registers_;
     std::unordered_map<std::string, int> arrayLengths_;
     std::unordered_map<std::string, bool> isSetKinds_;
     std::unordered_map<std::string, bool> isStackKinds_;
+    std::unordered_map<std::string, bool> isDequeKinds_;
+    std::unordered_map<std::string, bool> isPriorityQueueKinds_;
+    std::unordered_map<std::string, bool> isSortedMapKinds_;
+    std::unordered_map<std::string, bool> isSortedSetKinds_;
+    std::unordered_map<std::string, bool> isBufferKinds_;
     IrScope* parent_;
     bool isBarrier_;
 };
@@ -166,6 +214,66 @@ private:
     // lowerStmt's AssignmentStmt case). See docs/language/0035-stacks.md.
     std::optional<bool>
     isStackExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a LinkedList/Deque-typed expression
+    // is specifically a Deque (true) or a LinkedList (false) - nullopt if it
+    // can't be determined. Needed only for push_front/push_back/pop_front/
+    // pop_back, the method names LinkedList<T> and Deque<T> share (see
+    // docs/language/0037-deques.md). A sibling resolver again, mirroring
+    // isStackExpr's exact shape: LinkedListNewExpr/DequeNewExpr literal, a
+    // LinkedList/Deque-typed function parameter, a call to a function with
+    // that return type, or a name already recorded in scope's parallel
+    // isDeque map (populated by lowerStmt's AssignmentStmt case).
+    std::optional<bool>
+    isDequeExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a List/Stack/PriorityQueue-typed
+    // expression is specifically a PriorityQueue (true) or not (false) -
+    // nullopt if it can't be determined. Needed for push/pop/peek, the
+    // three method names PriorityQueue<T> shares with List<T>/Stack<T> (see
+    // docs/language/0039-priority-queues.md) - the first three-way
+    // collision in this codebase. A sibling resolver again, not a
+    // generalization of isStackExpr - checked *before* isStackExpr at every
+    // call site that needs it, mirroring isStackExpr's exact shape: a
+    // literal PriorityQueueNewExpr vs. StackNewExpr/ListNewExpr, a
+    // PriorityQueue-typed function parameter (vs. Stack/List), a call to a
+    // function with that return type, or a name already recorded in scope's
+    // parallel isPriorityQueue map.
+    std::optional<bool>
+    isPriorityQueueExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a Map/Set/SortedMap-typed expression
+    // is specifically a SortedMap (true) or not (false) - nullopt if it
+    // can't be determined. Needed for set/get/contains/remove, the method
+    // names SortedMap<K,V> shares with Map<K,V> (set/get/contains/remove)
+    // and Set<T> (contains/remove) - see docs/language/0040-sorted-maps.md.
+    // A sibling resolver again, mirroring isStackExpr/isPriorityQueueExpr's
+    // exact shape: a literal SortedMapNewExpr vs. MapNewExpr/SetNewExpr, a
+    // SortedMap-typed function parameter (vs. Map/Set), a call to a
+    // function with that return type, or a name already recorded in
+    // scope's parallel isSortedMap map.
+    std::optional<bool>
+    isSortedMapExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a Set/Map/SortedMap/SortedSet-typed
+    // expression is specifically a SortedSet (true) or not (false) -
+    // nullopt if it can't be determined. Needed for add/contains/remove,
+    // the method names SortedSet<T> shares with Set<T> (add/contains/
+    // remove) and Map<K,V>/SortedMap<K,V> (contains/remove) - see
+    // docs/language/0041-sorted-sets.md. A sibling resolver again, mirroring
+    // isSortedMapExpr's exact shape.
+    std::optional<bool>
+    isSortedSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // Best-effort resolution of whether a String/Buffer-typed expression is
+    // specifically a Buffer (true) or a String (false) - nullopt if it
+    // can't be determined. Needed only for "append", the one method name
+    // Buffer shares with String (see docs/language/0043-buffer.md);
+    // "append_line"/"clear"/"reserve"/"finish" are all unique names nothing
+    // else uses, so they need no resolver. A sibling resolver again,
+    // mirroring isStackExpr's exact shape.
+    std::optional<bool>
+    isBufferExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
     std::unordered_map<std::string, const StructDecl*> structs_;
     std::unordered_map<std::string, const FunctionDecl*> functions_;

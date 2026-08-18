@@ -189,6 +189,114 @@ TEST("RegionChecker accepts a primitive value read via Map<K,V>.get() from a bor
                  "x = first(a)");
 }
 
+TEST("RegionChecker rejects returning a struct value read via SortedMap<K,V>.get() from a "
+     "borrowed SortedMap parameter (see docs/language/0040-sorted-maps.md)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "leak(m: SortedMap<i32,Point>) -> Point { return m.get(1) } "
+                               "a = SortedMap<i32,Point>() "
+                               "b = a.set(1, Point { x: 1 }) "
+                               "x = leak(a)";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts a take SortedMap<K,V> parameter's .get() result being returned")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "consume(take m: SortedMap<i32,Point>) -> Point { return m.get(1) } "
+                               "a = SortedMap<i32,Point>() "
+                               "b = a.set(1, Point { x: 1 }) "
+                               "x = consume(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via SortedMap<K,V>.get() from a borrowed "
+     "parameter")
+{
+    checkRegions("first(m: SortedMap<i32,i32>) -> i32 { return m.get(1) } "
+                 "a = SortedMap<i32,i32>() "
+                 "b = a.set(1, 1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed SortedMap<K,V> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(m: SortedMap<i32,i32>) -> SortedMap<i32,i32> { return m } "
+                               "a = SortedMap<i32,i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take SortedMap<K,V> parameter being returned directly")
+{
+    checkRegions("consume(take m: SortedMap<i32,i32>) -> SortedMap<i32,i32> { return m } "
+                 "a = SortedMap<i32,i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed SortedSet<T> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(s: SortedSet<i32>) -> SortedSet<i32> { return s } "
+                               "a = SortedSet<i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take SortedSet<T> parameter being returned directly")
+{
+    checkRegions("consume(take s: SortedSet<i32>) -> SortedSet<i32> { return s } "
+                 "a = SortedSet<i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed String parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(s: String) -> String { return s } "
+                               "a = String(\"x\") "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take String parameter being returned directly")
+{
+    checkRegions("consume(take s: String) -> String { return s } "
+                 "a = String(\"x\") "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed Buffer parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(b: Buffer) -> Buffer { return b } "
+                               "a = Buffer() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take Buffer parameter being returned directly")
+{
+    checkRegions("consume(take b: Buffer) -> Buffer { return b } "
+                 "a = Buffer() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker accepts returning a fresh String from a borrowed Buffer's .finish()")
+{
+    checkRegions("done(b: Buffer) -> String { return b.finish() } "
+                 "a = Buffer() "
+                 "s = done(a)");
+}
+
+TEST("RegionChecker accepts a freshly constructed Buffer() being returned directly")
+{
+    checkRegions("build() -> Buffer { return Buffer() } "
+                 "a = build()");
+}
+
+TEST("RegionChecker accepts returning a char literal or a char parameter directly - a plain "
+     "value with nothing to borrow or alias, unlike every owned/reference-semantics type above")
+{
+    checkRegions("literal() -> char { return 'A' } "
+                 "identity(c: char) -> char { return c } "
+                 "a = literal() "
+                 "b = identity(a)");
+}
+
 TEST("RegionChecker rejects returning a struct value read via Stack<T>.peek() from a borrowed "
      "Stack parameter (see docs/language/0035-stacks.md)")
 {
@@ -227,4 +335,175 @@ TEST("RegionChecker accepts a primitive value read via Stack<T>.peek() from a bo
                  "a = Stack<i32>() "
                  "b = a.push(1) "
                  "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed LinkedList<T> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(s: LinkedList<i32>) -> LinkedList<i32> { return s } "
+                               "a = LinkedList<i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take LinkedList<T> parameter being returned directly")
+{
+    checkRegions("consume(take s: LinkedList<i32>) -> LinkedList<i32> { return s } "
+                 "a = LinkedList<i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker accepts returning a struct value read via LinkedList<T>.pop_front() from a "
+     "borrowed parameter (pop_front removes - no peek_front exists, so no aliasing exception is "
+     "needed at all - see docs/language/0036-linked-lists.md)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "take_front(s: LinkedList<Point>) -> Point { return s.pop_front() } "
+                               "a = LinkedList<Point>() "
+                               "b = a.push_front(Point { x: 1 }) "
+                               "x = take_front(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts returning a struct value read via LinkedList<T>.pop_back() from a "
+     "borrowed parameter")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "take_back(s: LinkedList<Point>) -> Point { return s.pop_back() } "
+                               "a = LinkedList<Point>() "
+                               "b = a.push_front(Point { x: 1 }) "
+                               "x = take_back(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via LinkedList<T>.pop_front() from a borrowed "
+     "parameter")
+{
+    checkRegions("first(s: LinkedList<i32>) -> i32 { return s.pop_front() } "
+                 "a = LinkedList<i32>() "
+                 "b = a.push_front(1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed Deque<T> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(d: Deque<i32>) -> Deque<i32> { return d } "
+                               "a = Deque<i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take Deque<T> parameter being returned directly")
+{
+    checkRegions("consume(take d: Deque<i32>) -> Deque<i32> { return d } "
+                 "a = Deque<i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker rejects returning a struct value read via Deque<T>[i] from a borrowed "
+     "parameter - reuses IndexExpr's existing generic aliasing rule (see "
+     "docs/language/0037-deques.md), the same rule array/List indexing already has, not a new "
+     "MethodCallExpr exception")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "leak(d: Deque<Point>) -> Point { return d[0] } "
+                               "a = Deque<Point>() "
+                               "b = a.push_back(Point { x: 1 }) "
+                               "x = leak(a)";
+    EXPECT_THROWS(checkRegions(source));
+}
+
+TEST("RegionChecker accepts a take Deque<T> parameter's [i] result being returned")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "consume(take d: Deque<Point>) -> Point { return d[0] } "
+                               "a = Deque<Point>() "
+                               "b = a.push_back(Point { x: 1 }) "
+                               "x = consume(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts returning a struct value read via Deque<T>.pop_front() from a "
+     "borrowed parameter (pop_front removes - unlike [i], nothing still aliases it)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "take_front(d: Deque<Point>) -> Point { return d.pop_front() } "
+                               "a = Deque<Point>() "
+                               "b = a.push_back(Point { x: 1 }) "
+                               "x = take_front(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via Deque<T>[i] from a borrowed parameter")
+{
+    checkRegions("first(d: Deque<i32>) -> i32 { return d[0] } "
+                 "a = Deque<i32>() "
+                 "b = a.push_back(1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed Queue<T> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(q: Queue<i32>) -> Queue<i32> { return q } "
+                               "a = Queue<i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take Queue<T> parameter being returned directly")
+{
+    checkRegions("consume(take q: Queue<i32>) -> Queue<i32> { return q } "
+                 "a = Queue<i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker accepts returning a struct value read via Queue<T>.dequeue() from a "
+     "borrowed parameter (dequeue removes - the simplest region-checking story of any "
+     "collection this session, no peek and no indexing at all - see "
+     "docs/language/0038-queues.md)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "take_first(q: Queue<Point>) -> Point { return q.dequeue() } "
+                               "a = Queue<Point>() "
+                               "b = a.enqueue(Point { x: 1 }) "
+                               "x = take_first(a)";
+    checkRegions(source);
+}
+
+TEST("RegionChecker accepts a primitive value read via Queue<T>.dequeue() from a borrowed "
+     "parameter")
+{
+    checkRegions("first(q: Queue<i32>) -> i32 { return q.dequeue() } "
+                 "a = Queue<i32>() "
+                 "b = a.enqueue(1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker rejects returning a borrowed PriorityQueue<T> parameter directly")
+{
+    EXPECT_THROWS(checkRegions("leak(q: PriorityQueue<i32>) -> PriorityQueue<i32> { return q } "
+                               "a = PriorityQueue<i32>() "
+                               "x = leak(a)"));
+}
+
+TEST("RegionChecker accepts a take PriorityQueue<T> parameter being returned directly")
+{
+    checkRegions("consume(take q: PriorityQueue<i32>) -> PriorityQueue<i32> { return q } "
+                 "a = PriorityQueue<i32>() "
+                 "x = consume(a)");
+}
+
+TEST("RegionChecker accepts a primitive value read via PriorityQueue<T>.pop() from a borrowed "
+     "parameter (T is i32-only this phase, so no struct-aliasing case is even reachable - see "
+     "docs/language/0039-priority-queues.md)")
+{
+    checkRegions("first(q: PriorityQueue<i32>) -> i32 { return q.pop() } "
+                 "a = PriorityQueue<i32>() "
+                 "b = a.push(1) "
+                 "x = first(a)");
+}
+
+TEST("RegionChecker accepts a primitive value read via PriorityQueue<T>.peek() from a borrowed "
+     "parameter")
+{
+    checkRegions("top(q: PriorityQueue<i32>) -> i32 { return q.peek() } "
+                 "a = PriorityQueue<i32>() "
+                 "b = a.push(1) "
+                 "x = top(a)");
 }

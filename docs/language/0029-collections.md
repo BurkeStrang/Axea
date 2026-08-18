@@ -11,9 +11,29 @@
 > over any hashable key type) is also implemented separately; see
 > `0034-maps-and-sets.md`. `Stack<T>` (push/pop/peek/`.length`, backed
 > internally by `List<T>`) is also implemented separately; see
-> `0035-stacks.md`. Everything else below (`LinkedList<T>`, `Deque<T>`,
-> `Queue<T>`, `PriorityQueue<T>`, `SortedMap<K,V>`/`SortedSet<T>`, sorting,
-> comprehensions, ...) remains future work.
+> `0035-stacks.md`. `LinkedList<T>` (push_front/push_back/pop_front/
+> pop_back/`.length`, a genuinely node-based collection with a named,
+> self-referential node type) is also implemented separately; see
+> `0036-linked-lists.md`. `Deque<T>` (push_front/push_back/pop_front/
+> pop_back/`.length`/`[i]`/`for`-in, a growable array with a `start` offset -
+> no ring-buffer wraparound) is also implemented separately; see
+> `0037-deques.md`. `Queue<T>` (enqueue/dequeue/`.length`, a FIFO collection
+> backed internally by `Deque<T>` - LLVM-identical to it, no `isQueueType`
+> predicate needed) is also implemented separately; see `0038-queues.md`.
+> `PriorityQueue<T>` (push/pop/peek/`.length`, a real binary min-heap over a
+> `List<T>`-identical header, restricted to `i32` elements this phase - the
+> first collection here needing genuine sift-up/sift-down codegen instead of
+> a renamed existing operation) is also implemented separately; see
+> `0039-priority-queues.md`. `SortedMap<K,V>` (set/get/contains/remove/
+> `.length`, a real self-balancing AVL tree, restricted to `i32` keys this
+> phase - `Map<K,V>`'s own API over a genuinely recursive backing algorithm,
+> the first collection here needing true self-recursive runtime functions)
+> is also implemented separately; see `0040-sorted-maps.md`. `SortedSet<T>`
+> (add/contains/remove/`.length`, `SortedMap<K,V>`'s own AVL tree minus the
+> value field, restricted to `i32` elements this phase - `Set<T>`'s API over
+> the identical backing algorithm) is also implemented separately; see
+> `0041-sorted-sets.md`. Everything else below (sorting, comprehensions,
+> ...) remains future work.
 
 This document describes the proposed collection library for the Axea
 programming language.
@@ -251,25 +271,30 @@ if job = queue.dequeue()
 
 # PriorityQueue`<T>`{=html}
 
-A priority queue implemented as a binary heap.
+A priority queue implemented as a binary heap. **Implemented this phase for
+`i32` elements only, ascending (smallest-first) order, with no `by:`/
+`order:` constructor arguments** - see `0039-priority-queues.md` for why
+(no closures/property-selectors and no comparability for any type but `i32`
+exist anywhere in this codebase yet). The sketch below is the original,
+still-aspirational design for whenever generic ordering support exists:
 
 ``` ax
-queue = PriorityQueue<Job>(by: .priority)
+queue = PriorityQueue<i32>()
 
-queue.push(job1)
-queue.push(job2)
+queue.push(30)
+queue.push(10)
 
-next = queue.pop()
+next = queue.pop()   // 10 - always the smallest element present
 ```
 
-Custom ordering:
+Future, not yet implemented - custom ordering via a property selector:
 
 ``` ax
 tasks = PriorityQueue<Task>(by: .deadline, order: asc)
 ```
 
 Objects implementing `Ordered` may also be inserted without an explicit
-selector.
+selector, once `Ordered` exists.
 
 Complexity:
 
@@ -330,36 +355,42 @@ difference = a - b
 
 # SortedMap\<K,V\>
 
-A key/value collection that keeps keys ordered.
+A key/value collection that keeps keys ordered - implemented this phase as
+a real AVL tree, for `i32` keys only (`V` may be anything, same as
+`Map<K,V>`'s own value type), with `Map<K,V>`'s own `set`/`get`/`contains`/
+`remove`/`.length` API rather than `[key] =` indexing - see
+`0040-sorted-maps.md` for why (no indexed-assignment desugar for a
+non-array receiver, and no comparability for any type but `i32`, exist
+anywhere in this codebase yet):
 
 ``` ax
-scores = SortedMap<str, i32>()
+scores = SortedMap<i32, i32>()
 
-scores["Alice"] = 93
-scores["Bob"] = 87
-scores["Carol"] = 98
+scores.set(93, 1)
+scores.set(87, 2)
+scores.set(98, 3)
+
+top = scores.get(87)
 ```
 
-Iteration is sorted by key:
+Future, not yet implemented - `[key]` indexing and sorted iteration:
 
 ``` ax
+scores["Alice"] = 93
+
 for name, score in scores
 {
     print("{name}: {score}")
 }
 ```
 
-Custom ordering may be provided:
+Custom ordering may be provided, once ordering selectors exist:
 
 ``` ax
 scores = SortedMap<str, i32>(order: desc)
 ```
 
-Expected implementation:
-
-``` text
-balanced search tree
-```
+Implementation: a real AVL tree (self-balancing, rotation-based).
 
 Typical complexity:
 
@@ -373,7 +404,11 @@ remove  O(log n)
 
 # SortedSet`<T>`{=html}
 
-A unique-value collection that remains sorted.
+A unique-value collection that remains sorted - implemented this phase as a
+real AVL tree (`SortedMap<K,V>`'s own tree, minus the value field), for
+`i32` elements only, with `Set<T>`'s own `add`/`contains`/`remove`/`.length`
+API - see `0041-sorted-sets.md` for why (no comparability for any type but
+`i32` exists anywhere in this codebase yet):
 
 ``` ax
 values = SortedSet<i32>()
@@ -381,9 +416,11 @@ values = SortedSet<i32>()
 values.add(30)
 values.add(10)
 values.add(20)
+
+has = values.contains(10)
 ```
 
-Iteration:
+Future, not yet implemented - sorted iteration:
 
 ``` ax
 for value in values
@@ -400,11 +437,13 @@ produces:
 30
 ```
 
-Custom ordering:
+Custom ordering, once ordering selectors exist:
 
 ``` ax
 users = SortedSet<User>(by: .name)
 ```
+
+Implementation: a real AVL tree (self-balancing, rotation-based).
 
 Typical complexity:
 

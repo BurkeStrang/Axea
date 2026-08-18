@@ -29,6 +29,12 @@ namespace
             return;
         }
 
+        if (const auto* character = dynamic_cast<const CharExpr*>(&expr))
+        {
+            std::cout << pad << "Char(" << character->codepoint << ")\n";
+            return;
+        }
+
         if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
         {
             std::cout << pad << "Name(" << name->name << ")\n";
@@ -151,9 +157,63 @@ namespace
             return;
         }
 
+        if (const auto* sortedMapNew = dynamic_cast<const SortedMapNewExpr*>(&expr))
+        {
+            std::cout << pad << "SortedMapNew(" << sortedMapNew->keyType << ", "
+                      << sortedMapNew->valueType << ")\n";
+            return;
+        }
+
+        if (const auto* sortedSetNew = dynamic_cast<const SortedSetNewExpr*>(&expr))
+        {
+            std::cout << pad << "SortedSetNew(" << sortedSetNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
+        {
+            // Unlike every other *New node above, `text` is a real
+            // sub-expression, not a type-name string, so it recurses via
+            // printExpr the same way MethodCallExpr's own object/arguments
+            // do, rather than being inlined into the header line.
+            std::cout << pad << "StringNew\n";
+            printExpr(*stringNew->text, indent + 2);
+            return;
+        }
+
+        if (dynamic_cast<const BufferNewExpr*>(&expr))
+        {
+            std::cout << pad << "BufferNew\n";
+            return;
+        }
+
         if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
         {
             std::cout << pad << "StackNew(" << stackNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
+        {
+            std::cout << pad << "LinkedListNew(" << linkedListNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
+        {
+            std::cout << pad << "DequeNew(" << dequeNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
+        {
+            std::cout << pad << "QueueNew(" << queueNew->elementType << ")\n";
+            return;
+        }
+
+        if (const auto* priorityQueueNew = dynamic_cast<const PriorityQueueNewExpr*>(&expr))
+        {
+            std::cout << pad << "PriorityQueueNew(" << priorityQueueNew->elementType << ")\n";
             return;
         }
 
@@ -296,6 +356,13 @@ namespace
             return;
         }
 
+        if (const auto* constChar = dynamic_cast<const IrConstChar*>(&inst))
+        {
+            std::cout << pad << "%" << constChar->dest << " = const.char " << constChar->codepoint
+                      << "\n";
+            return;
+        }
+
         if (const auto* binOp = dynamic_cast<const IrBinOp*>(&inst))
         {
             std::cout << pad << "%" << binOp->dest << " = binop " << tokenKindName(binOp->op)
@@ -414,6 +481,126 @@ namespace
             return;
         }
 
+        if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(&inst))
+        {
+            std::cout << pad << "%" << linkedListNew->dest << " = linkedlist.new "
+                      << linkedListNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* pushFront = dynamic_cast<const IrLinkedListPushFront*>(&inst))
+        {
+            std::cout << pad << "%" << pushFront->dest << " = linkedlist.push_front %"
+                      << pushFront->list << ", %" << pushFront->value << "\n";
+            return;
+        }
+
+        if (const auto* pushBack = dynamic_cast<const IrLinkedListPushBack*>(&inst))
+        {
+            std::cout << pad << "%" << pushBack->dest << " = linkedlist.push_back %"
+                      << pushBack->list << ", %" << pushBack->value << "\n";
+            return;
+        }
+
+        if (const auto* popFront = dynamic_cast<const IrLinkedListPopFront*>(&inst))
+        {
+            std::cout << pad << "%" << popFront->dest << " = linkedlist.pop_front %"
+                      << popFront->list << "\n";
+            return;
+        }
+
+        if (const auto* popBack = dynamic_cast<const IrLinkedListPopBack*>(&inst))
+        {
+            std::cout << pad << "%" << popBack->dest << " = linkedlist.pop_back %" << popBack->list
+                      << "\n";
+            return;
+        }
+
+        if (const auto* dequeNew = dynamic_cast<const IrDequeNew*>(&inst))
+        {
+            std::cout << pad << "%" << dequeNew->dest << " = deque.new "
+                      << dequeNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* dequePushFront = dynamic_cast<const IrDequePushFront*>(&inst))
+        {
+            std::cout << pad << "%" << dequePushFront->dest << " = deque.push_front %"
+                      << dequePushFront->deque << ", %" << dequePushFront->value << "\n";
+            return;
+        }
+
+        if (const auto* dequePushBack = dynamic_cast<const IrDequePushBack*>(&inst))
+        {
+            std::cout << pad << "%" << dequePushBack->dest << " = deque.push_back %"
+                      << dequePushBack->deque << ", %" << dequePushBack->value << "\n";
+            return;
+        }
+
+        if (const auto* dequePopFront = dynamic_cast<const IrDequePopFront*>(&inst))
+        {
+            std::cout << pad << "%" << dequePopFront->dest << " = deque.pop_front %"
+                      << dequePopFront->deque << "\n";
+            return;
+        }
+
+        if (const auto* dequePopBack = dynamic_cast<const IrDequePopBack*>(&inst))
+        {
+            std::cout << pad << "%" << dequePopBack->dest << " = deque.pop_back %"
+                      << dequePopBack->deque << "\n";
+            return;
+        }
+
+        if (const auto* queueNew = dynamic_cast<const IrQueueNew*>(&inst))
+        {
+            std::cout << pad << "%" << queueNew->dest << " = queue.new "
+                      << queueNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* queueEnqueue = dynamic_cast<const IrQueueEnqueue*>(&inst))
+        {
+            std::cout << pad << "%" << queueEnqueue->dest << " = queue.enqueue %"
+                      << queueEnqueue->queue << ", %" << queueEnqueue->value << "\n";
+            return;
+        }
+
+        if (const auto* queueDequeue = dynamic_cast<const IrQueueDequeue*>(&inst))
+        {
+            std::cout << pad << "%" << queueDequeue->dest << " = queue.dequeue %"
+                      << queueDequeue->queue << "\n";
+            return;
+        }
+
+        if (const auto* priorityQueueNew = dynamic_cast<const IrPriorityQueueNew*>(&inst))
+        {
+            std::cout << pad << "%" << priorityQueueNew->dest << " = priorityqueue.new "
+                      << priorityQueueNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* priorityQueuePush = dynamic_cast<const IrPriorityQueuePush*>(&inst))
+        {
+            std::cout << pad << "%" << priorityQueuePush->dest << " = priorityqueue.push %"
+                      << priorityQueuePush->priorityQueue << ", %" << priorityQueuePush->value
+                      << "\n";
+            return;
+        }
+
+        if (const auto* priorityQueuePop = dynamic_cast<const IrPriorityQueuePop*>(&inst))
+        {
+            std::cout << pad << "%" << priorityQueuePop->dest << " = priorityqueue.pop %"
+                      << priorityQueuePop->priorityQueue << "\n";
+            return;
+        }
+
+        if (const auto* priorityQueuePeek = dynamic_cast<const IrPriorityQueuePeek*>(&inst))
+        {
+            std::cout << pad << "%" << priorityQueuePeek->dest << " = priorityqueue.peek %"
+                      << priorityQueuePeek->priorityQueue << "\n";
+            return;
+        }
+
         if (const auto* mapNew = dynamic_cast<const IrMapNew*>(&inst))
         {
             std::cout << pad << "%" << mapNew->dest << " = map.new " << mapNew->keyTypeName << ", "
@@ -453,6 +640,125 @@ namespace
         {
             std::cout << pad << "%" << setNew->dest << " = set.new " << setNew->elementTypeName
                       << "\n";
+            return;
+        }
+
+        if (const auto* sortedMapNew = dynamic_cast<const IrSortedMapNew*>(&inst))
+        {
+            std::cout << pad << "%" << sortedMapNew->dest << " = sortedmap.new "
+                      << sortedMapNew->keyTypeName << ", " << sortedMapNew->valueTypeName << "\n";
+            return;
+        }
+
+        if (const auto* sortedMapSet = dynamic_cast<const IrSortedMapSet*>(&inst))
+        {
+            std::cout << pad << "%" << sortedMapSet->dest << " = sortedmap.set %"
+                      << sortedMapSet->sortedMap << ", %" << sortedMapSet->key << ", %"
+                      << sortedMapSet->value << "\n";
+            return;
+        }
+
+        if (const auto* sortedMapGet = dynamic_cast<const IrSortedMapGet*>(&inst))
+        {
+            std::cout << pad << "%" << sortedMapGet->dest << " = sortedmap.get %"
+                      << sortedMapGet->sortedMap << ", %" << sortedMapGet->key << "\n";
+            return;
+        }
+
+        if (const auto* sortedMapContains = dynamic_cast<const IrSortedMapContains*>(&inst))
+        {
+            std::cout << pad << "%" << sortedMapContains->dest << " = sortedmap.contains %"
+                      << sortedMapContains->sortedMap << ", %" << sortedMapContains->key << "\n";
+            return;
+        }
+
+        if (const auto* sortedMapRemove = dynamic_cast<const IrSortedMapRemove*>(&inst))
+        {
+            std::cout << pad << "%" << sortedMapRemove->dest << " = sortedmap.remove %"
+                      << sortedMapRemove->sortedMap << ", %" << sortedMapRemove->key << "\n";
+            return;
+        }
+
+        if (const auto* sortedSetNew = dynamic_cast<const IrSortedSetNew*>(&inst))
+        {
+            std::cout << pad << "%" << sortedSetNew->dest << " = sortedset.new "
+                      << sortedSetNew->elementTypeName << "\n";
+            return;
+        }
+
+        if (const auto* sortedSetAdd = dynamic_cast<const IrSortedSetAdd*>(&inst))
+        {
+            std::cout << pad << "%" << sortedSetAdd->dest << " = sortedset.add %"
+                      << sortedSetAdd->sortedSet << ", %" << sortedSetAdd->value << "\n";
+            return;
+        }
+
+        if (const auto* sortedSetContains = dynamic_cast<const IrSortedSetContains*>(&inst))
+        {
+            std::cout << pad << "%" << sortedSetContains->dest << " = sortedset.contains %"
+                      << sortedSetContains->sortedSet << ", %" << sortedSetContains->value << "\n";
+            return;
+        }
+
+        if (const auto* sortedSetRemove = dynamic_cast<const IrSortedSetRemove*>(&inst))
+        {
+            std::cout << pad << "%" << sortedSetRemove->dest << " = sortedset.remove %"
+                      << sortedSetRemove->sortedSet << ", %" << sortedSetRemove->value << "\n";
+            return;
+        }
+
+        if (const auto* stringNew = dynamic_cast<const IrStringNew*>(&inst))
+        {
+            std::cout << pad << "%" << stringNew->dest << " = string.new %" << stringNew->text
+                      << "\n";
+            return;
+        }
+
+        if (const auto* stringAppend = dynamic_cast<const IrStringAppend*>(&inst))
+        {
+            std::cout << pad << "%" << stringAppend->dest << " = string.append %"
+                      << stringAppend->string << ", %" << stringAppend->other << "\n";
+            return;
+        }
+
+        if (const auto* bufferNew = dynamic_cast<const IrBufferNew*>(&inst))
+        {
+            std::cout << pad << "%" << bufferNew->dest << " = buffer.new\n";
+            return;
+        }
+
+        if (const auto* bufferAppend = dynamic_cast<const IrBufferAppend*>(&inst))
+        {
+            std::cout << pad << "%" << bufferAppend->dest << " = buffer.append %"
+                      << bufferAppend->buffer << ", %" << bufferAppend->text << "\n";
+            return;
+        }
+
+        if (const auto* bufferAppendLine = dynamic_cast<const IrBufferAppendLine*>(&inst))
+        {
+            std::cout << pad << "%" << bufferAppendLine->dest << " = buffer.append_line %"
+                      << bufferAppendLine->buffer << ", %" << bufferAppendLine->text << "\n";
+            return;
+        }
+
+        if (const auto* bufferClear = dynamic_cast<const IrBufferClear*>(&inst))
+        {
+            std::cout << pad << "%" << bufferClear->dest << " = buffer.clear %"
+                      << bufferClear->buffer << "\n";
+            return;
+        }
+
+        if (const auto* bufferReserve = dynamic_cast<const IrBufferReserve*>(&inst))
+        {
+            std::cout << pad << "%" << bufferReserve->dest << " = buffer.reserve %"
+                      << bufferReserve->buffer << ", %" << bufferReserve->capacity << "\n";
+            return;
+        }
+
+        if (const auto* bufferFinish = dynamic_cast<const IrBufferFinish*>(&inst))
+        {
+            std::cout << pad << "%" << bufferFinish->dest << " = buffer.finish %"
+                      << bufferFinish->buffer << "\n";
             return;
         }
 

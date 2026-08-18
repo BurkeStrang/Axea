@@ -12,10 +12,16 @@
 // Representation" and 0002-grammar.md's primitive_type list. Only Bool, I32,
 // String, Unit, Struct, Array (docs/language/0031-arrays.md), Slice
 // (docs/language/0032-slices.md), List (docs/language/0033-lists.md),
-// Map/Set (docs/language/0034-maps-and-sets.md), and Stack
-// (docs/language/0035-stacks.md) have checking logic wired up this phase;
-// the rest are declared for architectural fidelity and reachable only as an
-// "unsupported type" error via resolveType.
+// Map/Set (docs/language/0034-maps-and-sets.md), Stack
+// (docs/language/0035-stacks.md), LinkedList
+// (docs/language/0036-linked-lists.md), Deque
+// (docs/language/0037-deques.md), Queue (docs/language/0038-queues.md), and
+// PriorityQueue (docs/language/0039-priority-queues.md, i32 elements only),
+// and OwnedString (docs/language/0042-string.md - Axea's own `String`,
+// distinct from this same enum's `String` case which is `str`) have
+// checking logic wired up this phase; the rest are declared for
+// architectural fidelity and reachable only as an "unsupported type" error
+// via resolveType.
 enum class TypeKind
 {
     Bool,
@@ -54,7 +60,15 @@ enum class TypeKind
     List,
     Map,
     Set,
-    Stack
+    Stack,
+    LinkedList,
+    Deque,
+    Queue,
+    PriorityQueue,
+    SortedMap,
+    SortedSet,
+    OwnedString,
+    Buffer
 };
 
 struct Type

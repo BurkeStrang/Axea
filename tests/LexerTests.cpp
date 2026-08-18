@@ -70,6 +70,28 @@ TEST("Lexer tokenizes Phase 2 keywords")
     EXPECT_EQ(tokens[6].kind, TokenKind::EndOfFile);
 }
 
+TEST("Lexer tokenizes char literals, including multi-byte UTF-8 content")
+{
+    Lexer lexer("'A' 'é' '🚀'");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Char);
+    EXPECT_EQ(tokens[0].text, "'A'");
+    EXPECT_EQ(tokens[1].kind, TokenKind::Char);
+    EXPECT_EQ(tokens[1].text, "'é'");
+    EXPECT_EQ(tokens[2].kind, TokenKind::Char);
+    EXPECT_EQ(tokens[2].text, "'🚀'");
+    EXPECT_EQ(tokens[3].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer marks an unterminated char literal as Invalid")
+{
+    Lexer lexer("'A");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
+}
+
 TEST("Lexer tokenizes increment and decrement operators")
 {
     Lexer lexer("++ -- + -");

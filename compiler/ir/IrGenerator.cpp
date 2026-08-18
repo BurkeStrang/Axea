@@ -142,6 +142,76 @@ std::optional<bool> IrScope::findIsStack(const std::string& name) const
     return parent_ ? parent_->findIsStack(name) : std::nullopt;
 }
 
+void IrScope::defineIsDeque(const std::string& name, bool isDeque)
+{
+    isDequeKinds_[name] = isDeque;
+}
+
+std::optional<bool> IrScope::findIsDeque(const std::string& name) const
+{
+    if (const auto it = isDequeKinds_.find(name); it != isDequeKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsDeque(name) : std::nullopt;
+}
+
+void IrScope::defineIsPriorityQueue(const std::string& name, bool isPriorityQueue)
+{
+    isPriorityQueueKinds_[name] = isPriorityQueue;
+}
+
+std::optional<bool> IrScope::findIsPriorityQueue(const std::string& name) const
+{
+    if (const auto it = isPriorityQueueKinds_.find(name); it != isPriorityQueueKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsPriorityQueue(name) : std::nullopt;
+}
+
+void IrScope::defineIsSortedMap(const std::string& name, bool isSortedMap)
+{
+    isSortedMapKinds_[name] = isSortedMap;
+}
+
+std::optional<bool> IrScope::findIsSortedMap(const std::string& name) const
+{
+    if (const auto it = isSortedMapKinds_.find(name); it != isSortedMapKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsSortedMap(name) : std::nullopt;
+}
+
+void IrScope::defineIsSortedSet(const std::string& name, bool isSortedSet)
+{
+    isSortedSetKinds_[name] = isSortedSet;
+}
+
+std::optional<bool> IrScope::findIsSortedSet(const std::string& name) const
+{
+    if (const auto it = isSortedSetKinds_.find(name); it != isSortedSetKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsSortedSet(name) : std::nullopt;
+}
+
+void IrScope::defineIsBuffer(const std::string& name, bool isBuffer)
+{
+    isBufferKinds_[name] = isBuffer;
+}
+
+std::optional<bool> IrScope::findIsBuffer(const std::string& name) const
+{
+    if (const auto it = isBufferKinds_.find(name); it != isBufferKinds_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findIsBuffer(name) : std::nullopt;
+}
+
 int IrGenerator::freshRegister(Context& ctx)
 {
     return (*ctx.registerCount)++;
@@ -335,6 +405,284 @@ IrGenerator::isStackExpr(const Expr& expr, const FunctionDecl* function, const I
     return std::nullopt;
 }
 
+std::optional<bool>
+IrGenerator::isDequeExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
+{
+    if (dynamic_cast<const DequeNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("Deque<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("LinkedList<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsDeque(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("Deque<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("LinkedList<"))
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool> IrGenerator::isPriorityQueueExpr(const Expr& expr,
+                                                     const FunctionDecl* function,
+                                                     const IrScope& scope) const
+{
+    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const StackNewExpr*>(&expr) || dynamic_cast<const ListNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("PriorityQueue<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("Stack<") || param.type.starts_with("List<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsPriorityQueue(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("PriorityQueue<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("Stack<") ||
+                it->second->returnType->starts_with("List<"))
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool> IrGenerator::isSortedMapExpr(const Expr& expr,
+                                                 const FunctionDecl* function,
+                                                 const IrScope& scope) const
+{
+    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const MapNewExpr*>(&expr) || dynamic_cast<const SetNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("SortedMap<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("Map<") || param.type.starts_with("Set<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsSortedMap(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("SortedMap<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("Map<") ||
+                it->second->returnType->starts_with("Set<"))
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool> IrGenerator::isSortedSetExpr(const Expr& expr,
+                                                 const FunctionDecl* function,
+                                                 const IrScope& scope) const
+{
+    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const SetNewExpr*>(&expr) || dynamic_cast<const MapNewExpr*>(&expr) ||
+        dynamic_cast<const SortedMapNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    if (param.type.starts_with("SortedSet<"))
+                    {
+                        return true;
+                    }
+                    if (param.type.starts_with("Set<") || param.type.starts_with("Map<") ||
+                        param.type.starts_with("SortedMap<"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsSortedSet(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (it->second->returnType->starts_with("SortedSet<"))
+            {
+                return true;
+            }
+            if (it->second->returnType->starts_with("Set<") ||
+                it->second->returnType->starts_with("Map<") ||
+                it->second->returnType->starts_with("SortedMap<"))
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<bool> IrGenerator::isBufferExpr(const Expr& expr,
+                                              const FunctionDecl* function,
+                                              const IrScope& scope) const
+{
+    if (dynamic_cast<const BufferNewExpr*>(&expr))
+    {
+        return true;
+    }
+    if (dynamic_cast<const StringNewExpr*>(&expr))
+    {
+        return false;
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    // String/Buffer aren't generic, so this is an exact
+                    // match, not a starts_with prefix check (see
+                    // docs/language/0043-buffer.md).
+                    if (param.type == "Buffer")
+                    {
+                        return true;
+                    }
+                    if (param.type == "String")
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return scope.findIsBuffer(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            if (*it->second->returnType == "Buffer")
+            {
+                return true;
+            }
+            if (*it->second->returnType == "String")
+            {
+                return false;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
 int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 {
     if (const auto* integer = dynamic_cast<const IntegerExpr*>(&expr))
@@ -348,6 +696,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
     {
         auto inst = std::make_unique<IrConstBool>();
         inst->value = boolean->value;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* charExpr = dynamic_cast<const CharExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrConstChar>();
+        inst->codepoint = charExpr->codepoint;
         return emit(ctx, std::move(inst));
     }
 
@@ -391,14 +746,28 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
     {
         // Resolved from the AST, before lowering `object` below, since
-        // isSetExpr/isStackExpr both inspect the expression shape itself
-        // (see their own doc comments) - needed only to disambiguate
-        // "contains"/"remove" between Map and Set
-        // (docs/language/0034-maps-and-sets.md) and "push"/"pop" between
-        // List and Stack (docs/language/0035-stacks.md); every other method
-        // name here is unambiguous by itself.
+        // isSetExpr/isStackExpr/isDequeExpr/isPriorityQueueExpr/
+        // isSortedMapExpr all inspect the expression shape itself (see their
+        // own doc comments) - needed only to disambiguate "contains"/
+        // "remove" between Map, Set, and SortedMap and "set"/"get" between
+        // Map and SortedMap (docs/language/0034-maps-and-sets.md,
+        // docs/language/0040-sorted-maps.md), "push"/"pop"/"peek" between
+        // List, Stack, and PriorityQueue (docs/language/0035-stacks.md,
+        // docs/language/0039-priority-queues.md), and push_front/push_back/
+        // pop_front/pop_back between LinkedList and Deque (see
+        // docs/language/0037-deques.md); every other method name here is
+        // unambiguous by itself.
         const std::optional<bool> setKind = isSetExpr(*methodCall->object, ctx.function, scope);
         const std::optional<bool> stackKind = isStackExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> dequeKind = isDequeExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> priorityQueueKind =
+            isPriorityQueueExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> sortedMapKind =
+            isSortedMapExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> sortedSetKind =
+            isSortedSetExpr(*methodCall->object, ctx.function, scope);
+        const std::optional<bool> bufferKind =
+            isBufferExpr(*methodCall->object, ctx.function, scope);
         const int object = lowerExpr(*methodCall->object, scope, ctx);
 
         if (methodCall->method == "push")
@@ -410,6 +779,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             // requires a real register to bind `x` to. Matches exactly how
             // a unit-returning IrCall already works: LlvmIrEmitter types this
             // register "void" and never calls ref() on it, only typeOf().
+            // priorityQueueKind is checked before stackKind - the first
+            // three-way method-name collision in this codebase (see
+            // docs/language/0039-priority-queues.md).
+            if (priorityQueueKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrPriorityQueuePush>();
+                inst->priorityQueue = object;
+                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
             if (stackKind.value_or(false))
             {
                 auto inst = std::make_unique<IrStackPush>();
@@ -425,6 +804,12 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "pop")
         {
+            if (priorityQueueKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrPriorityQueuePop>();
+                inst->priorityQueue = object;
+                return emit(ctx, std::move(inst));
+            }
             if (stackKind.value_or(false))
             {
                 auto inst = std::make_unique<IrStackPop>();
@@ -438,14 +823,163 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "peek")
         {
-            // Unambiguous - only Stack<T> has peek.
+            // No longer unambiguous now that PriorityQueue<T> also has
+            // peek() (see docs/language/0039-priority-queues.md) -
+            // priorityQueueKind disambiguates, mirroring push/pop above.
+            if (priorityQueueKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrPriorityQueuePeek>();
+                inst->priorityQueue = object;
+                return emit(ctx, std::move(inst));
+            }
             auto inst = std::make_unique<IrStackPeek>();
             inst->stack = object;
             return emit(ctx, std::move(inst));
         }
 
+        // push_front/push_back/pop_front/pop_back are shared between
+        // LinkedList<T> (docs/language/0036-linked-lists.md) and Deque<T>
+        // (docs/language/0037-deques.md) - dequeKind (computed above)
+        // disambiguates, mirroring stackKind's own List-vs-Stack dispatch.
+        if (methodCall->method == "push_front")
+        {
+            if (dequeKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrDequePushFront>();
+                inst->deque = object;
+                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrLinkedListPushFront>();
+            inst->list = object;
+            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "push_back")
+        {
+            if (dequeKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrDequePushBack>();
+                inst->deque = object;
+                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrLinkedListPushBack>();
+            inst->list = object;
+            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "pop_front")
+        {
+            if (dequeKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrDequePopFront>();
+                inst->deque = object;
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrLinkedListPopFront>();
+            inst->list = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "pop_back")
+        {
+            if (dequeKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrDequePopBack>();
+                inst->deque = object;
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrLinkedListPopBack>();
+            inst->list = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        // "enqueue"/"dequeue" (see docs/language/0038-queues.md) are
+        // brand-new method names nothing else in the language uses - unlike
+        // "push_front"/"push_back"/"pop_front"/"pop_back" above, no
+        // disambiguation resolver is needed at all.
+        if (methodCall->method == "enqueue")
+        {
+            auto inst = std::make_unique<IrQueueEnqueue>();
+            inst->queue = object;
+            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "dequeue")
+        {
+            auto inst = std::make_unique<IrQueueDequeue>();
+            inst->queue = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        // "append" is shared between String (docs/language/0042-string.md)
+        // and Buffer (docs/language/0043-buffer.md) - bufferKind
+        // disambiguates. "append_line"/"clear"/"reserve"/"finish" are all
+        // brand-new method names nothing else in the language uses - like
+        // "enqueue"/"dequeue" before them, no disambiguation resolver is
+        // needed for those.
+        if (methodCall->method == "append")
+        {
+            if (bufferKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrBufferAppend>();
+                inst->buffer = object;
+                inst->text = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
+            auto inst = std::make_unique<IrStringAppend>();
+            inst->string = object;
+            inst->other = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "append_line")
+        {
+            auto inst = std::make_unique<IrBufferAppendLine>();
+            inst->buffer = object;
+            inst->text = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "clear")
+        {
+            auto inst = std::make_unique<IrBufferClear>();
+            inst->buffer = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "reserve")
+        {
+            auto inst = std::make_unique<IrBufferReserve>();
+            inst->buffer = object;
+            inst->capacity = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "finish")
+        {
+            auto inst = std::make_unique<IrBufferFinish>();
+            inst->buffer = object;
+            return emit(ctx, std::move(inst));
+        }
+
         if (methodCall->method == "set")
         {
+            // sortedMapKind is checked first - SortedMap<K,V> and Map<K,V>
+            // are the only two candidates for "set" (Set<T> has no "set"),
+            // see docs/language/0040-sorted-maps.md.
+            if (sortedMapKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSortedMapSet>();
+                inst->sortedMap = object;
+                inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
+                inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
             auto inst = std::make_unique<IrMapSet>();
             inst->map = object;
             inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
@@ -455,6 +989,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "get")
         {
+            if (sortedMapKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSortedMapGet>();
+                inst->sortedMap = object;
+                inst->key = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
             auto inst = std::make_unique<IrMapGet>();
             inst->map = object;
             inst->key = lowerExpr(*methodCall->arguments.front(), scope, ctx);
@@ -463,6 +1004,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "add")
         {
+            // sortedSetKind is checked first - Set<T> and SortedSet<T> are
+            // the only two candidates for "add" (Map<K,V>/SortedMap<K,V>
+            // have no "add"), see docs/language/0041-sorted-sets.md.
+            if (sortedSetKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSortedSetAdd>();
+                inst->sortedSet = object;
+                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                return emit(ctx, std::move(inst));
+            }
             auto inst = std::make_unique<IrSetAdd>();
             inst->set = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
@@ -471,7 +1022,25 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "contains")
         {
+            // Four-way now - sortedSetKind is checked before sortedMapKind
+            // and setKind, mirroring push/pop/peek's own priorityQueueKind-
+            // before-stackKind ordering (see
+            // docs/language/0039-priority-queues.md's identical framing).
             const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            if (sortedSetKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSortedSetContains>();
+                inst->sortedSet = object;
+                inst->value = argument;
+                return emit(ctx, std::move(inst));
+            }
+            if (sortedMapKind.value_or(false))
+            {
+                auto inst = std::make_unique<IrSortedMapContains>();
+                inst->sortedMap = object;
+                inst->key = argument;
+                return emit(ctx, std::move(inst));
+            }
             if (setKind.value_or(false))
             {
                 auto inst = std::make_unique<IrSetContains>();
@@ -488,6 +1057,20 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         // TypeChecker already rejected anything but push/pop/set/get/
         // add/contains/remove here.
         const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+        if (sortedSetKind.value_or(false))
+        {
+            auto inst = std::make_unique<IrSortedSetRemove>();
+            inst->sortedSet = object;
+            inst->value = argument;
+            return emit(ctx, std::move(inst));
+        }
+        if (sortedMapKind.value_or(false))
+        {
+            auto inst = std::make_unique<IrSortedMapRemove>();
+            inst->sortedMap = object;
+            inst->key = argument;
+            return emit(ctx, std::move(inst));
+        }
         if (setKind.value_or(false))
         {
             auto inst = std::make_unique<IrSetRemove>();
@@ -553,6 +1136,34 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrLinkedListNew>();
+        inst->elementTypeName = linkedListNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrDequeNew>();
+        inst->elementTypeName = dequeNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrQueueNew>();
+        inst->elementTypeName = queueNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* priorityQueueNew = dynamic_cast<const PriorityQueueNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrPriorityQueueNew>();
+        inst->elementTypeName = priorityQueueNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
     if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
     {
         auto inst = std::make_unique<IrMapNew>();
@@ -565,6 +1176,34 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
     {
         auto inst = std::make_unique<IrSetNew>();
         inst->elementTypeName = setNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* sortedMapNew = dynamic_cast<const SortedMapNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrSortedMapNew>();
+        inst->keyTypeName = sortedMapNew->keyType;
+        inst->valueTypeName = sortedMapNew->valueType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* sortedSetNew = dynamic_cast<const SortedSetNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrSortedSetNew>();
+        inst->elementTypeName = sortedSetNew->elementType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrStringNew>();
+        inst->text = lowerExpr(*stringNew->text, scope, ctx);
+        return emit(ctx, std::move(inst));
+    }
+
+    if (dynamic_cast<const BufferNewExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrBufferNew>();
         return emit(ctx, std::move(inst));
     }
 
@@ -699,6 +1338,37 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         if (const auto isStack = isStackExpr(*assignment->value, ctx.function, scope))
         {
             scope.defineIsStack(assignment->name, *isStack);
+        }
+        // Same reasoning again, for LinkedList-vs-Deque (see isDequeExpr and
+        // docs/language/0037-deques.md).
+        if (const auto isDeque = isDequeExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsDeque(assignment->name, *isDeque);
+        }
+        // Same reasoning again, for List/Stack-vs-PriorityQueue (see
+        // isPriorityQueueExpr and docs/language/0039-priority-queues.md).
+        if (const auto isPriorityQueue =
+                isPriorityQueueExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsPriorityQueue(assignment->name, *isPriorityQueue);
+        }
+        // Same reasoning again, for Map/Set-vs-SortedMap (see
+        // isSortedMapExpr and docs/language/0040-sorted-maps.md).
+        if (const auto isSortedMap = isSortedMapExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsSortedMap(assignment->name, *isSortedMap);
+        }
+        // Same reasoning again, for Set/Map/SortedMap-vs-SortedSet (see
+        // isSortedSetExpr and docs/language/0041-sorted-sets.md).
+        if (const auto isSortedSet = isSortedSetExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsSortedSet(assignment->name, *isSortedSet);
+        }
+        // Same reasoning again, for String-vs-Buffer (see isBufferExpr and
+        // docs/language/0043-buffer.md).
+        if (const auto isBuffer = isBufferExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineIsBuffer(assignment->name, *isBuffer);
         }
         return;
     }

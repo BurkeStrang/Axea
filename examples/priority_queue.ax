@@ -1,0 +1,32 @@
+build() -> PriorityQueue<i32>
+{
+    jobs = PriorityQueue<i32>()
+    jobs.push(30)
+    jobs.push(10)
+    jobs.push(20)
+    return jobs
+}
+
+pushOne(jobs: PriorityQueue<i32>)
+{
+    jobs.push(5)
+}
+
+drain(jobs: PriorityQueue<i32>) -> i32
+{
+    total = 0
+    while jobs.length > 0
+    {
+        total = total + jobs.pop()
+    }
+    return total
+}
+
+jobs = build()
+lengthAfterBuild = jobs.length
+smallest = jobs.peek()
+called = pushOne(jobs)
+lengthAfterPush = jobs.length
+smallestAfterPush = jobs.peek()
+total = drain(jobs)
+lengthAfterDrain = jobs.length

@@ -73,15 +73,23 @@ std::string Parser::parseTypeName()
 
     // "slice<elem>" (docs/language/0032-slices.md) / "List<elem>"
     // (docs/language/0033-lists.md) / "Set<elem>" (docs/language/0034-maps-and-sets.md)
-    // / "Stack<elem>" (docs/language/0035-stacks.md) - all reuse the existing
-    // Less/Greater tokens (no lexer changes needed: '<'/'>' only mean this
-    // here because we're in type position, never expression position).
+    // / "Stack<elem>" (docs/language/0035-stacks.md) / "LinkedList<elem>"
+    // (docs/language/0036-linked-lists.md) / "Deque<elem>"
+    // (docs/language/0037-deques.md) / "Queue<elem>" (docs/language/0038-queues.md)
+    // / "PriorityQueue<elem>" (docs/language/0039-priority-queues.md) /
+    // "SortedSet<elem>" (docs/language/0041-sorted-sets.md)
+    // - all reuse the existing Less/Greater tokens (no lexer changes needed:
+    // '<'/'>' only mean this here because we're in type position, never
+    // expression position).
     if ((name.text == "slice" || name.text == "List" || name.text == "Set" ||
-         name.text == "Stack") &&
+         name.text == "Stack" || name.text == "LinkedList" || name.text == "Deque" ||
+         name.text == "Queue" || name.text == "PriorityQueue" || name.text == "SortedSet") &&
         match(TokenKind::Less))
     {
         const std::string elementType = parseTypeName();
-        expect(TokenKind::Greater, "expected '>' after slice/List/Set/Stack element type");
+        expect(TokenKind::Greater,
+               "expected '>' after slice/List/Set/Stack/LinkedList/Deque/Queue/PriorityQueue/"
+               "SortedSet element type");
         return name.text + "<" + elementType + ">";
     }
 
@@ -95,6 +103,17 @@ std::string Parser::parseTypeName()
         const std::string valueType = parseTypeName();
         expect(TokenKind::Greater, "expected '>' after Map value type");
         return "Map<" + keyType + "," + valueType + ">";
+    }
+
+    // "SortedMap<key,value>" - same two-type-argument shape as Map<K,V>
+    // above (see docs/language/0040-sorted-maps.md).
+    if (name.text == "SortedMap" && match(TokenKind::Less))
+    {
+        const std::string keyType = parseTypeName();
+        expect(TokenKind::Comma, "expected ',' between SortedMap key and value types");
+        const std::string valueType = parseTypeName();
+        expect(TokenKind::Greater, "expected '>' after SortedMap value type");
+        return "SortedMap<" + keyType + "," + valueType + ">";
     }
 
     return name.text;
@@ -620,6 +639,78 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
     return expr;
 }
 
+std::int32_t Parser::decodeCharLiteral(const std::string& bytes)
+{
+    if (bytes.empty())
+    {
+        throw std::runtime_error("empty char literal");
+    }
+
+    const auto byteAt = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
+    const auto isContinuation = [&](std::size_t i)
+    { return i < bytes.size() && (byteAt(i) & 0xC0) == 0x80; };
+
+    const unsigned char lead = byteAt(0);
+    std::size_t length = 0;
+    std::int32_t codepoint = 0;
+    std::int32_t minCodepoint = 0; // rejects overlong encodings
+
+    if ((lead & 0x80) == 0x00)
+    {
+        length = 1;
+        codepoint = lead;
+        minCodepoint = 0;
+    }
+    else if ((lead & 0xE0) == 0xC0)
+    {
+        length = 2;
+        codepoint = lead & 0x1F;
+        minCodepoint = 0x80;
+    }
+    else if ((lead & 0xF0) == 0xE0)
+    {
+        length = 3;
+        codepoint = lead & 0x0F;
+        minCodepoint = 0x800;
+    }
+    else if ((lead & 0xF8) == 0xF0)
+    {
+        length = 4;
+        codepoint = lead & 0x07;
+        minCodepoint = 0x10000;
+    }
+    else
+    {
+        throw std::runtime_error("invalid char literal - malformed UTF-8");
+    }
+
+    if (bytes.size() != length)
+    {
+        throw std::runtime_error("char literal must contain exactly one character, found " +
+                                 std::to_string(bytes.size()) + " byte(s)");
+    }
+
+    for (std::size_t i = 1; i < length; ++i)
+    {
+        if (!isContinuation(i))
+        {
+            throw std::runtime_error("invalid char literal - malformed UTF-8");
+        }
+        codepoint = (codepoint << 6) | (byteAt(i) & 0x3F);
+    }
+
+    if (codepoint < minCodepoint)
+    {
+        throw std::runtime_error("invalid char literal - overlong UTF-8 encoding");
+    }
+    if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF))
+    {
+        throw std::runtime_error("invalid char literal - not a valid Unicode scalar value");
+    }
+
+    return codepoint;
+}
+
 std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
 {
     if (match(TokenKind::LeftParen))
@@ -639,6 +730,13 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     {
         const auto token = advance();
         return std::make_unique<StringExpr>(token.text.substr(1, token.text.size() - 2));
+    }
+
+    if (current().kind == TokenKind::Char)
+    {
+        const auto token = advance();
+        return std::make_unique<CharExpr>(
+            decodeCharLiteral(token.text.substr(1, token.text.size() - 2)));
     }
 
     if (match(TokenKind::True))
@@ -735,6 +833,113 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<StackNewExpr>(elementType);
         }
 
+        // `LinkedList<elem>()` construction - same trick as List<elem>()
+        // above (see docs/language/0036-linked-lists.md).
+        if (current().text == "LinkedList" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'LinkedList'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after LinkedList element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'LinkedList<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - LinkedList<elem>() takes no arguments this phase");
+            return std::make_unique<LinkedListNewExpr>(elementType);
+        }
+
+        // `Deque<elem>()` construction - same trick as List<elem>() above
+        // (see docs/language/0037-deques.md).
+        if (current().text == "Deque" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'Deque'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after Deque element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'Deque<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - Deque<elem>() takes no arguments this phase");
+            return std::make_unique<DequeNewExpr>(elementType);
+        }
+
+        // `Queue<elem>()` construction - same trick as List<elem>() above
+        // (see docs/language/0038-queues.md).
+        if (current().text == "Queue" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'Queue'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after Queue element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'Queue<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - Queue<elem>() takes no arguments this phase");
+            return std::make_unique<QueueNewExpr>(elementType);
+        }
+
+        // `PriorityQueue<elem>()` construction - same trick as List<elem>()
+        // above (see docs/language/0039-priority-queues.md). The parser
+        // accepts any element type syntactically here (mirrors
+        // MapNewExpr/SetNewExpr's own "parser stays general" convention) -
+        // only TypeChecker enforces i32-only, with a clear error, rather
+        // than the parser silently discarding what was actually written.
+        if (current().text == "PriorityQueue" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'PriorityQueue'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after PriorityQueue element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'PriorityQueue<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - PriorityQueue<elem>() takes no arguments this phase");
+            return std::make_unique<PriorityQueueNewExpr>(elementType);
+        }
+
+        // `SortedSet<elem>()` construction - same trick as Set<elem>()
+        // above (see docs/language/0041-sorted-sets.md).
+        if (current().text == "SortedSet" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'SortedSet'");
+            const std::string elementType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after SortedSet element type");
+            expect(TokenKind::LeftParen, "expected '(' after 'SortedSet<elem>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - SortedSet<elem>() takes no arguments this phase");
+            return std::make_unique<SortedSetNewExpr>(elementType);
+        }
+
+        // `String(text)` construction - unlike every collection above,
+        // takes one runtime *value* argument, not a type parameter (see
+        // docs/language/0042-string.md) - so this is a plain identifier-
+        // then-'(' call shape, special-cased only to validate the
+        // exactly-one-argument arity at parse time (matching every
+        // collection constructor's own arity-checked-here convention)
+        // rather than deferring that to TypeChecker.
+        if (current().text == "String" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'String'");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after String(...) argument");
+            if (args.size() != 1)
+            {
+                throw std::runtime_error("String(...) expects exactly 1 argument, got " +
+                                         std::to_string(args.size()));
+            }
+            return std::make_unique<StringNewExpr>(std::move(args.front()));
+        }
+
+        // `Buffer()` construction - always empty parens, like every
+        // collection's own zero-argument constructor (see
+        // docs/language/0043-buffer.md), despite Buffer not being generic
+        // (no `<...>` parameter to parse, unlike List<elem>() etc).
+        if (current().text == "Buffer" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'Buffer'");
+            expect(TokenKind::RightParen, "expected ')' - Buffer() takes no arguments");
+            return std::make_unique<BufferNewExpr>();
+        }
+
         // `Map<key,value>()` construction - the one two-type-argument
         // constructor here (mirrors parseTypeName's own Map<key,value> shape).
         if (current().text == "Map" && peek().kind == TokenKind::Less)
@@ -749,6 +954,23 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             expect(TokenKind::RightParen,
                    "expected ')' - Map<key,value>() takes no arguments this phase");
             return std::make_unique<MapNewExpr>(keyType, valueType);
+        }
+
+        // `SortedMap<key,value>()` construction - same two-type-argument
+        // shape as Map<key,value>() above (see
+        // docs/language/0040-sorted-maps.md).
+        if (current().text == "SortedMap" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'SortedMap'");
+            const std::string keyType = parseTypeName();
+            expect(TokenKind::Comma, "expected ',' between SortedMap key and value types");
+            const std::string valueType = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after SortedMap value type");
+            expect(TokenKind::LeftParen, "expected '(' after 'SortedMap<key,value>'");
+            expect(TokenKind::RightParen,
+                   "expected ')' - SortedMap<key,value>() takes no arguments this phase");
+            return std::make_unique<SortedMapNewExpr>(keyType, valueType);
         }
 
         if (peek().kind == TokenKind::LeftParen)

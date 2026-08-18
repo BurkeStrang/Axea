@@ -1,0 +1,33 @@
+build() -> SortedSet<i32>
+{
+    ids = SortedSet<i32>()
+    ids.add(93)
+    ids.add(87)
+    ids.add(98)
+    return ids
+}
+
+addOne(ids: SortedSet<i32>)
+{
+    ids.add(87)
+}
+
+drain(ids: SortedSet<i32>) -> i32
+{
+    total = 0
+    total = total + 87
+    ids.remove(87)
+    total = total + 93
+    ids.remove(93)
+    total = total + 98
+    ids.remove(98)
+    return total
+}
+
+ids = build()
+lengthAfterBuild = ids.length
+hasEighty = ids.contains(87)
+called = addOne(ids)
+lengthAfterDuplicateAdd = ids.length
+total = drain(ids)
+lengthAfterDrain = ids.length

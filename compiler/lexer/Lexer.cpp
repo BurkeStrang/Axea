@@ -114,6 +114,11 @@ Token Lexer::nextToken()
         return lexString();
     }
 
+    if (c == '\'')
+    {
+        return lexChar();
+    }
+
     advance();
 
     switch (c)
@@ -261,6 +266,35 @@ Token Lexer::lexString()
     {
         advance();
         return makeToken(TokenKind::String, start, startLine, startColumn);
+    }
+
+    return makeToken(TokenKind::Invalid, start, startLine, startColumn);
+}
+
+// Scans raw bytes between the opening/closing `'`, exactly like lexString
+// scans between `"` - safe for a multi-byte UTF-8 sequence ('é', '🚀')
+// even though this only looks at ASCII bytes, since a UTF-8 continuation
+// byte (0x80-0xBF) can never equal the ASCII `'` (0x27) this loop is
+// looking for. No escape sequences (matches lexString's own "no escapes
+// at all" simplification) - decoding the captured bytes into a single
+// Unicode scalar value happens later, in the parser (see
+// docs/language/0044-char.md).
+Token Lexer::lexChar()
+{
+    const auto start = index_;
+    const auto startLine = line_;
+    const auto startColumn = column_;
+
+    advance(); // opening quote
+    while (!atEnd() && current() != '\'')
+    {
+        advance();
+    }
+
+    if (current() == '\'')
+    {
+        advance();
+        return makeToken(TokenKind::Char, start, startLine, startColumn);
     }
 
     return makeToken(TokenKind::Invalid, start, startLine, startColumn);

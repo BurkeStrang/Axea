@@ -246,6 +246,128 @@ TEST("CapabilityChecker infers read for a Stack<T> parameter that is only peeked
     EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
 }
 
+TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is push_front'd")
+{
+    const auto capabilities = capabilitiesOf("pushOne(s: LinkedList<i32>) { s.push_front(1) } "
+                                             "a = LinkedList<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is push_back'd")
+{
+    const auto capabilities = capabilitiesOf("pushOne(s: LinkedList<i32>) { s.push_back(1) } "
+                                             "a = LinkedList<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is pop_front'd")
+{
+    const auto capabilities =
+        capabilitiesOf("popOne(s: LinkedList<i32>) -> i32 { return s.pop_front() } "
+                       "a = LinkedList<i32>() "
+                       "called = a.push_front(1) "
+                       "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is pop_back'd")
+{
+    const auto capabilities =
+        capabilitiesOf("popOne(s: LinkedList<i32>) -> i32 { return s.pop_back() } "
+                       "a = LinkedList<i32>() "
+                       "called = a.push_front(1) "
+                       "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Deque<T> parameter that is push_back'd")
+{
+    const auto capabilities = capabilitiesOf("pushOne(d: Deque<i32>) { d.push_back(1) } "
+                                             "a = Deque<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Deque<T> parameter that is pop_front'd")
+{
+    const auto capabilities =
+        capabilitiesOf("popOne(d: Deque<i32>) -> i32 { return d.pop_front() } "
+                       "a = Deque<i32>() "
+                       "called = a.push_back(1) "
+                       "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Deque<T> parameter whose element is index-assigned")
+{
+    // Regression insurance again (see the slice<T> test above) - the same
+    // type-agnostic IndexExpr-walking mechanism applies to Deque<T> too,
+    // with zero Deque-specific CapabilityChecker code (see
+    // docs/language/0037-deques.md).
+    const auto capabilities =
+        capabilitiesOf("bump(d: Deque<i32>) -> i32 { d[0] = 99  return d[0] } "
+                       "a = Deque<i32>() "
+                       "called = a.push_back(1) "
+                       "x = bump(a)");
+    EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a Deque<T> parameter that is only indexed for reading")
+{
+    const auto capabilities = capabilitiesOf("first(d: Deque<i32>) -> i32 { return d[0] } "
+                                             "a = Deque<i32>() "
+                                             "called = a.push_back(1) "
+                                             "x = first(a)");
+    EXPECT_TRUE(capabilities.at("first")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a Queue<T> parameter that is enqueue'd")
+{
+    const auto capabilities = capabilitiesOf("pushOne(q: Queue<i32>) { q.enqueue(1) } "
+                                             "a = Queue<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Queue<T> parameter that is dequeue'd")
+{
+    const auto capabilities = capabilitiesOf("popOne(q: Queue<i32>) -> i32 { return q.dequeue() } "
+                                             "a = Queue<i32>() "
+                                             "called = a.enqueue(1) "
+                                             "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a PriorityQueue<T> parameter that is pushed to")
+{
+    const auto capabilities = capabilitiesOf("pushOne(q: PriorityQueue<i32>) { q.push(1) } "
+                                             "a = PriorityQueue<i32>() "
+                                             "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a PriorityQueue<T> parameter that is popped")
+{
+    const auto capabilities =
+        capabilitiesOf("popOne(q: PriorityQueue<i32>) -> i32 { return q.pop() } "
+                       "a = PriorityQueue<i32>() "
+                       "called = a.push(1) "
+                       "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a PriorityQueue<T> parameter that is only peeked")
+{
+    const auto capabilities =
+        capabilitiesOf("peekOne(q: PriorityQueue<i32>) -> i32 { return q.peek() } "
+                       "a = PriorityQueue<i32>() "
+                       "called = a.push(1) "
+                       "x = peekOne(a)");
+    EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
+}
+
 TEST("CapabilityChecker infers write for a Map<i32,i32> parameter that is 'set'")
 {
     const auto capabilities = capabilitiesOf("put(m: Map<i32,i32>) { m.set(1, 2) } "
@@ -287,4 +409,132 @@ TEST("CapabilityChecker infers read for a Set<i32> parameter that is only 'conta
                                              "called = a.add(1) "
                                              "x = peek(a)");
     EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a SortedMap<i32,i32> parameter that is 'set'")
+{
+    const auto capabilities = capabilitiesOf("put(m: SortedMap<i32,i32>) { m.set(1, 2) } "
+                                             "a = SortedMap<i32,i32>() "
+                                             "called = put(a)");
+    EXPECT_TRUE(capabilities.at("put")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a SortedMap<i32,i32> parameter that is 'remove'd")
+{
+    const auto capabilities = capabilitiesOf("drop(m: SortedMap<i32,i32>) { m.remove(1) } "
+                                             "a = SortedMap<i32,i32>() "
+                                             "called = drop(a)");
+    EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a SortedMap<i32,i32> parameter that is only "
+     "'get'/'contains'")
+{
+    const auto capabilities =
+        capabilitiesOf("peek(m: SortedMap<i32,i32>) -> bool { return m.contains(1) } "
+                       "a = SortedMap<i32,i32>() "
+                       "called = a.set(1, 2) "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a SortedSet<i32> parameter that is 'add'ed to")
+{
+    const auto capabilities = capabilitiesOf("addOne(s: SortedSet<i32>) { s.add(1) } "
+                                             "a = SortedSet<i32>() "
+                                             "called = addOne(a)");
+    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a SortedSet<i32> parameter that is 'remove'd")
+{
+    const auto capabilities = capabilitiesOf("drop(s: SortedSet<i32>) { s.remove(1) } "
+                                             "a = SortedSet<i32>() "
+                                             "called = drop(a)");
+    EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a SortedSet<i32> parameter that is only 'contains'")
+{
+    const auto capabilities =
+        capabilitiesOf("peek(s: SortedSet<i32>) -> bool { return s.contains(1) } "
+                       "a = SortedSet<i32>() "
+                       "called = a.add(1) "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a String parameter that is 'append'ed to")
+{
+    const auto capabilities = capabilitiesOf("addOne(s: String) { s.append(\"x\") } "
+                                             "a = String(\"a\") "
+                                             "called = addOne(a)");
+    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a String parameter that is only read via .length")
+{
+    const auto capabilities = capabilitiesOf("peek(s: String) -> i32 { return s.length } "
+                                             "a = String(\"a\") "
+                                             "called = a.append(\"b\") "
+                                             "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a Buffer parameter that is 'append'ed to")
+{
+    const auto capabilities = capabilitiesOf("addOne(b: Buffer) { b.append(\"x\") } "
+                                             "a = Buffer() "
+                                             "called = addOne(a)");
+    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Buffer parameter that is 'append_line'd to")
+{
+    const auto capabilities = capabilitiesOf("addLine(b: Buffer) { b.append_line(\"x\") } "
+                                             "a = Buffer() "
+                                             "called = addLine(a)");
+    EXPECT_TRUE(capabilities.at("addLine")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Buffer parameter that is 'clear'ed")
+{
+    const auto capabilities = capabilitiesOf("wipe(b: Buffer) { b.clear() } "
+                                             "a = Buffer() "
+                                             "called = wipe(a)");
+    EXPECT_TRUE(capabilities.at("wipe")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Buffer parameter that is 'reserve'd")
+{
+    const auto capabilities = capabilitiesOf("grow(b: Buffer) { b.reserve(8) } "
+                                             "a = Buffer() "
+                                             "called = grow(a)");
+    EXPECT_TRUE(capabilities.at("grow")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Buffer parameter that is 'finish'ed")
+{
+    const auto capabilities = capabilitiesOf("done(b: Buffer) -> String { return b.finish() } "
+                                             "a = Buffer() "
+                                             "s = done(a)");
+    EXPECT_TRUE(capabilities.at("done")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a Buffer parameter that is only read via .length/.capacity")
+{
+    const auto capabilities =
+        capabilitiesOf("peek(b: Buffer) -> i32 { return b.length + b.capacity } "
+                       "a = Buffer() "
+                       "called = a.append(\"b\") "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for a char parameter - a plain value with no mutating "
+     "methods, same default every scalar type already gets")
+{
+    const auto capabilities = capabilitiesOf("identity(c: char) -> char { return c } "
+                                             "x = identity('A')");
+    EXPECT_TRUE(capabilities.at("identity")[0] == Capability::Read);
 }

@@ -1,0 +1,32 @@
+build() -> Queue<i32>
+{
+    jobs = Queue<i32>()
+    jobs.enqueue(10)
+    jobs.enqueue(20)
+    jobs.enqueue(30)
+    return jobs
+}
+
+enqueueOne(jobs: Queue<i32>)
+{
+    jobs.enqueue(99)
+}
+
+drain(jobs: Queue<i32>) -> i32
+{
+    total = 0
+    while jobs.length > 0
+    {
+        total = total + jobs.dequeue()
+    }
+    return total
+}
+
+jobs = build()
+lengthAfterBuild = jobs.length
+first = jobs.dequeue()
+lengthAfterDequeue = jobs.length
+called = enqueueOne(jobs)
+lengthAfterEnqueue = jobs.length
+total = drain(jobs)
+lengthAfterDrain = jobs.length

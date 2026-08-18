@@ -1,0 +1,24 @@
+build() -> String
+{
+    name = String("Axea")
+    name.append(" Language")
+    return name
+}
+
+appendOne(name: String)
+{
+    name.append("!")
+}
+
+useStr(s: str) -> i32
+{
+    return 1
+}
+
+name = build()
+lengthAfterBuild = name.length
+called = appendOne(name)
+lengthAfterAppend = name.length
+viaStr = useStr(name)
+other = String(name)
+otherLength = other.length

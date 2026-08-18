@@ -392,6 +392,211 @@ TEST("TypeChecker rejects Stack<T> as a struct field type")
     EXPECT_THROWS(check("struct Wrapper { items: Stack<i32> }"));
 }
 
+TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a LinkedList<T>")
+{
+    check("f() -> i32 { "
+          "  s = LinkedList<i32>() "
+          "  s.push_front(4) "
+          "  s.push_back(5) "
+          "  front = s.pop_front() "
+          "  back = s.pop_back() "
+          "  return front + back + s.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects 'push_front' with the wrong element type on a LinkedList<T>")
+{
+    EXPECT_THROWS(check("f() { s = LinkedList<i32>()  s.push_front(true) }"));
+}
+
+TEST("TypeChecker rejects 'pop_back' with arguments")
+{
+    EXPECT_THROWS(check("f() -> i32 { s = LinkedList<i32>()  return s.pop_back(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a LinkedList<T>")
+{
+    EXPECT_THROWS(check("f() { s = LinkedList<i32>()  s.size() }"));
+}
+
+TEST("TypeChecker accepts LinkedList<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> LinkedList<i32> { "
+          "  x: LinkedList<i32> = LinkedList<i32>() "
+          "  return x "
+          "} "
+          "use(s: LinkedList<i32>) -> i32 { return s.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects LinkedList<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: LinkedList<i32> }"));
+}
+
+TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/[i] on a Deque<T>")
+{
+    check("f() -> i32 { "
+          "  d = Deque<i32>() "
+          "  d.push_front(4) "
+          "  d.push_back(5) "
+          "  front = d.pop_front() "
+          "  back = d.pop_back() "
+          "  d.push_back(9) "
+          "  mid = d[0] "
+          "  return front + back + mid + d.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts index-assignment into a Deque<T>")
+{
+    check("f() { d = Deque<i32>()  d.push_back(1)  d[0] = 99 }");
+}
+
+TEST("TypeChecker rejects a non-i32 index into a Deque<T>")
+{
+    EXPECT_THROWS(check("f() -> i32 { d = Deque<i32>()  d.push_back(1)  return d[true] }"));
+}
+
+TEST("TypeChecker rejects 'push_front' with the wrong element type on a Deque<T>")
+{
+    EXPECT_THROWS(check("f() { d = Deque<i32>()  d.push_front(true) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a Deque<T>")
+{
+    EXPECT_THROWS(check("f() { d = Deque<i32>()  d.size() }"));
+}
+
+TEST("TypeChecker accepts Deque<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> Deque<i32> { "
+          "  x: Deque<i32> = Deque<i32>() "
+          "  return x "
+          "} "
+          "use(d: Deque<i32>) -> i32 { return d.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects Deque<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: Deque<i32> }"));
+}
+
+TEST("TypeChecker accepts enqueue/dequeue/.length on a Queue<T>")
+{
+    check("f() -> i32 { "
+          "  q = Queue<i32>() "
+          "  q.enqueue(4) "
+          "  q.enqueue(5) "
+          "  first = q.dequeue() "
+          "  return first + q.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects indexing into a Queue<T> - deliberately not indexable, unlike Deque<T> "
+     "(communicate intent, see docs/language/0038-queues.md)")
+{
+    EXPECT_THROWS(check("f() -> i32 { q = Queue<i32>()  q.enqueue(1)  return q[0] }"));
+}
+
+TEST("TypeChecker rejects 'enqueue' with the wrong element type on a Queue<T>")
+{
+    EXPECT_THROWS(check("f() { q = Queue<i32>()  q.enqueue(true) }"));
+}
+
+TEST("TypeChecker rejects 'dequeue' with arguments")
+{
+    EXPECT_THROWS(check("f() -> i32 { q = Queue<i32>()  return q.dequeue(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a Queue<T>")
+{
+    EXPECT_THROWS(check("f() { q = Queue<i32>()  q.size() }"));
+}
+
+TEST("TypeChecker accepts Queue<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> Queue<i32> { "
+          "  x: Queue<i32> = Queue<i32>() "
+          "  return x "
+          "} "
+          "use(q: Queue<i32>) -> i32 { return q.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects Queue<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: Queue<i32> }"));
+}
+
+TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<T>")
+{
+    check("f() -> i32 { "
+          "  q = PriorityQueue<i32>() "
+          "  q.push(4) "
+          "  q.push(5) "
+          "  top = q.peek() "
+          "  smallest = q.pop() "
+          "  return top + smallest + q.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects 'push' with the wrong element type on a PriorityQueue<T>")
+{
+    EXPECT_THROWS(check("f() { q = PriorityQueue<i32>()  q.push(true) }"));
+}
+
+TEST("TypeChecker rejects 'peek' with arguments on a PriorityQueue<T>")
+{
+    EXPECT_THROWS(check("f() -> i32 { q = PriorityQueue<i32>()  return q.peek(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a PriorityQueue<T>")
+{
+    EXPECT_THROWS(check("f() { q = PriorityQueue<i32>()  q.size() }"));
+}
+
+TEST("TypeChecker rejects indexing into a PriorityQueue<T> - deliberately not indexable "
+     "(communicate intent, see docs/language/0039-priority-queues.md)")
+{
+    EXPECT_THROWS(check("f() -> i32 { q = PriorityQueue<i32>()  q.push(1)  return q[0] }"));
+}
+
+TEST("TypeChecker accepts PriorityQueue<T> as a parameter, return type, and local declared type")
+{
+    check("build() -> PriorityQueue<i32> { "
+          "  x: PriorityQueue<i32> = PriorityQueue<i32>() "
+          "  return x "
+          "} "
+          "use(q: PriorityQueue<i32>) -> i32 { return q.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects PriorityQueue<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: PriorityQueue<i32> }"));
+}
+
+TEST("TypeChecker rejects a non-i32 element type on a PriorityQueue<T> - no other type is "
+     "comparable yet (see docs/language/0039-priority-queues.md)")
+{
+    EXPECT_THROWS(check("q = PriorityQueue<bool>()"));
+}
+
+TEST("TypeChecker rejects a non-i32 element type on a PriorityQueue<T> parameter")
+{
+    EXPECT_THROWS(check("f(q: PriorityQueue<bool>) {}"));
+}
+
 TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
 {
     check("f() -> i32 { "
@@ -520,4 +725,332 @@ TEST("TypeChecker rejects Map<K,V>/Set<T> as a struct field type")
 {
     EXPECT_THROWS(check("struct Wrapper { entries: Map<i32,i32> }"));
     EXPECT_THROWS(check("struct Wrapper { items: Set<i32> }"));
+}
+
+TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<i32,i32>")
+{
+    check("f() -> i32 { "
+          "  m = SortedMap<i32,i32>() "
+          "  m.set(1, 100) "
+          "  m.set(2, 200) "
+          "  before = m.contains(2) "
+          "  m.remove(2) "
+          "  after = m.contains(2) "
+          "  removedDelta = if before { 10 } else { 0 } "
+          "  keptDelta = if after { 1 } else { 0 } "
+          "  return m.get(1) + m.length * 1000 + removedDelta + keptDelta "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects a non-i32 key type on SortedMap<K,V> - no other type is comparable "
+     "yet (see docs/language/0040-sorted-maps.md)")
+{
+    EXPECT_THROWS(check("m = SortedMap<bool,i32>()"));
+    EXPECT_THROWS(check("m = SortedMap<str,i32>()"));
+}
+
+TEST("TypeChecker accepts arbitrary V (struct, array, List) on a SortedMap<i32,V> - only K is "
+     "restricted to i32, V has no such requirement, mirroring Map<K,V>'s own V")
+{
+    check("struct Point { x: i32 } "
+          "f() { "
+          "  m = SortedMap<i32,Point>() "
+          "  m.set(1, Point { x: 1 }) "
+          "  l = SortedMap<i32,List<i32>>() "
+          "  l.set(1, List<i32>()) "
+          "}");
+}
+
+TEST("TypeChecker's SortedMap<K,V>.get() returns V's real resolved type, not always i32")
+{
+    check("struct Point { x: i32 } "
+          "f() -> i32 { "
+          "  m = SortedMap<i32,Point>() "
+          "  m.set(1, Point { x: 42 }) "
+          "  p = m.get(1) "
+          "  return p.x "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects an unknown method on a SortedMap<K,V>")
+{
+    EXPECT_THROWS(check("f() { m = SortedMap<i32,i32>()  m.size() }"));
+}
+
+TEST("TypeChecker rejects indexing into a SortedMap<K,V> - deliberately not indexable, no "
+     "`[key]` syntax or `for`-in iteration this phase (see docs/language/0040-sorted-maps.md)")
+{
+    EXPECT_THROWS(check("f() -> i32 { m = SortedMap<i32,i32>()  return m[0] }"));
+}
+
+TEST("TypeChecker accepts SortedMap<i32,i32> as a parameter, return type, and local declared "
+     "type")
+{
+    check("build() -> SortedMap<i32,i32> { "
+          "  x: SortedMap<i32,i32> = SortedMap<i32,i32>() "
+          "  return x "
+          "} "
+          "use(m: SortedMap<i32,i32>) -> i32 { return m.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects SortedMap<K,V> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { entries: SortedMap<i32,i32> }"));
+}
+
+TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<i32>")
+{
+    check("f() -> i32 { "
+          "  s = SortedSet<i32>() "
+          "  s.add(5) "
+          "  s.add(6) "
+          "  before = s.contains(6) "
+          "  s.remove(6) "
+          "  after = s.contains(6) "
+          "  removedDelta = if before { 10 } else { 0 } "
+          "  keptDelta = if after { 1 } else { 0 } "
+          "  return s.length * 1000 + removedDelta + keptDelta "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects a non-i32 element type on SortedSet<T> - no other type is comparable "
+     "yet (see docs/language/0041-sorted-sets.md)")
+{
+    EXPECT_THROWS(check("s = SortedSet<bool>()"));
+    EXPECT_THROWS(check("s = SortedSet<str>()"));
+}
+
+TEST("TypeChecker rejects an unknown method on a SortedSet<T>")
+{
+    EXPECT_THROWS(check("f() { s = SortedSet<i32>()  s.push(1) }"));
+}
+
+TEST("TypeChecker rejects indexing into a SortedSet<T>")
+{
+    EXPECT_THROWS(check("f() -> i32 { s = SortedSet<i32>()  return s[0] }"));
+}
+
+TEST("TypeChecker accepts SortedSet<i32> as a parameter, return type, and local declared type")
+{
+    check("build() -> SortedSet<i32> { "
+          "  x: SortedSet<i32> = SortedSet<i32>() "
+          "  return x "
+          "} "
+          "use(s: SortedSet<i32>) -> i32 { return s.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects SortedSet<T> as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { items: SortedSet<i32> }"));
+}
+
+TEST("TypeChecker accepts String(text) construction and .append/.length")
+{
+    check("f() -> i32 { "
+          "  s = String(\"Axea\") "
+          "  s.append(\" Language\") "
+          "  return s.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts String(anotherString) - String lends itself as str-coercible too")
+{
+    check("f() { "
+          "  a = String(\"a\") "
+          "  b = String(a) "
+          "}");
+}
+
+TEST("TypeChecker rejects String(...) with a non-str-coercible argument")
+{
+    EXPECT_THROWS(check("x = String(5)"));
+    EXPECT_THROWS(check("x = String(true)"));
+}
+
+TEST("TypeChecker rejects 'append' with a non-str-coercible argument")
+{
+    EXPECT_THROWS(check("f() { s = String(\"a\")  s.append(5) }"));
+}
+
+TEST("TypeChecker rejects an unknown method on a String")
+{
+    EXPECT_THROWS(check("f() { s = String(\"a\")  s.push(\"b\") }"));
+}
+
+TEST("TypeChecker rejects indexing into a String - slicing is deliberately out of scope this "
+     "phase (see docs/language/0042-string.md)")
+{
+    EXPECT_THROWS(check("f() -> i32 { s = String(\"a\")  return s[0] }"));
+}
+
+TEST("TypeChecker accepts a String argument where a str parameter is expected - 'String "
+     "automatically lends a str' (see docs/std/strings/0001-str.md)")
+{
+    check("greet(name: str) -> str { return name } "
+          "s = String(\"Axea\") "
+          "x = greet(s)");
+}
+
+TEST("TypeChecker rejects a str argument where a String parameter is expected - lending only "
+     "goes one direction")
+{
+    EXPECT_THROWS(check("useString(s: String) { called = s.append(\"x\") } "
+                        "x = useString(\"not a String\")"));
+}
+
+TEST("TypeChecker accepts String as a parameter, return type, and local declared type")
+{
+    check("build() -> String { "
+          "  x: String = String(\"a\") "
+          "  return x "
+          "} "
+          "use(s: String) -> i32 { return s.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects String as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { text: String }"));
+}
+
+TEST("TypeChecker accepts Buffer() construction and append/append_line/clear/reserve/finish")
+{
+    check("f() -> String { "
+          "  b = Buffer() "
+          "  b.append(\"Axea\") "
+          "  b.append_line(\" Language\") "
+          "  b.clear() "
+          "  b.reserve(8) "
+          "  return b.finish() "
+          "} "
+          "x = f() "
+          "n = x.length");
+}
+
+TEST("TypeChecker accepts Buffer .length and .capacity as i32 fields")
+{
+    check("f() -> i32 { "
+          "  b = Buffer() "
+          "  return b.length + b.capacity "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects Buffer() with any argument")
+{
+    EXPECT_THROWS(check("x = Buffer(\"a\")"));
+}
+
+TEST("TypeChecker rejects 'append'/'append_line' on a Buffer with a non-str-coercible argument")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.append(5) }"));
+    EXPECT_THROWS(check("f() { b = Buffer()  b.append_line(true) }"));
+}
+
+TEST("TypeChecker rejects 'reserve' on a Buffer with a non-i32 argument")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.reserve(\"oops\") }"));
+}
+
+TEST("TypeChecker rejects 'finish' on a Buffer with any argument")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.finish(1) }"));
+}
+
+TEST("TypeChecker rejects an unknown method/field on a Buffer")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.push(\"x\") }"));
+    EXPECT_THROWS(check("f() -> i32 { b = Buffer()  return b.count }"));
+}
+
+TEST("TypeChecker rejects indexing into a Buffer")
+{
+    EXPECT_THROWS(check("f() -> i32 { b = Buffer()  return b[0] }"));
+}
+
+TEST("TypeChecker distinguishes Buffer.append from String.append despite the shared method name")
+{
+    check("f() { "
+          "  buf = Buffer() "
+          "  buf.append(\"a\") "
+          "  s = String(\"b\") "
+          "  s.append(\"c\") "
+          "}");
+}
+
+TEST("TypeChecker accepts Buffer as a parameter, return type, and local declared type")
+{
+    check("build() -> Buffer { "
+          "  x: Buffer = Buffer() "
+          "  return x "
+          "} "
+          "use(b: Buffer) -> i32 { return b.length } "
+          "n = build() "
+          "y = use(n)");
+}
+
+TEST("TypeChecker rejects Buffer as a struct field type")
+{
+    EXPECT_THROWS(check("struct Wrapper { text: Buffer }"));
+}
+
+TEST("TypeChecker accepts char literals and equality comparison")
+{
+    check("f() -> bool { "
+          "  a = 'A' "
+          "  b = 'B' "
+          "  return a == b "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts char ordering comparisons")
+{
+    check("f() -> bool { "
+          "  a = 'A' "
+          "  b = 'B' "
+          "  lt = a < b "
+          "  le = a <= b "
+          "  gt = a > b "
+          "  ge = a >= b "
+          "  return lt "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects char arithmetic")
+{
+    EXPECT_THROWS(check("x = 'A' + 'B'"));
+    EXPECT_THROWS(check("x = 'A' - 'B'"));
+}
+
+TEST("TypeChecker rejects comparing a char against an i32")
+{
+    EXPECT_THROWS(check("x = 'A' < 5"));
+    EXPECT_THROWS(check("x = 5 == 'A'"));
+}
+
+TEST("TypeChecker rejects an empty or multi-character char literal")
+{
+    EXPECT_THROWS(check("x = ''"));
+    EXPECT_THROWS(check("x = 'ab'"));
+}
+
+TEST("TypeChecker accepts char as a parameter, return type, local declared type, and struct "
+     "field type")
+{
+    check("struct Letter { value: char } "
+          "identity(c: char) -> char { return c } "
+          "x: char = 'A' "
+          "y = identity(x) "
+          "l = Letter { value: 'Z' }");
 }

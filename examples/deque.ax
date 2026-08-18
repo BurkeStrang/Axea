@@ -1,0 +1,45 @@
+build() -> Deque<i32>
+{
+    numbers = Deque<i32>()
+    numbers.push_back(10)
+    numbers.push_back(20)
+    numbers.push_front(5)
+    return numbers
+}
+
+setFirst(numbers: Deque<i32>)
+{
+    numbers[0] = 99
+}
+
+sumWithForIn(numbers: Deque<i32>) -> i32
+{
+    total = 0
+    for value in numbers
+    {
+        total = total + value
+    }
+    return total
+}
+
+drain(numbers: Deque<i32>) -> i32
+{
+    total = 0
+    while numbers.length > 0
+    {
+        total = total + numbers.pop_front()
+    }
+    return total
+}
+
+numbers = build()
+lengthAfterBuild = numbers.length
+middle = numbers[1]
+front = numbers.pop_front()
+back = numbers.pop_back()
+lengthAfterPops = numbers.length
+called = setFirst(numbers)
+afterSetFirst = numbers[0]
+forSum = sumWithForIn(numbers)
+total = drain(numbers)
+lengthAfterDrain = numbers.length

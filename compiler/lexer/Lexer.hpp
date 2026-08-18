@@ -23,6 +23,7 @@ private:
     Token lexNumber();
     Token lexIdentifierOrKeyword();
     Token lexString();
+    Token lexChar();
     Token makeToken(TokenKind kind, std::size_t start, std::size_t line, std::size_t column) const;
 
     std::string_view source_;

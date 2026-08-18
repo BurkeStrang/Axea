@@ -43,6 +43,44 @@ namespace
         return type.substr(6, type.size() - 7);
     }
 
+    bool isLinkedListTypeString(const std::string& type)
+    {
+        return type.starts_with("LinkedList<");
+    }
+
+    bool isDequeTypeString(const std::string& type)
+    {
+        return type.starts_with("Deque<");
+    }
+
+    // "Deque<elem>" -> "elem" - mirrors listElementTypeName above (see
+    // docs/language/0037-deques.md). Needed (unlike LinkedList's own
+    // elementTypeName-less choice) because `[i]` on a struct-typed Deque
+    // aliases the container - IndexExpr's already-generic aliasing case
+    // reads this straight off objectInfo.elementStructType.
+    std::string dequeElementTypeName(const std::string& type)
+    {
+        return type.substr(6, type.size() - 7);
+    }
+
+    // No queueElementTypeName - unlike Deque<T>, Queue<T> has no `[i]`/peek,
+    // so there's no operation whose result could alias the container (see
+    // docs/language/0038-queues.md). Mirrors LinkedList<T>'s own identical
+    // choice for the identical reason.
+    bool isQueueTypeString(const std::string& type)
+    {
+        return type.starts_with("Queue<");
+    }
+
+    // No priorityQueueElementTypeName either, for the identical reason -
+    // PriorityQueue<T> has no `[i]`, and its `peek()` is only ever i32 this
+    // phase (see docs/language/0039-priority-queues.md), so elementStructType
+    // extraction would never have anything to populate anyway.
+    bool isPriorityQueueTypeString(const std::string& type)
+    {
+        return type.starts_with("PriorityQueue<");
+    }
+
     bool isMapTypeString(const std::string& type)
     {
         return type.starts_with("Map<");
@@ -51,6 +89,36 @@ namespace
     bool isSetTypeString(const std::string& type)
     {
         return type.starts_with("Set<");
+    }
+
+    // No elementTypeName extraction needed, same reasoning as Set<T> above -
+    // none of add/contains/remove ever return the stored element (see
+    // docs/language/0041-sorted-sets.md).
+    bool isSortedSetTypeString(const std::string& type)
+    {
+        return type.starts_with("SortedSet<");
+    }
+
+    // String isn't generic (see docs/language/0042-string.md), so this is
+    // an exact match, not a starts_with prefix check. No elementTypeName
+    // extraction needed either, same reasoning as Queue<T>/SortedSet<T>
+    // above - `append` never returns the stored content, so there's no
+    // aliasing case for MethodCallExpr to special-case.
+    bool isStringTypeString(const std::string& type)
+    {
+        return type == "String";
+    }
+
+    // Buffer isn't generic either (see docs/language/0043-buffer.md), so
+    // this is an exact match too. No elementTypeName extraction needed -
+    // `finish()` returns a *fresh* String wrapping content the buffer no
+    // longer owns after the call (its own header is reset to a fresh empty
+    // buffer - see LlvmIrEmitter::emitBufferFinish), so it never aliases
+    // the buffer's own post-call state; the ordinary "method call result is
+    // Owned" default already covers it correctly, no exception needed.
+    bool isBufferTypeString(const std::string& type)
+    {
+        return type == "Buffer";
     }
 
     // "Map<K,V>" -> "V". Own bracket-depth-aware top-level-comma split (per
@@ -65,6 +133,39 @@ namespace
     std::string mapValueTypeName(const std::string& type)
     {
         const std::string args = type.substr(4, type.size() - 5); // strip "Map<" and trailing ">"
+        int depth = 0;
+        for (std::size_t i = 0; i < args.size(); ++i)
+        {
+            if (args[i] == '<' || args[i] == '[')
+            {
+                ++depth;
+            }
+            else if (args[i] == '>' || args[i] == ']')
+            {
+                --depth;
+            }
+            else if (args[i] == ',' && depth == 0)
+            {
+                return args.substr(i + 1);
+            }
+        }
+        return ""; // malformed - unreachable for a well-checked program
+    }
+
+    bool isSortedMapTypeString(const std::string& type)
+    {
+        return type.starts_with("SortedMap<");
+    }
+
+    // "SortedMap<K,V>" -> "V" - mirrors mapValueTypeName's own bracket-
+    // depth-aware split above (see docs/language/0040-sorted-maps.md).
+    // `.get()` is the only SortedMap operation that can hand back a value
+    // aliasing the tree's own stored instance, same reasoning as Map<K,V>'s
+    // own V extraction.
+    std::string sortedMapValueTypeName(const std::string& type)
+    {
+        const std::string args =
+            type.substr(10, type.size() - 11); // strip "SortedMap<" and trailing ">"
         int depth = 0;
         for (std::size_t i = 0; i < args.size(); ++i)
         {
@@ -152,6 +253,29 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         const bool isStack = isStackTypeString(param.type);
         const bool isMap = isMapTypeString(param.type);
         const bool isSet = isSetTypeString(param.type);
+        // LinkedList<T> (see docs/language/0036-linked-lists.md) carries the
+        // same aliasing risk as every other heap-allocated collection
+        // (mustn't be treated as Owned unless `take`n) - but unlike
+        // List<T>.pop()/Stack<T>.peek()/Map<K,V>.get(), no LinkedList<T>
+        // operation this phase ever hands back a stored element without
+        // removing it (no peek_front/peek_back), so there's no elementStructType
+        // extraction to do here: MethodCallExpr's aliasing exception is never
+        // consulted for LinkedList<T>.
+        const bool isLinkedList = isLinkedListTypeString(param.type);
+        const bool isDeque = isDequeTypeString(param.type);
+        // Queue<T> (see docs/language/0038-queues.md) - same reasoning as
+        // LinkedList<T> above: `dequeue()` always removes, and there's no
+        // `[i]`/peek at all, so no elementStructType extraction is needed -
+        // the simplest region-checking story of any collection this session.
+        const bool isQueue = isQueueTypeString(param.type);
+        // PriorityQueue<T> (see docs/language/0039-priority-queues.md) - same
+        // reasoning as Queue<T> above: push/pop/peek's element is always i32
+        // this phase, so no elementStructType extraction is ever needed.
+        const bool isPriorityQueue = isPriorityQueueTypeString(param.type);
+        const bool isSortedMap = isSortedMapTypeString(param.type);
+        const bool isSortedSet = isSortedSetTypeString(param.type);
+        const bool isString = isStringTypeString(param.type);
+        const bool isBuffer = isBufferTypeString(param.type);
         if (isArray)
         {
             const std::string elementName = arrayElementTypeName(param.type);
@@ -193,14 +317,46 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
                 elementStructType = valueName;
             }
         }
-        // Struct-, array-, List-, Stack-, Map-, and Set-typed parameters all
-        // carry aliasing risk (all are heap-allocated, reference-semantics
-        // values - see docs/language/0031-arrays.md, 0033-lists.md,
-        // 0034-maps-and-sets.md, and 0035-stacks.md); a primitive parameter
-        // is always Owned regardless of its read/write/take capability.
-        const bool borrowed =
-            (!structType.empty() || isArray || isList || isStack || isMap || isSet) &&
-            capabilities[i] != Capability::Take;
+        else if (isDeque)
+        {
+            // Unlike LinkedList<T> above, Deque<T> genuinely needs this:
+            // `[i]` on a struct-typed Deque aliases the container exactly
+            // like List<T>[i] already does (see docs/language/0037-deques.md)
+            // - IndexExpr's own regionOfExpr case is already fully generic,
+            // so populating elementStructType here is the only wiring it
+            // needs; no MethodCallExpr exception required (push_front/
+            // push_back/pop_front/pop_back never alias).
+            const std::string elementName = dequeElementTypeName(param.type);
+            if (structs_.contains(elementName))
+            {
+                elementStructType = elementName;
+            }
+        }
+        else if (isSortedMap)
+        {
+            // Same reasoning as Map above - `.get()` is the only SortedMap
+            // operation that can hand back a value aliasing the tree's own
+            // stored instance (see docs/language/0040-sorted-maps.md).
+            const std::string valueName = sortedMapValueTypeName(param.type);
+            if (structs_.contains(valueName))
+            {
+                elementStructType = valueName;
+            }
+        }
+        // Struct-, array-, List-, Stack-, LinkedList-, Deque-, Queue-,
+        // PriorityQueue-, Map-, Set-, SortedMap-, SortedSet-, String-, and
+        // Buffer-typed parameters all carry aliasing risk (all are
+        // heap-allocated, reference-semantics values - see
+        // docs/language/0031-arrays.md, 0033-lists.md,
+        // 0034-maps-and-sets.md, 0035-stacks.md, 0036-linked-lists.md,
+        // 0037-deques.md, 0038-queues.md, 0039-priority-queues.md,
+        // 0040-sorted-maps.md, 0041-sorted-sets.md, 0042-string.md, and
+        // 0043-buffer.md); a primitive parameter is always Owned regardless
+        // of its read/write/take capability.
+        const bool borrowed = (!structType.empty() || isArray || isList || isStack ||
+                               isLinkedList || isDeque || isQueue || isPriorityQueue || isMap ||
+                               isSet || isSortedMap || isSortedSet || isString || isBuffer) &&
+                              capabilities[i] != Capability::Take;
         env.define(param.name,
                    RegionInfo{borrowed ? Region::Borrowed : Region::Owned,
                               borrowed ? param.name : "",
@@ -211,12 +367,20 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     regions_[function.name] = std::move(paramRegions);
 
     // Nothing can leak through a non-struct, non-array, non-List, non-Stack,
-    // non-Map, non-Set return type: primitives are always copied by value,
-    // and unit carries no value at all.
+    // non-LinkedList, non-Deque, non-Queue, non-PriorityQueue, non-Map,
+    // non-Set, non-SortedMap, non-SortedSet, non-String, non-Buffer return
+    // type: primitives are always copied by value, and unit carries no
+    // value at all.
     if (!function.returnType ||
         (!structs_.contains(*function.returnType) && !isArrayTypeString(*function.returnType) &&
          !isListTypeString(*function.returnType) && !isStackTypeString(*function.returnType) &&
-         !isMapTypeString(*function.returnType) && !isSetTypeString(*function.returnType)))
+         !isLinkedListTypeString(*function.returnType) &&
+         !isDequeTypeString(*function.returnType) && !isQueueTypeString(*function.returnType) &&
+         !isPriorityQueueTypeString(*function.returnType) &&
+         !isMapTypeString(*function.returnType) && !isSetTypeString(*function.returnType) &&
+         !isSortedMapTypeString(*function.returnType) &&
+         !isSortedSetTypeString(*function.returnType) &&
+         !isStringTypeString(*function.returnType) && !isBufferTypeString(*function.returnType)))
     {
         return;
     }
@@ -236,7 +400,7 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
                                        std::vector<RegionInfo>* currentLoopBreakRegions)
 {
     if (dynamic_cast<const IntegerExpr*>(&expr) || dynamic_cast<const BoolExpr*>(&expr) ||
-        dynamic_cast<const StringExpr*>(&expr))
+        dynamic_cast<const StringExpr*>(&expr) || dynamic_cast<const CharExpr*>(&expr))
     {
         return RegionInfo{Region::Owned, "", ""};
     }
@@ -336,10 +500,72 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
+    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new tree starts empty, always Owned
+        // (see docs/language/0040-sorted-maps.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new tree starts empty, always Owned
+        // (see docs/language/0041-sorted-sets.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
+    {
+        // Same reasoning again - String(text) always allocates a fresh
+        // buffer and copies text's own bytes into it, never aliasing
+        // whatever text itself pointed at, so the result is always Owned
+        // regardless of text's own region (see
+        // docs/language/0042-string.md). Still walked (not skipped) for
+        // the same recursive-region-tracking reason every other
+        // sub-expression here is.
+        regionOfExpr(*stringNew->text, env, function, currentLoopBreakRegions);
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const BufferNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new buffer starts empty, always
+        // Owned (see docs/language/0043-buffer.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (dynamic_cast<const StackNewExpr*>(&expr))
     {
         // Same reasoning again - a brand-new stack starts empty, always
         // Owned (see docs/language/0035-stacks.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new linked list starts empty,
+        // always Owned (see docs/language/0036-linked-lists.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const DequeNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new deque starts empty, always
+        // Owned (see docs/language/0037-deques.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const QueueNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new queue starts empty, always
+        // Owned (see docs/language/0038-queues.md).
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
+    {
+        // Same reasoning again - a brand-new heap starts empty, always Owned
+        // (see docs/language/0039-priority-queues.md).
         return RegionInfo{Region::Owned, "", ""};
     }
 

@@ -1,8 +1,15 @@
 # Buffer
 
-**Status:** Draft
+**Status:** Implemented, see `docs/language/0043-buffer.md`
 
 `Buffer` is Axea's mutable text construction type.
+
+**Deviation from this doc:** the implementation uses `.length` instead of
+`.len` below, for consistency with every other collection type in the
+codebase (`List`, `Map`, `String`, ... all use `.length`). The "Compiler
+Optimizations" section below (automatic string-interpolation lowering) is
+still aspirational - string interpolation itself has no lexer/parser
+support yet.
 
 It replaces the traditional `StringBuilder` name with a shorter, more general API.
 
@@ -30,7 +37,7 @@ buf.append_line(text)
 
 buf.clear()
 
-buf.len
+buf.length
 buf.capacity
 
 buf.reserve(1024)

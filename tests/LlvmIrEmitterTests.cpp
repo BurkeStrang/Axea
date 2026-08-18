@@ -380,6 +380,291 @@ TEST("LlvmIrEmitter List<T> and Stack<T> push/pop resolve to distinct emit funct
     EXPECT_TRUE(ir.find("stack.push.copy.header") != std::string::npos);
 }
 
+TEST("LlvmIrEmitter declares a named self-referential node type for LinkedList<T>")
+{
+    // Monomorphized (see docs/language/0036-linked-lists.md), same
+    // lazy-registration-by-canonical-string pattern as Map/Set's own entry
+    // types - the first LinkedList instantiation actually used gets id 0.
+    auto ir = emitLlvmIr("f() -> i32 { s = LinkedList<i32>()  return s.length }");
+    EXPECT_TRUE(ir.find("%axea.LLNode.0 = type { i32, %axea.LLNode.0*, %axea.LLNode.0* }") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents LinkedList<i32> as a pointer to a 3-field heap header")
+{
+    auto ir = emitLlvmIr("useLinkedList(s: LinkedList<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(
+        ir.find("define i32 @useLinkedList({i32, %axea.LLNode.0*, %axea.LLNode.0*}* %0) {") !=
+        std::string::npos);
+}
+
+TEST("LlvmIrEmitter's LinkedList<T>() construction mallocs a header and zero-initializes it")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = LinkedList<i32>()  return s.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // length = 0
+    EXPECT_TRUE(ir.find("store %axea.LLNode.0* null, %axea.LLNode.0**") !=
+                std::string::npos); // head/tail = null
+}
+
+TEST("LlvmIrEmitter LinkedList push_front/push_back/pop_front/pop_back each emit a single call "
+     "into that instantiation's own runtime function")
+{
+    auto ir = emitLlvmIr("f(s: LinkedList<i32>, v: i32) { "
+                         "  s.push_front(v) "
+                         "  s.push_back(v) "
+                         "} "
+                         "g(s: LinkedList<i32>) -> i32 { "
+                         "  a = s.pop_front() "
+                         "  b = s.pop_back() "
+                         "  return a + b "
+                         "}");
+    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_front(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_back(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.linkedlist.0.pop_front(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.linkedlist.0.pop_back(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter LinkedList push_front's runtime function contains a real br i1, unlike "
+     "List<T>.push's straight-line-plus-loop shape")
+{
+    // The reason push_front/push_back/pop_front/pop_back are template-text
+    // runtime functions (named %registers) rather than inlined the way
+    // List<T>.push/.pop are: maintaining the head/tail invariant on an
+    // empty-list transition needs real conditional control flow (see
+    // docs/language/0036-linked-lists.md).
+    auto ir = emitLlvmIr("f() { s = LinkedList<i32>()  s.push_front(1) }");
+    const auto fnStart = ir.find("define void @axea.linkedlist.0.push_front(");
+    EXPECT_TRUE(fnStart != std::string::npos);
+    const auto fnEnd = ir.find("\n}\n", fnStart);
+    const std::string fnBody = ir.substr(fnStart, fnEnd - fnStart);
+    EXPECT_TRUE(fnBody.find("br i1") != std::string::npos);
+    EXPECT_TRUE(fnBody.find("emptycase:") != std::string::npos);
+    EXPECT_TRUE(fnBody.find("nonemptycase:") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a LinkedList's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(s: LinkedList<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.LLNode.0*, %axea.LLNode.0*}, "
+                        "{i32, %axea.LLNode.0*, %axea.LLNode.0*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level LinkedList<T> binding as a count only, unlike List/Stack's "
+     "runtime print loop")
+{
+    auto ir = emitLlvmIr("s = LinkedList<i32>()");
+    EXPECT_TRUE(ir.find("LinkedList(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents Deque<i32> as a pointer to an anonymous 3-field heap header, no "
+     "named type at all")
+{
+    // Unlike Map/Set/LinkedList (all named, self-referential), Deque<T>'s
+    // third field is a plain T*, not an entry pointer - no monomorphization
+    // needed (see docs/language/0037-deques.md).
+    auto ir = emitLlvmIr("useDeque(d: Deque<i32>) -> i32 { return d.length }");
+    EXPECT_TRUE(ir.find("define i32 @useDeque({i32, i32, i32*}* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("%axea.") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Deque<T>() construction mallocs a header and zero-initializes all 3 fields")
+{
+    auto ir = emitLlvmIr("f() -> i32 { d = Deque<i32>()  return d.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0 (and start = 0)
+    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos); // data = null
+}
+
+TEST("LlvmIrEmitter Deque push_front/push_back reallocate via a hand-rolled copy loop, no phi")
+{
+    auto ir = emitLlvmIr("f() { d = Deque<i32>()  d.push_front(1)  d.push_back(2) }");
+    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("deque.push.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("deque.push.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter Deque pop_front/pop_back have no bounds check and need no loop or branch")
+{
+    // Isolated to a function taking Deque<i32> as a parameter (no
+    // construction/push in the same function) - simpler than even List's
+    // own pop: just start/count arithmetic, no loop label of any kind.
+    auto ir = emitLlvmIr("f(d: Deque<i32>) -> i32 { return d.pop_front() + d.pop_back() }");
+    EXPECT_TRUE(ir.find("add i32") != std::string::npos); // pop_front's start+1
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos); // pop_back's count-1
+    EXPECT_TRUE(ir.find("deque.push.copy") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter Deque [i] read/write offsets the index by `start`, not a plain GEP")
+{
+    auto ir = emitLlvmIr("f(d: Deque<i32>) -> i32 { d[0] = 5  return d[1] }");
+    // The `start` field (index 1) is read and added to the given index -
+    // distinguishes Deque's own indexing from List's plain `i32 %index` GEP.
+    EXPECT_TRUE(ir.find("i32 0, i32 1\n") != std::string::npos);
+    EXPECT_TRUE(ir.find("add i32 %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a Deque's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(d: Deque<i32>) -> i32 { return d.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i32*}, {i32, i32, i32*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level Deque<T> binding with full bracket contents, unlike "
+     "LinkedList/Map/Set's count-only fallback")
+{
+    auto ir = emitLlvmIr("d = Deque<i32>()");
+    EXPECT_TRUE(ir.find("print.deque.") != std::string::npos);
+    EXPECT_TRUE(ir.find("Deque(") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter LinkedList<T> and Deque<T> push_front/pop_front resolve to distinct emit "
+     "functions")
+{
+    auto ir = emitLlvmIr("useLinkedList(l: LinkedList<i32>) { l.push_front(1) } "
+                         "useDeque(d: Deque<i32>) { d.push_front(1) }");
+    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_front(") != std::string::npos);
+    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents Queue<i32> with the literal same header text as Deque<i32> - no "
+     "isQueueType predicate exists anywhere")
+{
+    // Mirrors Stack<T>/List<T>'s own identical relationship (see
+    // docs/language/0038-queues.md) - llvmType("Queue<T>") produces the
+    // exact same text llvmType("Deque<T>") does.
+    auto ir = emitLlvmIr("useQueue(q: Queue<i32>) -> i32 { return q.length }");
+    EXPECT_TRUE(ir.find("define i32 @useQueue({i32, i32, i32*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Queue<T>() construction mallocs a header and zero-initializes all 3 "
+     "fields, structurally identical to Deque<T>'s own")
+{
+    auto ir = emitLlvmIr("f() -> i32 { q = Queue<i32>()  return q.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter Queue enqueue reallocates via the same hand-rolled copy loop Deque push "
+     "uses, no phi")
+{
+    auto ir = emitLlvmIr("f() { q = Queue<i32>()  q.enqueue(1) }");
+    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("deque.push.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("deque.push.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter Queue dequeue has no bounds check and needs no loop or branch, just "
+     "start/count arithmetic")
+{
+    auto ir = emitLlvmIr("f(q: Queue<i32>) -> i32 { return q.dequeue() }");
+    EXPECT_TRUE(ir.find("add i32") != std::string::npos); // start + 1
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos); // count - 1
+    EXPECT_TRUE(ir.find("deque.push.copy") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a Queue's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(q: Queue<i32>) -> i32 { return q.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i32*}, {i32, i32, i32*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter Deque<T> and Queue<T> push/pop-equivalents resolve to distinct emit "
+     "functions despite sharing the exact same header shape")
+{
+    auto ir = emitLlvmIr("useDeque(d: Deque<i32>) { d.push_back(1) } "
+                         "useQueue(q: Queue<i32>) { q.enqueue(1) }");
+    EXPECT_TRUE(ir.find("define void @useDeque({i32, i32, i32*}* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("define void @useQueue({i32, i32, i32*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents PriorityQueue<T> as the exact same LLVM type as List<T>/Stack<T>")
+{
+    auto ir = emitLlvmIr("usePQ(q: PriorityQueue<i32>) -> i32 { return q.length }");
+    EXPECT_TRUE(ir.find("define i32 @usePQ({i32, i32*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's PriorityQueue<T>() construction mallocs a header and zero-initializes it")
+{
+    auto ir = emitLlvmIr("f() -> i32 { q = PriorityQueue<i32>()  return q.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter PriorityQueue push grows via the same copy loop Stack/List push use, then "
+     "sifts the new element up - no phi anywhere")
+{
+    auto ir = emitLlvmIr("f() { q = PriorityQueue<i32>()  q.push(4) }");
+    EXPECT_TRUE(ir.find("priorityqueue.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.push.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.push.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.push.siftup.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.push.siftup.swap") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter PriorityQueue pop has no bounds check and sifts the new root down - no phi "
+     "anywhere")
+{
+    auto ir = emitLlvmIr("f() -> i32 { q = PriorityQueue<i32>()  q.push(1)  return q.pop() }");
+    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.pop.siftdown.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.pop.siftdown.swap") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter PriorityQueue peek reads index 0 directly, no length arithmetic and no store")
+{
+    // Isolated to a function taking PriorityQueue<i32> as a *parameter* (no
+    // construction/push in the same function), mirroring the equivalent
+    // Stack<T> peek test - emitPriorityQueuePeek's own output is then the
+    // function's entire body.
+    auto ir = emitLlvmIr("f(q: PriorityQueue<i32>) -> i32 { return q.peek() }");
+    EXPECT_TRUE(ir.find("getelementptr i32, i32* %2, i32 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("store") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a PriorityQueue's .length via GEP+load, not a compile-time constant")
+{
+    auto ir = emitLlvmIr("len(q: PriorityQueue<i32>) -> i32 { return q.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32*}, {i32, i32*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter List<T>/Stack<T>/PriorityQueue<T> push resolve to three distinct emit "
+     "functions on the same-shaped element type")
+{
+    auto ir = emitLlvmIr("useList(l: List<i32>) { l.push(1) } "
+                         "useStack(s: Stack<i32>) { s.push(1) } "
+                         "usePQ(q: PriorityQueue<i32>) { q.push(1) }");
+    EXPECT_TRUE(ir.find("list.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("stack.push.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("priorityqueue.push.copy.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter Stack<T>.peek() and PriorityQueue<T>.peek() resolve to distinct emit "
+     "functions despite sharing the same method name")
+{
+    auto ir = emitLlvmIr("useStack(s: Stack<i32>) -> i32 { return s.peek() } "
+                         "usePQ(q: PriorityQueue<i32>) -> i32 { return q.peek() }");
+    // Stack peek computes length-1 (a "sub") before indexing; PriorityQueue
+    // peek indexes 0 directly with no arithmetic - so useStack's body
+    // contains a "sub" and usePQ's does not, verified by isolating each
+    // function's own text.
+    const auto useStackPos = ir.find("define i32 @useStack");
+    const auto usePQPos = ir.find("define i32 @usePQ");
+    EXPECT_TRUE(useStackPos != std::string::npos && usePQPos != std::string::npos);
+    const std::string useStackBody = ir.substr(useStackPos, usePQPos - useStackPos);
+    EXPECT_TRUE(useStackBody.find("sub i32") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter declares named self-referential types for Map/Set entries")
 {
     // Monomorphized (see docs/language/0034-maps-and-sets.md's generic
@@ -524,6 +809,391 @@ TEST("LlvmIrEmitter prints a top-level Map/Set binding by count, not contents")
     EXPECT_TRUE(ir.find("Map(") != std::string::npos);
     EXPECT_TRUE(ir.find("Set(") != std::string::npos);
     EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents SortedMap<i32,i32> as a pointer to a named-node 2-field heap "
+     "header, distinct from Map/Set's own 3-field header")
+{
+    auto ir = emitLlvmIr("useSM(m: SortedMap<i32,i32>) -> i32 { return m.length }");
+    EXPECT_TRUE(ir.find("define i32 @useSM({i32, %axea.SortedMapNode.0*}* %0) {") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter declares a 5-field self-referential node type for SortedMap<K,V> - key, "
+     "value, height, left, right")
+{
+    auto ir = emitLlvmIr("f() -> i32 { m = SortedMap<i32,i32>()  m.set(1, 2)  return m.length }");
+    EXPECT_TRUE(ir.find("%axea.SortedMapNode.0 = type { i32, i32, i32, %axea.SortedMapNode.0*, "
+                        "%axea.SortedMapNode.0* }") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's SortedMap<K,V>() construction mallocs a 2-field header and zero-"
+     "initializes it - no bucket array, unlike Map/Set's own 3-field header")
+{
+    auto ir = emitLlvmIr("f() -> i32 { m = SortedMap<i32,i32>()  return m.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
+    EXPECT_TRUE(ir.find("store %axea.SortedMapNode.0* null, %axea.SortedMapNode.0**") !=
+                std::string::npos); // root = null
+}
+
+TEST("LlvmIrEmitter's SortedMap operations call that instantiation's own axea.sortedmap.N "
+     "runtime functions, including the AVL rotation/height helpers")
+{
+    auto ir = emitLlvmIr("f() { "
+                         "  m = SortedMap<i32,i32>() "
+                         "  m.set(1, 2) "
+                         "  v = m.get(1) "
+                         "  hit = m.contains(1) "
+                         "  m.remove(1) "
+                         "}");
+    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.set(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.sortedmap.0.get(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i1 @axea.sortedmap.0.contains(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.remove(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i32 @axea.sortedmap.0.height(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.rotateLeft(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.rotateRight(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.insertNode(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.removeNode(") !=
+                std::string::npos);
+    // No `free` call anywhere - matches this codebase's established "leak,
+    // don't free" policy (Map<K,V>.remove doesn't free its entry either).
+    EXPECT_TRUE(ir.find("call void @free") == std::string::npos);
+    // No `phi` anywhere - every loop/recursive helper here uses the same
+    // alloca/load/store convention this whole backend establishes (see
+    // docs/language/0040-sorted-maps.md).
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a SortedMap's .length via GEP+load field 0, not a compile-time "
+     "constant")
+{
+    auto ir = emitLlvmIr("len(m: SortedMap<i32,i32>) -> i32 { return m.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.SortedMapNode.0*}, "
+                        "{i32, %axea.SortedMapNode.0*}* %0, i32 0, i32 0") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter monomorphizes each distinct SortedMap<K,V> shape into its own node type/"
+     "functions")
+{
+    auto ir = emitLlvmIr("useA(m: SortedMap<i32,i32>) -> i32 { return m.get(1) } "
+                         "useB(m: SortedMap<i32,str>) -> str { return m.get(1) }");
+    EXPECT_TRUE(ir.find("%axea.SortedMapNode.0 = type { i32, i32, i32, %axea.SortedMapNode.0*, "
+                        "%axea.SortedMapNode.0* }") != std::string::npos);
+    EXPECT_TRUE(ir.find("%axea.SortedMapNode.1 = type { i32, i8*, i32, %axea.SortedMapNode.1*, "
+                        "%axea.SortedMapNode.1* }") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i32 @axea.sortedmap.0.get(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.sortedmap.1.get(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level SortedMap binding by count, not contents - matches the "
+     "interpreter's own identical choice (see docs/language/0040-sorted-maps.md)")
+{
+    auto ir = emitLlvmIr("m = SortedMap<i32,i32>()");
+    EXPECT_TRUE(ir.find("SortedMap(") != std::string::npos);
+    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter Map<K,V>/SortedMap<K,V> set/get resolve to distinct emit functions despite "
+     "sharing the same method names")
+{
+    auto ir = emitLlvmIr("useMap(m: Map<i32,i32>) { m.set(1, 2) } "
+                         "useSortedMap(m: SortedMap<i32,i32>) { m.set(1, 2) }");
+    EXPECT_TRUE(ir.find("call void @axea.map.0.set(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.set(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents SortedSet<i32> as a pointer to a named-node 2-field heap header, "
+     "distinct from Set's own 3-field header")
+{
+    auto ir = emitLlvmIr("useSS(s: SortedSet<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("define i32 @useSS({i32, %axea.SortedSetNode.0*}* %0) {") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter declares a 4-field self-referential node type for SortedSet<T> - key, "
+     "height, left, right - no value field, unlike SortedMap<K,V>'s own 5-field node")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = SortedSet<i32>()  s.add(1)  return s.length }");
+    EXPECT_TRUE(ir.find("%axea.SortedSetNode.0 = type { i32, i32, %axea.SortedSetNode.0*, "
+                        "%axea.SortedSetNode.0* }") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's SortedSet<T>() construction mallocs a 2-field header and zero-initializes "
+     "it - no bucket array, unlike Set's own 3-field header")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = SortedSet<i32>()  return s.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
+    EXPECT_TRUE(ir.find("store %axea.SortedSetNode.0* null, %axea.SortedSetNode.0**") !=
+                std::string::npos); // root = null
+}
+
+TEST("LlvmIrEmitter's SortedSet operations call that instantiation's own axea.sortedset.N "
+     "runtime functions, including the AVL rotation/height helpers")
+{
+    auto ir = emitLlvmIr("f() { "
+                         "  s = SortedSet<i32>() "
+                         "  s.add(1) "
+                         "  hit = s.contains(1) "
+                         "  s.remove(1) "
+                         "}");
+    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.add(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i1 @axea.sortedset.0.contains(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.remove(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i32 @axea.sortedset.0.height(") != std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.rotateLeft(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.rotateRight(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.insertNode(") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.removeNode(") !=
+                std::string::npos);
+    // No `free` call, no `phi` anywhere - matches SortedMap<K,V>'s own
+    // identical choices (see docs/language/0041-sorted-sets.md).
+    EXPECT_TRUE(ir.find("call void @free") == std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a SortedSet's .length via GEP+load field 0, not a compile-time "
+     "constant")
+{
+    auto ir = emitLlvmIr("len(s: SortedSet<i32>) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.SortedSetNode.0*}, "
+                        "{i32, %axea.SortedSetNode.0*}* %0, i32 0, i32 0") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level SortedSet binding by count, not contents - matches the "
+     "interpreter's own identical choice (see docs/language/0041-sorted-sets.md)")
+{
+    auto ir = emitLlvmIr("s = SortedSet<i32>()");
+    EXPECT_TRUE(ir.find("SortedSet(") != std::string::npos);
+    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter Set<T>/SortedSet<T> add resolve to distinct emit functions despite sharing "
+     "the same method name")
+{
+    auto ir = emitLlvmIr("useSet(s: Set<i32>) { s.add(1) } "
+                         "useSortedSet(s: SortedSet<i32>) { s.add(1) }");
+    EXPECT_TRUE(ir.find("call void @axea.set.0.add(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.add(") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents String as the exact same LLVM type as List<i8> would - a "
+     "2-field {i32, i8*}* header")
+{
+    auto ir = emitLlvmIr("useString(s: String) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("define i32 @useString({i32, i8*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter declares @strlen as a third libc extern alongside @malloc/@printf - str has "
+     "no length field of its own, unlike every element type every other collection copies (see "
+     "docs/language/0042-string.md)")
+{
+    auto ir = emitLlvmIr("f() {}");
+    EXPECT_TRUE(ir.find("declare i64 @strlen(i8*)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's String(text) construction mallocs a header and a null-terminated buffer "
+     "via a real @strlen call, copying text's own bytes in a hand-rolled loop, no phi")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = String(\"hi\")  return s.length }");
+    EXPECT_TRUE(ir.find("call i64 @strlen(i8*") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("string.new.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("string.new.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("string.new.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's String.append grows via two copy loops - the existing content, then the "
+     "newly appended bytes - no phi")
+{
+    auto ir = emitLlvmIr("f() { s = String(\"hi\")  s.append(\"!\") }");
+    EXPECT_TRUE(ir.find("string.append.copyold.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("string.append.copynew.header") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a String's .length via GEP+load field 0, not a compile-time constant "
+     "- rides isListType's own existing check for free, exactly like Stack<T>'s own header "
+     "reuse (see docs/language/0035-stacks.md)")
+{
+    auto ir = emitLlvmIr("len(s: String) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i8*}, {i32, i8*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter passes a String argument as a bare i8* at a str-parameter call boundary - "
+     "'String automatically lends a str' (see docs/std/strings/0001-str.md)")
+{
+    auto ir = emitLlvmIr("useStr(s: str) -> str { return s } "
+                         "f() -> str { s = String(\"hi\")  return useStr(s) }");
+    EXPECT_TRUE(ir.find("call i8* @useStr(i8* %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level String binding via a direct %s of its data pointer, not "
+     "the generic byte-print loop that would misread each byte as a struct pointer")
+{
+    auto ir = emitLlvmIr("s = String(\"hi\")");
+    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
+    // No struct-print-helper call - a byte-print loop misreading "i8" as a
+    // nested struct element type would emit one of these.
+    EXPECT_TRUE(ir.find("@axea.print.i8") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents Buffer as a 3-field {i32, i32, i8*}* header - one field more "
+     "than String's own 2-field header")
+{
+    auto ir = emitLlvmIr("useBuffer(b: Buffer) -> i32 { return b.length }");
+    EXPECT_TRUE(ir.find("define i32 @useBuffer({i32, i32, i8*}* %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer() construction mallocs a header and a minimal 1-byte data buffer, "
+     "with length 0 and capacity 1")
+{
+    auto ir = emitLlvmIr("f() -> i32 { b = Buffer()  return b.length }");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64 1)") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32 1, i32*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.append grows conditionally via a real br i1 branch, not "
+     "unconditionally like every push/append/set/add before it - no phi")
+{
+    auto ir = emitLlvmIr("f() { b = Buffer()  b.append(\"hi\") }");
+    EXPECT_TRUE(ir.find("buffer.grow") != std::string::npos);
+    EXPECT_TRUE(ir.find("icmp sgt i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("= select i1") != std::string::npos);
+    EXPECT_TRUE(ir.find("buffer.append.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.append_line writes a trailing newline byte before the null "
+     "terminator")
+{
+    auto ir = emitLlvmIr("f() { b = Buffer()  b.append_line(\"hi\") }");
+    EXPECT_TRUE(ir.find("store i8 10,") != std::string::npos);
+    EXPECT_TRUE(ir.find("buffer.appendline.copy.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.clear resets length to 0 and null-terminates data[0] without "
+     "touching capacity")
+{
+    auto ir = emitLlvmIr("f() { b = Buffer()  b.clear() }");
+    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find("store i8 0, i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.reserve shares the same grow-if-needed helper as .append")
+{
+    auto ir = emitLlvmIr("f() { b = Buffer()  b.reserve(64) }");
+    EXPECT_TRUE(ir.find("buffer.grow") != std::string::npos);
+    EXPECT_TRUE(ir.find("icmp sgt i32") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.finish mallocs a fresh 2-field String header and resets the "
+     "original buffer back to a fresh, minimal state")
+{
+    auto ir = emitLlvmIr("f() -> i32 { b = Buffer()  s = b.finish()  return s.length }");
+    EXPECT_TRUE(ir.find("bitcast i8* %") != std::string::npos);
+    EXPECT_TRUE(ir.find("{i32, i8*}*") != std::string::npos);
+    // The reset path mallocs a second fresh 1-byte buffer for the
+    // now-emptied original Buffer.
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64 1)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a Buffer's .length via field 0 and .capacity via field 1, distinct "
+     "GEP indices - the one collection field-get here that needs two, not just .length at "
+     "index 0")
+{
+    auto ir = emitLlvmIr("f(b: Buffer) -> i32 { return b.length + b.capacity }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %0, i32 0, i32 0") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %0, i32 0, i32 1") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter Buffer.append and String.append resolve to distinct emit functions despite "
+     "sharing the same method name")
+{
+    auto ir = emitLlvmIr("f() { buf = Buffer()  buf.append(\"a\")  s = String(\"b\")  "
+                         "s.append(\"c\") }");
+    EXPECT_TRUE(ir.find("buffer.grow") != std::string::npos);
+    EXPECT_TRUE(ir.find("string.append.copyold.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level Buffer binding via a direct %s of its data pointer at "
+     "field index 2, not the generic byte-print loop or Deque's own field-2 print branch")
+{
+    auto ir = emitLlvmIr("b = Buffer()");
+    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
+    EXPECT_TRUE(ir.find("@axea.print.i8") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter represents char as i24, genuinely distinct from i32's own width - not a "
+     "stylistic choice, since a plain 'i32' char register would be indistinguishable from a "
+     "real i32 one downstream")
+{
+    auto ir = emitLlvmIr("useChar(c: char) -> char { return c }");
+    EXPECT_TRUE(ir.find("define i24 @useChar(i24 %0) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's char literal materializes as a trivial i24 SSA constant, same shape as "
+     "IrConstInt's own i32 constant")
+{
+    auto ir = emitLlvmIr("f() -> char { return 'A' }");
+    EXPECT_TRUE(ir.find("= add i24 0, 65") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's char equality/ordering reuse the exact same icmp opcodes as i32, just at "
+     "i24 width - zero new opcode-selection code needed")
+{
+    auto ir = emitLlvmIr("f() -> bool { a = 'A'  b = 'B'  return a < b }");
+    EXPECT_TRUE(ir.find("icmp slt i24") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a top-level char binding via a real UTF-8 encoder, not the numeric "
+     "codepoint - exercises the malloc'd 5-byte buffer and the codepoint-range branch")
+{
+    auto ir = emitLlvmIr("a = 'A'");
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64 5)") != std::string::npos);
+    EXPECT_TRUE(ir.find("char.utf8.len1") != std::string::npos);
+    EXPECT_TRUE(ir.find("char.utf8.check2") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a char struct field via the same UTF-8 encoder, not the generic "
+     "nested-struct-pointer fallback that a bare i24 would otherwise be misread as")
+{
+    auto ir = emitLlvmIr("struct Letter { value: char } l = Letter { value: 'A' }");
+    EXPECT_TRUE(ir.find("char.utf8.len1") != std::string::npos);
+    // No misfired nested-struct print call for a non-existent struct.
+    EXPECT_TRUE(ir.find("@axea.print.i24") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a struct with two char fields without a duplicate-label collision "
+     "between them - each field's own UTF-8 encoder call gets uniquely numbered labels")
+{
+    auto ir = emitLlvmIr("struct Pair { a: char  b: char } "
+                         "p = Pair { a: 'X'  b: 'Y' }");
+    EXPECT_TRUE(ir.find("char.utf8.len1.0") != std::string::npos);
+    EXPECT_TRUE(ir.find("char.utf8.len1.1") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter prints a List<char> element via the same UTF-8 encoder, not the generic "
+     "nested-struct-pointer fallback")
+{
+    auto ir = emitLlvmIr("xs = List<char>()  t = xs.push('A')");
+    EXPECT_TRUE(ir.find("char.utf8.len1") != std::string::npos);
+    EXPECT_TRUE(ir.find("@axea.print.i24") == std::string::npos);
 }
 
 TEST("LlvmIrEmitter hoists a string literal into a module-level global constant")

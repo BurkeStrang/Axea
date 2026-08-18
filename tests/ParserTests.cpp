@@ -116,6 +116,46 @@ TEST("Parser builds string and boolean literal AST nodes")
     EXPECT_EQ(string->value, "hi");
 }
 
+TEST("Parser builds char literal AST nodes, decoding UTF-8 into a codepoint")
+{
+    auto asciiProgram = parseOne("x = 'A'");
+    auto* asciiAssignment = dynamic_cast<AssignmentStmt*>(asciiProgram.items.at(0).get());
+    auto* ascii = dynamic_cast<CharExpr*>(asciiAssignment->value.get());
+    EXPECT_TRUE(ascii != nullptr);
+    EXPECT_EQ(ascii->codepoint, 65);
+
+    auto accentedProgram = parseOne("x = 'é'");
+    auto* accentedAssignment = dynamic_cast<AssignmentStmt*>(accentedProgram.items.at(0).get());
+    auto* accented = dynamic_cast<CharExpr*>(accentedAssignment->value.get());
+    EXPECT_TRUE(accented != nullptr);
+    EXPECT_EQ(accented->codepoint, 233);
+
+    auto rocketProgram = parseOne("x = '🚀'");
+    auto* rocketAssignment = dynamic_cast<AssignmentStmt*>(rocketProgram.items.at(0).get());
+    auto* rocket = dynamic_cast<CharExpr*>(rocketAssignment->value.get());
+    EXPECT_TRUE(rocket != nullptr);
+    EXPECT_EQ(rocket->codepoint, 128640);
+}
+
+TEST("Parser rejects an empty char literal")
+{
+    EXPECT_THROWS(parseOne("x = ''"));
+}
+
+TEST("Parser rejects a multi-character char literal")
+{
+    EXPECT_THROWS(parseOne("x = 'ab'"));
+}
+
+TEST("Parser parses a char parameter type into the canonical form")
+{
+    auto program = parseOne("useChar(c: char) -> char { return c }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "char");
+}
+
 TEST("Parser builds a function declaration with a block body")
 {
     auto program = parseOne("square(x: i32) -> i32 { x * x }");
@@ -676,6 +716,187 @@ TEST("Parser builds Stack<T> push/pop/peek method-call expressions")
     EXPECT_TRUE(peekResult->arguments.empty());
 }
 
+TEST("Parser builds a LinkedList<T> construction expression")
+{
+    auto program = parseOne("x = LinkedList<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* linkedListNew = dynamic_cast<LinkedListNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(linkedListNew != nullptr);
+    EXPECT_EQ(linkedListNew->elementType, "i32");
+}
+
+TEST("Parser parses a LinkedList<T> parameter type into the canonical form")
+{
+    auto program = parseOne("useLinkedList(s: LinkedList<i32>) -> i32 { return s.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "LinkedList<i32>");
+}
+
+TEST("Parser builds LinkedList<T> push_front/push_back/pop_front/pop_back method-call expressions")
+{
+    auto program = parseOne("f() { s = LinkedList<i32>()  s.push_front(1)  s.push_back(2)  "
+                            "s.pop_front()  s.pop_back() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* pushFrontStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(pushFrontStmt != nullptr);
+    auto* pushFrontCall = dynamic_cast<MethodCallExpr*>(pushFrontStmt->expr.get());
+    EXPECT_TRUE(pushFrontCall != nullptr);
+    EXPECT_EQ(pushFrontCall->method, "push_front");
+
+    auto* pushBackStmt = dynamic_cast<ExprStmt*>(body->statements.at(2).get());
+    EXPECT_TRUE(pushBackStmt != nullptr);
+    auto* pushBackCall = dynamic_cast<MethodCallExpr*>(pushBackStmt->expr.get());
+    EXPECT_TRUE(pushBackCall != nullptr);
+    EXPECT_EQ(pushBackCall->method, "push_back");
+
+    auto* popFrontStmt = dynamic_cast<ExprStmt*>(body->statements.at(3).get());
+    EXPECT_TRUE(popFrontStmt != nullptr);
+    auto* popFrontCall = dynamic_cast<MethodCallExpr*>(popFrontStmt->expr.get());
+    EXPECT_TRUE(popFrontCall != nullptr);
+    EXPECT_EQ(popFrontCall->method, "pop_front");
+
+    auto* popBackResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(popBackResult != nullptr);
+    EXPECT_EQ(popBackResult->method, "pop_back");
+    EXPECT_TRUE(popBackResult->arguments.empty());
+}
+
+TEST("Parser builds a Deque<T> construction expression")
+{
+    auto program = parseOne("x = Deque<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* dequeNew = dynamic_cast<DequeNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(dequeNew != nullptr);
+    EXPECT_EQ(dequeNew->elementType, "i32");
+}
+
+TEST("Parser parses a Deque<T> parameter type into the canonical form")
+{
+    auto program = parseOne("useDeque(d: Deque<i32>) -> i32 { return d.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "Deque<i32>");
+}
+
+TEST("Parser builds Deque<T> push_front/push_back/pop_front/pop_back method-call expressions")
+{
+    auto program = parseOne("f() { d = Deque<i32>()  d.push_front(1)  d.push_back(2)  "
+                            "d.pop_front()  d.pop_back() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* pushFrontStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(pushFrontStmt != nullptr);
+    auto* pushFrontCall = dynamic_cast<MethodCallExpr*>(pushFrontStmt->expr.get());
+    EXPECT_TRUE(pushFrontCall != nullptr);
+    EXPECT_EQ(pushFrontCall->method, "push_front");
+
+    auto* popBackResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(popBackResult != nullptr);
+    EXPECT_EQ(popBackResult->method, "pop_back");
+}
+
+TEST("Parser builds Deque<T> index-get and index-assign expressions")
+{
+    auto program = parseOne("f() { d = Deque<i32>()  d.push_back(1)  d[0] = 2  x = d[0] }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* indexAssign = dynamic_cast<IndexAssignStmt*>(body->statements.at(2).get());
+    EXPECT_TRUE(indexAssign != nullptr);
+
+    auto* readAssign = dynamic_cast<AssignmentStmt*>(body->statements.at(3).get());
+    EXPECT_TRUE(readAssign != nullptr);
+    auto* indexGet = dynamic_cast<IndexExpr*>(readAssign->value.get());
+    EXPECT_TRUE(indexGet != nullptr);
+}
+
+TEST("Parser builds a Queue<T> construction expression")
+{
+    auto program = parseOne("x = Queue<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* queueNew = dynamic_cast<QueueNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(queueNew != nullptr);
+    EXPECT_EQ(queueNew->elementType, "i32");
+}
+
+TEST("Parser parses a Queue<T> parameter type into the canonical form")
+{
+    auto program = parseOne("useQueue(q: Queue<i32>) -> i32 { return q.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "Queue<i32>");
+}
+
+TEST("Parser builds Queue<T> enqueue/dequeue method-call expressions")
+{
+    auto program = parseOne("f() { q = Queue<i32>()  q.enqueue(1)  q.dequeue() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* enqueueStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(enqueueStmt != nullptr);
+    auto* enqueueCall = dynamic_cast<MethodCallExpr*>(enqueueStmt->expr.get());
+    EXPECT_TRUE(enqueueCall != nullptr);
+    EXPECT_EQ(enqueueCall->method, "enqueue");
+
+    auto* dequeueResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(dequeueResult != nullptr);
+    EXPECT_EQ(dequeueResult->method, "dequeue");
+    EXPECT_TRUE(dequeueResult->arguments.empty());
+}
+
+TEST("Parser builds a PriorityQueue<T> construction expression")
+{
+    auto program = parseOne("x = PriorityQueue<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* priorityQueueNew = dynamic_cast<PriorityQueueNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(priorityQueueNew != nullptr);
+    EXPECT_EQ(priorityQueueNew->elementType, "i32");
+}
+
+TEST("Parser parses a PriorityQueue<T> parameter type into the canonical form")
+{
+    auto program = parseOne("usePriorityQueue(q: PriorityQueue<i32>) -> i32 { return q.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "PriorityQueue<i32>");
+}
+
+TEST("Parser builds PriorityQueue<T> push/pop/peek method-call expressions")
+{
+    auto program = parseOne("f() { q = PriorityQueue<i32>()  q.push(1)  q.peek() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* pushStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(pushStmt != nullptr);
+    auto* pushCall = dynamic_cast<MethodCallExpr*>(pushStmt->expr.get());
+    EXPECT_TRUE(pushCall != nullptr);
+    EXPECT_EQ(pushCall->method, "push");
+
+    auto* peekResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(peekResult != nullptr);
+    EXPECT_EQ(peekResult->method, "peek");
+    EXPECT_TRUE(peekResult->arguments.empty());
+}
+
 TEST("Parser builds a Map<K,V> construction expression")
 {
     auto program = parseOne("x = Map<i32,i32>()");
@@ -754,6 +975,168 @@ TEST("Parser builds Map/Set method-call expressions")
     EXPECT_TRUE(setAddResult != nullptr);
     EXPECT_EQ(setAddResult->method, "add");
     EXPECT_EQ(setAddResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a SortedMap<K,V> construction expression")
+{
+    auto program = parseOne("x = SortedMap<i32,i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* sortedMapNew = dynamic_cast<SortedMapNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(sortedMapNew != nullptr);
+    EXPECT_EQ(sortedMapNew->keyType, "i32");
+    EXPECT_EQ(sortedMapNew->valueType, "i32");
+}
+
+TEST("Parser parses a SortedMap<K,V> parameter type into the canonical form")
+{
+    auto program = parseOne("useSortedMap(m: SortedMap<i32,i32>) -> i32 { return m.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "SortedMap<i32,i32>");
+}
+
+TEST("Parser builds SortedMap<K,V> set/get/contains/remove method-call expressions")
+{
+    auto program = parseOne("f() { m = SortedMap<i32,i32>()  m.set(1, 2)  m.get(1) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* setStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(setStmt != nullptr);
+    auto* setCall = dynamic_cast<MethodCallExpr*>(setStmt->expr.get());
+    EXPECT_TRUE(setCall != nullptr);
+    EXPECT_EQ(setCall->method, "set");
+    EXPECT_EQ(setCall->arguments.size(), static_cast<std::size_t>(2));
+
+    auto* getResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(getResult != nullptr);
+    EXPECT_EQ(getResult->method, "get");
+    EXPECT_EQ(getResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a SortedSet<T> construction expression")
+{
+    auto program = parseOne("x = SortedSet<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* sortedSetNew = dynamic_cast<SortedSetNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(sortedSetNew != nullptr);
+    EXPECT_EQ(sortedSetNew->elementType, "i32");
+}
+
+TEST("Parser parses a SortedSet<T> parameter type into the canonical form")
+{
+    auto program = parseOne("useSortedSet(s: SortedSet<i32>) -> i32 { return s.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "SortedSet<i32>");
+}
+
+TEST("Parser builds SortedSet<T> add/contains/remove method-call expressions")
+{
+    auto program = parseOne("f() { s = SortedSet<i32>()  s.add(1)  s.contains(1) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* addStmt = dynamic_cast<ExprStmt*>(body->statements.at(1).get());
+    EXPECT_TRUE(addStmt != nullptr);
+    auto* addCall = dynamic_cast<MethodCallExpr*>(addStmt->expr.get());
+    EXPECT_TRUE(addCall != nullptr);
+    EXPECT_EQ(addCall->method, "add");
+    EXPECT_EQ(addCall->arguments.size(), static_cast<std::size_t>(1));
+
+    auto* containsResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(containsResult != nullptr);
+    EXPECT_EQ(containsResult->method, "contains");
+    EXPECT_EQ(containsResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a String(text) construction expression")
+{
+    auto program = parseOne("x = String(\"Axea\")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* stringNew = dynamic_cast<StringNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(stringNew != nullptr);
+    auto* text = dynamic_cast<StringExpr*>(stringNew->text.get());
+    EXPECT_TRUE(text != nullptr);
+    EXPECT_EQ(text->value, "Axea");
+}
+
+TEST("Parser rejects String(...) with anything but exactly one argument")
+{
+    EXPECT_THROWS(parseOne("x = String()"));
+    EXPECT_THROWS(parseOne("x = String(\"a\", \"b\")"));
+}
+
+TEST("Parser parses a String parameter type into the canonical form")
+{
+    auto program = parseOne("useString(s: String) -> i32 { return s.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "String");
+}
+
+TEST("Parser builds a String append method-call expression")
+{
+    auto program = parseOne("f() { s = String(\"a\")  s.append(\"b\") }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* appendResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(appendResult != nullptr);
+    EXPECT_EQ(appendResult->method, "append");
+    EXPECT_EQ(appendResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a Buffer() construction expression")
+{
+    auto program = parseOne("x = Buffer()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* bufferNew = dynamic_cast<BufferNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(bufferNew != nullptr);
+}
+
+TEST("Parser rejects Buffer(...) with any argument")
+{
+    EXPECT_THROWS(parseOne("x = Buffer(\"a\")"));
+}
+
+TEST("Parser parses a Buffer parameter type into the canonical form")
+{
+    auto program = parseOne("useBuffer(b: Buffer) -> i32 { return b.length }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params[0].type, "Buffer");
+}
+
+TEST("Parser builds Buffer append/append_line/clear/reserve/finish method-call expressions")
+{
+    auto program = parseOne("f() { b = Buffer()  b.append(\"a\")  b.append_line(\"b\")  b.clear()  "
+                            "b.reserve(8)  b.finish() }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* finishResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(finishResult != nullptr);
+    EXPECT_EQ(finishResult->method, "finish");
+    EXPECT_EQ(finishResult->arguments.size(), static_cast<std::size_t>(0));
+
+    auto* reserveStmt = dynamic_cast<ExprStmt*>(body->statements.at(4).get());
+    auto* reserveCall = dynamic_cast<MethodCallExpr*>(reserveStmt->expr.get());
+    EXPECT_TRUE(reserveCall != nullptr);
+    EXPECT_EQ(reserveCall->method, "reserve");
+    EXPECT_EQ(reserveCall->arguments.size(), static_cast<std::size_t>(1));
 }
 
 TEST("Parser builds a method-call expression, distinct from field access")

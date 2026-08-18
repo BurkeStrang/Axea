@@ -1,0 +1,28 @@
+build() -> String
+{
+    b = Buffer()
+    b.append("Axea")
+    b.append_line(" Language")
+    b.append("second line")
+    return b.finish()
+}
+
+appendBang(b: Buffer)
+{
+    b.append("!")
+}
+
+report = build()
+reportLength = report.length
+
+notes = Buffer()
+reserved = notes.reserve(64)
+appended = notes.append("draft")
+called = appendBang(notes)
+notesLength = notes.length
+notesCapacity = notes.capacity
+
+cleared = notes.clear()
+lengthAfterClear = notes.length
+reused = notes.append("reused")
+lengthAfterReuse = notes.length

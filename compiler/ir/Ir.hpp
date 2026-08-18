@@ -39,6 +39,17 @@ struct IrConstString final : IrInst
     std::string value;
 };
 
+// A single Unicode scalar value, already decoded to its own codepoint by
+// the parser (see docs/language/0044-char.md) - a genuinely distinct
+// instruction from IrConstInt (not reused) even though both just carry a
+// 32-bit constant, because the LLVM backend gives char its own distinct
+// integer width (`i24`, not `i32`) precisely so a char register can never
+// be confused with a plain i32 one downstream (see LlvmIrEmitter::llvmType).
+struct IrConstChar final : IrInst
+{
+    std::int32_t codepoint;
+};
+
 struct IrBinOp final : IrInst
 {
     TokenKind op;
@@ -149,6 +160,286 @@ struct IrStackPop final : IrInst
 struct IrStackPeek final : IrInst
 {
     int stack;
+};
+
+// `LinkedList<elem>()` - a fresh, empty, doubly linked, node-based collection
+// (see docs/language/0036-linked-lists.md). Carries elementTypeName exactly
+// like IrListNew/IrStackNew - a brand-new empty list has nothing to infer it
+// from.
+struct IrLinkedListNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `list.push_front(value)`/`list.push_back(value)` - no dest (void); mutate
+// `list`'s own header fields (and link a fresh node) in place.
+struct IrLinkedListPushFront final : IrInst
+{
+    int list;
+    int value;
+};
+
+struct IrLinkedListPushBack final : IrInst
+{
+    int list;
+    int value;
+};
+
+// `list.pop_front()`/`list.pop_back()` - dest is the removed element.
+struct IrLinkedListPopFront final : IrInst
+{
+    int list;
+};
+
+struct IrLinkedListPopBack final : IrInst
+{
+    int list;
+};
+
+// `Deque<elem>()` - a fresh, empty, growable array with a `start` offset
+// (see docs/language/0037-deques.md). Carries elementTypeName exactly like
+// IrListNew/IrStackNew/IrLinkedListNew - a brand-new empty deque has
+// nothing to infer it from.
+struct IrDequeNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `deque.push_front(value)`/`deque.push_back(value)` - no dest (void);
+// mutate `deque`'s own header fields in place (reallocating - see
+// docs/language/0037-deques.md).
+struct IrDequePushFront final : IrInst
+{
+    int deque;
+    int value;
+};
+
+struct IrDequePushBack final : IrInst
+{
+    int deque;
+    int value;
+};
+
+// `deque.pop_front()`/`deque.pop_back()` - dest is the removed element (no
+// reallocation - just start/count arithmetic).
+struct IrDequePopFront final : IrInst
+{
+    int deque;
+};
+
+struct IrDequePopBack final : IrInst
+{
+    int deque;
+};
+
+// `Queue<elem>()` - a fresh, empty FIFO collection backed internally by
+// Deque<T>'s own machinery (see docs/language/0038-queues.md). Carries
+// elementTypeName exactly like IrDequeNew.
+struct IrQueueNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `queue.enqueue(value)` - no dest (void); maps onto Deque<T>.push_back's
+// own shape.
+struct IrQueueEnqueue final : IrInst
+{
+    int queue;
+    int value;
+};
+
+// `queue.dequeue()` - dest is the removed element; maps onto
+// Deque<T>.pop_front's own shape.
+struct IrQueueDequeue final : IrInst
+{
+    int queue;
+};
+
+// `PriorityQueue<elem>()` - a fresh, empty binary heap (see
+// docs/language/0039-priority-queues.md). Carries elementTypeName exactly
+// like IrListNew/IrStackNew - a brand-new empty heap has nothing to infer it
+// from. `elementTypeName` is always "i32" in a well-typed program (the only
+// orderable type this phase), but carried as a string anyway, mirroring
+// every other collection's *New instruction here.
+struct IrPriorityQueueNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `priorityQueue.push(value)` - no dest (void); appends then sifts the new
+// element up toward the root until the heap property holds again.
+struct IrPriorityQueuePush final : IrInst
+{
+    int priorityQueue;
+    int value;
+};
+
+// `priorityQueue.pop()` - dest is the removed minimum; moves the last
+// element into the vacated root slot, then sifts it down until the heap
+// property holds again.
+struct IrPriorityQueuePop final : IrInst
+{
+    int priorityQueue;
+};
+
+// `priorityQueue.peek()` - dest is the minimum element, *not* removed - the
+// minimum always sits at index 0 by the heap invariant, so (unlike
+// IrStackPeek) this needs no arithmetic at all.
+struct IrPriorityQueuePeek final : IrInst
+{
+    int priorityQueue;
+};
+
+// `SortedMap<key,value>()` - a fresh, empty AVL tree (see
+// docs/language/0040-sorted-maps.md). Carries the concrete K/V type strings
+// explicitly, exactly like IrMapNew - a brand-new empty tree has nothing to
+// infer them from, and LlvmIrEmitter needs them to look up (or register, on
+// first sight) the right monomorphized instantiation.
+struct IrSortedMapNew final : IrInst
+{
+    std::string keyTypeName;
+    std::string valueTypeName;
+};
+
+// `sortedMap.set(key, value)` - no dest (unit); inserts (with AVL
+// rebalancing) or updates in place.
+struct IrSortedMapSet final : IrInst
+{
+    int sortedMap;
+    int key;
+    int value;
+};
+
+// `sortedMap.get(key)` - dest is the value (or an unspecified sentinel if
+// the key is absent in compiled code, mirroring IrMapGet; the interpreter
+// throws instead).
+struct IrSortedMapGet final : IrInst
+{
+    int sortedMap;
+    int key;
+};
+
+// `sortedMap.contains(key)` - dest is a bool.
+struct IrSortedMapContains final : IrInst
+{
+    int sortedMap;
+    int key;
+};
+
+// `sortedMap.remove(key)` - no dest (unit); no-op if the key is absent.
+// Removing (with AVL rebalancing) mirrors IrMapRemove's own shape.
+struct IrSortedMapRemove final : IrInst
+{
+    int sortedMap;
+    int key;
+};
+
+// `SortedSet<elem>()` - a fresh, empty AVL tree (see
+// docs/language/0041-sorted-sets.md). Carries elementTypeName exactly like
+// IrSetNew - a brand-new empty tree has nothing to infer it from.
+struct IrSortedSetNew final : IrInst
+{
+    std::string elementTypeName;
+};
+
+// `sortedSet.add(value)` - no dest (unit); inserts (with AVL rebalancing)
+// or no-ops if already present, mirroring IrSetAdd's own shape.
+struct IrSortedSetAdd final : IrInst
+{
+    int sortedSet;
+    int value;
+};
+
+// `sortedSet.contains(value)` - dest is a bool.
+struct IrSortedSetContains final : IrInst
+{
+    int sortedSet;
+    int value;
+};
+
+// `sortedSet.remove(value)` - no dest (unit); no-op if absent. Removing
+// (with AVL rebalancing) mirrors IrSetRemove's own shape.
+struct IrSortedSetRemove final : IrInst
+{
+    int sortedSet;
+    int value;
+};
+
+// `String(text)` - a fresh, owned copy of `text`'s own bytes, plus a null
+// terminator (see docs/language/0042-string.md). `text` is a register (a
+// str, or another String - LlvmIrEmitter resolves which at the point it
+// reads `text`'s own inferred LLVM type), not a type name string - String
+// isn't generic, unlike every collection's own *New instruction above.
+struct IrStringNew final : IrInst
+{
+    int text;
+};
+
+// `string.append(other)` - no dest (unit); grows the buffer and copies
+// `other`'s own bytes onto the end, mutating `string`'s own header fields
+// in place (same "stable pointer, mutated in place" model every push/set/
+// add here already uses).
+struct IrStringAppend final : IrInst
+{
+    int string;
+    int other;
+};
+
+// `Buffer()` - a fresh, empty buffer with a small initial allocation (see
+// docs/language/0043-buffer.md) - no operands at all, unlike every
+// collection's own *New instruction above: Buffer isn't generic (no type
+// name to carry) and takes no constructor argument (unlike StringNewExpr's
+// own `text`).
+struct IrBufferNew final : IrInst
+{
+};
+
+// `buffer.append(text)` - no dest (unit); the first collection here with
+// genuine *amortized* growth - only reallocates (doubling capacity) when
+// the existing buffer can't hold the new content, unlike every other
+// push/append here, which reallocates unconditionally every call.
+struct IrBufferAppend final : IrInst
+{
+    int buffer;
+    int text;
+};
+
+// `buffer.append_line(text)` - same shape as IrBufferAppend, plus a
+// trailing '\n'.
+struct IrBufferAppendLine final : IrInst
+{
+    int buffer;
+    int text;
+};
+
+// `buffer.clear()` - no dest (unit); resets length to 0 without releasing
+// the allocated buffer, so a cleared Buffer can be refilled without
+// reallocating - the entire point of tracking capacity separately from
+// length.
+struct IrBufferClear final : IrInst
+{
+    int buffer;
+};
+
+// `buffer.reserve(capacity)` - no dest (unit); grows the buffer's own
+// allocation to at least `capacity` bytes without changing length or
+// content, a no-op if already large enough.
+struct IrBufferReserve final : IrInst
+{
+    int buffer;
+    int capacity;
+};
+
+// `buffer.finish()` - dest is a String wrapping the buffer's own current
+// content, with no byte copy at all (the buffer's own already-allocated,
+// already-null-terminated data pointer is simply handed to the new String
+// header directly) - a genuine ownership transfer, not a copy. `buffer`
+// itself is left reset to a fresh, empty state afterward (see
+// docs/language/0043-buffer.md), not left dangling - it remains safely
+// reusable.
+struct IrBufferFinish final : IrInst
+{
+    int buffer;
 };
 
 // `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's

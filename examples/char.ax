@@ -1,0 +1,22 @@
+struct Letter
+{
+    value: char
+    ordinal: i32
+}
+
+first = Letter { value: 'A'  ordinal: 1 }
+
+a = 'A'
+accented = 'é'
+rocket = '🚀'
+
+isEqual = a == 'A'
+isNotEqual = a != accented
+isLess = a < accented
+isGreaterOrEqual = accented >= a
+
+letters = List<char>()
+appended1 = letters.push('a')
+appended2 = letters.push('é')
+appended3 = letters.push('🚀')
+letterCount = letters.length

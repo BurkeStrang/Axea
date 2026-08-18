@@ -3,6 +3,7 @@
 #include "ast/Stmt.hpp"
 #include "lexer/Token.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -58,6 +59,13 @@ private:
     // expecting the closing ')'.
     std::vector<std::unique_ptr<Expr>> parseArgumentList();
     int precedence(TokenKind kind) const;
+    // Decodes a char literal's own raw UTF-8 bytes (already captured
+    // verbatim between the opening/closing `'` by Lexer::lexChar - see
+    // docs/language/0044-char.md) into a single Unicode scalar value.
+    // Rejects anything that isn't exactly one well-formed, non-overlong,
+    // non-surrogate codepoint - empty ('' ), multi-character ('ab'), and
+    // malformed UTF-8 are all parse errors here, not silently truncated.
+    static std::int32_t decodeCharLiteral(const std::string& bytes);
 
     std::vector<Token> tokens_;
     std::size_t index_{0};

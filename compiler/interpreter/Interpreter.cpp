@@ -1,17 +1,61 @@
 #include "interpreter/Interpreter.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <stdexcept>
 
 namespace
 {
+    // Ascending min-heap comparator for PriorityQueueInstance (see
+    // docs/language/0039-priority-queues.md) - T is i32 only this phase, so
+    // this compares the std::int64_t payload directly rather than needing a
+    // generic Value comparator. std::push_heap/std::pop_heap are max-heaps
+    // by their own default (comparator returns true when the *first*
+    // argument is lower priority); reversing the comparison (">" instead of
+    // "<") makes the smallest element the one that keeps rising to the
+    // front, exactly the "ascending, smallest-first" choice this phase
+    // makes at the LLVM-backend level too.
+    bool priorityQueueLess(const Value& a, const Value& b)
+    {
+        return std::get<std::int64_t>(a) > std::get<std::int64_t>(b);
+    }
+
+    // Also accepts char32_t (returning its own codepoint numerically) -
+    // used both for real i32 arithmetic and for char's own ordering
+    // comparisons (see docs/language/0044-char.md), which share this same
+    // helper. TypeChecker's own requireInt/requireOrdered split already
+    // guarantees a char value only ever reaches this via the ordering
+    // path, never arithmetic - a well-typed program never asks for
+    // char + char.
     std::int64_t asInt(const Value& value)
     {
         if (const auto* integer = std::get_if<std::int64_t>(&value))
         {
             return *integer;
         }
+        if (const auto* character = std::get_if<char32_t>(&value))
+        {
+            return static_cast<std::int64_t>(*character);
+        }
         throw std::runtime_error("expected an integer operand");
+    }
+
+    // Resolves a str-coercible Value (a bare str, or a String - see
+    // TypeChecker::isStrCoercible's identical rule at the type-checking
+    // layer, docs/language/0042-string.md) down to its raw content. Always
+    // a copy, matching how a plain `str` Value is already copied by value
+    // everywhere else in this interpreter.
+    std::string asStrContent(const Value& value)
+    {
+        if (const auto* str = std::get_if<std::string>(&value))
+        {
+            return *str;
+        }
+        if (const auto* string = std::get_if<std::shared_ptr<StringInstance>>(&value))
+        {
+            return (*string)->data;
+        }
+        throw std::runtime_error("expected a str or String operand");
     }
 
     // A pointer into an ArrayInstance's, SliceInstance's, or ListInstance's
@@ -41,6 +85,10 @@ namespace
         if (auto* list = std::get_if<std::shared_ptr<ListInstance>>(&value))
         {
             return Indexable{&(*list)->elements, (*list)->elements.size()};
+        }
+        if (auto* deque = std::get_if<std::shared_ptr<DequeInstance>>(&value))
+        {
+            return Indexable{&(*deque)->elements, (*deque)->elements.size()};
         }
         return std::nullopt;
     }
@@ -74,6 +122,42 @@ namespace
     struct ContinueSignal
     {
     };
+
+    // Encodes a single Unicode scalar value into its own UTF-8 byte
+    // sequence (see docs/language/0044-char.md) - mirrors
+    // LlvmIrEmitter::encodeCharUtf8's own bit-for-bit encoding rules
+    // exactly (same shift/mask/tag values per byte-length range), just as
+    // plain C++ instead of hand-emitted LLVM IR, so the interpreter and
+    // the compiled backend agree byte-for-byte on every char's printed
+    // form.
+    std::string encodeUtf8(char32_t codepoint)
+    {
+        const std::uint32_t cp = static_cast<std::uint32_t>(codepoint);
+        std::string out;
+        if (cp <= 0x7F)
+        {
+            out += static_cast<char>(cp);
+        }
+        else if (cp <= 0x7FF)
+        {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        else if (cp <= 0xFFFF)
+        {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        else
+        {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        return out;
+    }
 } // namespace
 
 std::string toString(const Value& value)
@@ -86,9 +170,25 @@ std::string toString(const Value& value)
     {
         return *boolean ? "true" : "false";
     }
+    if (const auto* character = std::get_if<char32_t>(&value))
+    {
+        return encodeUtf8(*character);
+    }
     if (const auto* string = std::get_if<std::string>(&value))
     {
         return *string;
+    }
+    if (const auto* ownedString = std::get_if<std::shared_ptr<StringInstance>>(&value))
+    {
+        // Bare content, same as `str` above - a String prints exactly like
+        // the text it holds, no wrapper/quoting (see
+        // docs/language/0042-string.md).
+        return (*ownedString)->data;
+    }
+    if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&value))
+    {
+        // Bare content, same as String above (see docs/language/0043-buffer.md).
+        return (*buffer)->data;
     }
     if (const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&value))
     {
@@ -169,6 +269,68 @@ std::string toString(const Value& value)
         result += "]";
         return result;
     }
+    if (const auto* deque = std::get_if<std::shared_ptr<DequeInstance>>(&value))
+    {
+        // Same bracket format as List/Stack above (not LinkedList/Map/Set's
+        // count-only fallback) - a Deque's growable-array-with-a-start-
+        // offset representation directly supports full-content printing,
+        // matching the LLVM backend's own choice (see
+        // docs/language/0037-deques.md).
+        std::string result = "[";
+        for (std::size_t i = 0; i < (*deque)->elements.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ", ";
+            }
+            result += toString((*deque)->elements[i]);
+        }
+        result += "]";
+        return result;
+    }
+    if (const auto* queue = std::get_if<std::shared_ptr<QueueInstance>>(&value))
+    {
+        // Same bracket format as List/Stack/Deque above - a Queue's FIFO
+        // order (front to back) is exactly as well-defined as theirs (see
+        // docs/language/0038-queues.md).
+        std::string result = "[";
+        for (std::size_t i = 0; i < (*queue)->elements.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ", ";
+            }
+            result += toString((*queue)->elements[i]);
+        }
+        result += "]";
+        return result;
+    }
+    if (const auto* priorityQueue = std::get_if<std::shared_ptr<PriorityQueueInstance>>(&value))
+    {
+        // Same bracket format as List/Stack/Deque/Queue above - shows the
+        // heap's raw internal array order, *not* sorted order (see
+        // docs/language/0039-priority-queues.md), matching the LLVM
+        // backend's own identical choice.
+        std::string result = "[";
+        for (std::size_t i = 0; i < (*priorityQueue)->elements.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ", ";
+            }
+            result += toString((*priorityQueue)->elements[i]);
+        }
+        result += "]";
+        return result;
+    }
+    if (const auto* linkedList = std::get_if<std::shared_ptr<LinkedListInstance>>(&value))
+    {
+        // Unlike List/Stack above, this deliberately falls back to a
+        // count-only format, matching Map/Set's own precedent just below -
+        // must match LlvmIrEmitter's top-level printer byte-for-byte (see
+        // docs/language/0036-linked-lists.md), which makes the same choice.
+        return "LinkedList(" + std::to_string((*linkedList)->elements.size()) + " entries)";
+    }
     if (const auto* map = std::get_if<std::shared_ptr<MapInstance>>(&value))
     {
         // No iteration this phase (see docs/language/0034-maps-and-sets.md),
@@ -180,6 +342,24 @@ std::string toString(const Value& value)
     if (const auto* set = std::get_if<std::shared_ptr<SetInstance>>(&value))
     {
         return "Set(" + std::to_string((*set)->elements.size()) + " entries)";
+    }
+    if (const auto* sortedMap = std::get_if<std::shared_ptr<SortedMapInstance>>(&value))
+    {
+        // Count-only, matching Map/Set's own fallback - *not* full sorted
+        // contents, even though SortedMapInstance's std::map could trivially
+        // print them in order. Deliberate: this must match the LLVM
+        // backend's own top-level printer byte-for-byte (see
+        // docs/language/0040-sorted-maps.md), and that side has no
+        // traversal wired up yet (no `for`-in desugaring to hang a
+        // print-only walk off, same reasoning LinkedList<T>'s own
+        // count-only fallback already established).
+        return "SortedMap(" + std::to_string((*sortedMap)->entries.size()) + " entries)";
+    }
+    if (const auto* sortedSet = std::get_if<std::shared_ptr<SortedSetInstance>>(&value))
+    {
+        // Count-only, matching SortedMap's own fallback above and the LLVM
+        // backend's identical choice (see docs/language/0041-sorted-sets.md).
+        return "SortedSet(" + std::to_string((*sortedSet)->elements.size()) + " entries)";
     }
     return "()";
 }
@@ -575,6 +755,11 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return string->value;
     }
 
+    if (const auto* character = dynamic_cast<const CharExpr*>(&expr))
+    {
+        return static_cast<char32_t>(character->codepoint);
+    }
+
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
         return env.get(name->name);
@@ -661,6 +846,28 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                         SliceInstance{*array, (*array)->elements.size()});
                 }
             }
+            // Implicit String -> str conversion at the call boundary (see
+            // docs/language/0042-string.md and TypeChecker::isStrCoercible's
+            // identical rule) - mirrors the array->slice conversion above
+            // for a different pair of types. Critically a real *copy* of
+            // the current content, not just re-wrapping the same
+            // shared_ptr<StringInstance>: `str` is an immutable value, so
+            // this must sever the connection to the original String the
+            // same way the LLVM backend's own resolveStrPtr does by
+            // capturing the data pointer at the moment of the call - an
+            // alias here would let a later `.append()` on the source
+            // String retroactively change an already-passed str, which
+            // the compiled backend can't do (its own str stays pointing at
+            // the pre-append buffer, since append reallocates rather than
+            // mutating in place - see emitStringAppend).
+            if (i < it->second->params.size() && it->second->params[i].type == "str")
+            {
+                if (const auto* ownedString =
+                        std::get_if<std::shared_ptr<StringInstance>>(&argValue))
+                {
+                    argValue = (*ownedString)->data;
+                }
+            }
             args.push_back(std::move(argValue));
         }
 
@@ -728,6 +935,168 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             throw std::runtime_error("no such method: " + methodCall->method);
         }
 
+        // LinkedList<T> (see docs/language/0036-linked-lists.md) -
+        // push_front/push_back/pop_front/pop_back are std::deque's own
+        // push_front/push_back/pop_front/pop_back directly; pop_front/
+        // pop_back throw on empty, same reason Stack<T>.pop()/.peek() do.
+        if (const auto* linkedList = std::get_if<std::shared_ptr<LinkedListInstance>>(&objectValue))
+        {
+            if (methodCall->method == "push_front")
+            {
+                (*linkedList)->elements.push_front(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "push_back")
+            {
+                (*linkedList)->elements.push_back(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "pop_front")
+            {
+                if ((*linkedList)->elements.empty())
+                {
+                    throw std::runtime_error("pop_front on an empty LinkedList");
+                }
+                Value popped = std::move((*linkedList)->elements.front());
+                (*linkedList)->elements.pop_front();
+                return popped;
+            }
+
+            if (methodCall->method == "pop_back")
+            {
+                if ((*linkedList)->elements.empty())
+                {
+                    throw std::runtime_error("pop_back on an empty LinkedList");
+                }
+                Value popped = std::move((*linkedList)->elements.back());
+                (*linkedList)->elements.pop_back();
+                return popped;
+            }
+
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // Deque<T> (see docs/language/0037-deques.md) - push_front/pop_front
+        // use std::vector's own insert/erase at begin() (O(n) here, purely
+        // an interpreter representation choice - the LLVM backend's actual
+        // representation is genuinely O(1)); push_back/pop_back are
+        // std::vector's own push_back/pop_back directly. pop_front/pop_back
+        // throw on empty, same reason LinkedList<T>.pop_front()/.pop_back()
+        // do. `[i]`/`[i]=`/.length are handled generically via asIndexable,
+        // not here.
+        if (const auto* deque = std::get_if<std::shared_ptr<DequeInstance>>(&objectValue))
+        {
+            if (methodCall->method == "push_front")
+            {
+                (*deque)->elements.insert((*deque)->elements.begin(),
+                                          evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "push_back")
+            {
+                (*deque)->elements.push_back(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "pop_front")
+            {
+                if ((*deque)->elements.empty())
+                {
+                    throw std::runtime_error("pop_front on an empty Deque");
+                }
+                Value popped = std::move((*deque)->elements.front());
+                (*deque)->elements.erase((*deque)->elements.begin());
+                return popped;
+            }
+
+            if (methodCall->method == "pop_back")
+            {
+                if ((*deque)->elements.empty())
+                {
+                    throw std::runtime_error("pop_back on an empty Deque");
+                }
+                Value popped = std::move((*deque)->elements.back());
+                (*deque)->elements.pop_back();
+                return popped;
+            }
+
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // Queue<T> (see docs/language/0038-queues.md) - `enqueue` is
+        // std::deque's own push_back; `dequeue` is std::deque's own
+        // pop_front, matching classic FIFO order. `dequeue` throws on empty,
+        // same reason Deque<T>.pop_front()/.pop_back() do.
+        if (const auto* queue = std::get_if<std::shared_ptr<QueueInstance>>(&objectValue))
+        {
+            if (methodCall->method == "enqueue")
+            {
+                (*queue)->elements.push_back(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "dequeue")
+            {
+                if ((*queue)->elements.empty())
+                {
+                    throw std::runtime_error("dequeue on an empty Queue");
+                }
+                Value popped = std::move((*queue)->elements.front());
+                (*queue)->elements.pop_front();
+                return popped;
+            }
+
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // PriorityQueue<T> (see docs/language/0039-priority-queues.md) - a
+        // real binary heap: push/pop run std::push_heap/std::pop_heap with
+        // priorityQueueLess (ascending, smallest-first - see that
+        // comparator's own comment above), the same algorithm the LLVM
+        // backend hand-rolls, not a renamed vector operation like every
+        // earlier collection's push/pop here. pop()/peek() throw on empty,
+        // same reason Stack<T>.pop()/.peek() do.
+        if (const auto* priorityQueue =
+                std::get_if<std::shared_ptr<PriorityQueueInstance>>(&objectValue))
+        {
+            if (methodCall->method == "push")
+            {
+                (*priorityQueue)->elements.push_back(evaluate(*methodCall->arguments.front(), env));
+                std::push_heap((*priorityQueue)->elements.begin(),
+                               (*priorityQueue)->elements.end(),
+                               priorityQueueLess);
+                return Value{std::monostate{}};
+            }
+
+            if (methodCall->method == "pop")
+            {
+                if ((*priorityQueue)->elements.empty())
+                {
+                    throw std::runtime_error("pop on an empty PriorityQueue");
+                }
+                std::pop_heap((*priorityQueue)->elements.begin(),
+                              (*priorityQueue)->elements.end(),
+                              priorityQueueLess);
+                Value popped = std::move((*priorityQueue)->elements.back());
+                (*priorityQueue)->elements.pop_back();
+                return popped;
+            }
+
+            if (methodCall->method == "peek")
+            {
+                if ((*priorityQueue)->elements.empty())
+                {
+                    throw std::runtime_error("peek on an empty PriorityQueue");
+                }
+                return (*priorityQueue)->elements.front();
+            }
+
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
         // Map<i32,i32>/Set<i32> (see docs/language/0034-maps-and-sets.md).
         // `.get` on a missing key throws here - unlike compiled code, which
         // returns an unspecified sentinel - matching the established
@@ -788,6 +1157,134 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             throw std::runtime_error("no such method: " + methodCall->method);
         }
 
+        // SortedMap<K,V> (see docs/language/0040-sorted-maps.md) - set/get/
+        // contains/remove are Map<i32,i32>'s own shape exactly; std::map's
+        // ordinary operations already give the right semantics (see
+        // SortedMapInstance's own doc comment). `.get` on a missing key
+        // throws here, same reasoning as Map<K,V>.get() above.
+        if (const auto* sortedMap = std::get_if<std::shared_ptr<SortedMapInstance>>(&objectValue))
+        {
+            if (methodCall->method == "set")
+            {
+                const std::int64_t key = asInt(evaluate(*methodCall->arguments[0], env));
+                Value value = evaluate(*methodCall->arguments[1], env);
+                (*sortedMap)->entries[key] = std::move(value);
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "get")
+            {
+                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                const auto it = (*sortedMap)->entries.find(key);
+                if (it == (*sortedMap)->entries.end())
+                {
+                    throw std::runtime_error("SortedMap.get on a missing key");
+                }
+                return it->second;
+            }
+            if (methodCall->method == "contains")
+            {
+                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                return (*sortedMap)->entries.contains(key);
+            }
+            if (methodCall->method == "remove")
+            {
+                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                (*sortedMap)->entries.erase(key);
+                return Value{std::monostate{}};
+            }
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // SortedSet<T> (see docs/language/0041-sorted-sets.md) - add/
+        // contains/remove are Set<T>'s own shape exactly; std::set's
+        // ordinary operations already give the right semantics (see
+        // SortedSetInstance's own doc comment).
+        if (const auto* sortedSet = std::get_if<std::shared_ptr<SortedSetInstance>>(&objectValue))
+        {
+            if (methodCall->method == "add")
+            {
+                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
+                (*sortedSet)->elements.insert(value);
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "contains")
+            {
+                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
+                return (*sortedSet)->elements.contains(value);
+            }
+            if (methodCall->method == "remove")
+            {
+                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
+                (*sortedSet)->elements.erase(value);
+                return Value{std::monostate{}};
+            }
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // String (see docs/language/0042-string.md) - `append` accepts
+        // anything str-coercible (asStrContent resolves either shape) and
+        // mutates `data` in place, the same reference-semantics model
+        // every other collection's own mutating method here already
+        // follows.
+        if (const auto* string = std::get_if<std::shared_ptr<StringInstance>>(&objectValue))
+        {
+            if (methodCall->method == "append")
+            {
+                (*string)->data += asStrContent(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
+        // Buffer (see docs/language/0043-buffer.md) - a mutable,
+        // amortized-growth text-construction type. std::string already
+        // does its own amortized growth internally, so
+        // append/append_line/clear/reserve/finish all just ride its
+        // existing `+=`/`clear`/`reserve` machinery directly - the real
+        // conditional-growth branch the LLVM backend hand-emits
+        // (emitBufferAppend/ensureBufferCapacity) has no interpreter-side
+        // equivalent to write, since std::string already provides it.
+        if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&objectValue))
+        {
+            if (methodCall->method == "append")
+            {
+                (*buffer)->data += asStrContent(evaluate(*methodCall->arguments.front(), env));
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "append_line")
+            {
+                (*buffer)->data += asStrContent(evaluate(*methodCall->arguments.front(), env));
+                (*buffer)->data += '\n';
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "clear")
+            {
+                (*buffer)->data.clear();
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "reserve")
+            {
+                const std::int64_t capacity = asInt(evaluate(*methodCall->arguments.front(), env));
+                (*buffer)->data.reserve(static_cast<std::size_t>(capacity));
+                return Value{std::monostate{}};
+            }
+            if (methodCall->method == "finish")
+            {
+                // Genuine ownership transfer, mirroring emitBufferFinish's
+                // own zero-copy steal + reset - std::move empties `data`
+                // in place (guaranteed valid-but-unspecified by the
+                // standard; immediately reset to "" below so the buffer
+                // stays in the exact same fresh, empty state
+                // BufferNewExpr's own construction produces, never left
+                // in a merely "unspecified" state).
+                auto result =
+                    std::make_shared<StringInstance>(StringInstance{std::move((*buffer)->data)});
+                (*buffer)->data = std::string();
+                return Value{result};
+            }
+            throw std::runtime_error("no such method: " + methodCall->method);
+        }
+
         throw std::runtime_error("no such method '" + methodCall->method + "' on this value");
     }
 
@@ -824,6 +1321,65 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             throw std::runtime_error("no such field: " + field->field);
         }
 
+        // SortedMap<K,V> deliberately isn't indexable either - no `[key]`
+        // syntax and no `for`-in iteration this phase (see
+        // docs/language/0040-sorted-maps.md).
+        if (const auto* sortedMap = std::get_if<std::shared_ptr<SortedMapInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*sortedMap)->entries.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // SortedSet<T> deliberately isn't indexable either - same reasoning
+        // as SortedMap<K,V> above (see docs/language/0041-sorted-sets.md).
+        if (const auto* sortedSet = std::get_if<std::shared_ptr<SortedSetInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*sortedSet)->elements.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // String isn't indexable either this phase - slicing is
+        // deliberately out of scope (see docs/language/0042-string.md).
+        // Unlike the LLVM backend (where `.length` rides isListType's own
+        // existing structural check for free, since String's header is
+        // byte-for-byte List<i8>'s shape), the interpreter's dispatch is by
+        // real C++ type, not by shape, so this needs its own standalone
+        // case just like every other non-List-backed collection here does.
+        if (const auto* string = std::get_if<std::shared_ptr<StringInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*string)->data.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // Buffer isn't indexable either, same reasoning as String above
+        // (see docs/language/0043-buffer.md). `.capacity` rides
+        // std::string's own `.capacity()` directly - its exact numeric
+        // value is expected to diverge from the LLVM backend's own
+        // explicit doubling formula (see BufferInstance's own comment
+        // above); `.length` (content size) is not expected to diverge and
+        // must match exactly.
+        if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*buffer)->data.size());
+            }
+            if (field->field == "capacity")
+            {
+                return static_cast<std::int64_t>((*buffer)->data.capacity());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
         // Stack<T> isn't indexable either (LIFO access only, via
         // push/pop/peek, no `[i]`), so this is also a standalone case
         // rather than folded into asIndexable above (see
@@ -833,6 +1389,43 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             if (field->field == "length")
             {
                 return static_cast<std::int64_t>((*stack)->elements.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // LinkedList<T> isn't indexable either (node-based, front/back access
+        // only, no `[i]`), so this is also a standalone case (see
+        // docs/language/0036-linked-lists.md).
+        if (const auto* linkedList = std::get_if<std::shared_ptr<LinkedListInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*linkedList)->elements.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // Queue<T> deliberately isn't indexable either, even though it's
+        // backed by Deque<T>'s own (indexable) representation -
+        // "communicate intent" (see docs/language/0038-queues.md).
+        if (const auto* queue = std::get_if<std::shared_ptr<QueueInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*queue)->elements.size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // PriorityQueue<T> deliberately isn't indexable either - a heap's
+        // internal array order isn't even a meaningful order to expose (see
+        // docs/language/0039-priority-queues.md).
+        if (const auto* priorityQueue =
+                std::get_if<std::shared_ptr<PriorityQueueInstance>>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>((*priorityQueue)->elements.size());
             }
             throw std::runtime_error("no such field: " + field->field);
         }
@@ -868,6 +1461,26 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return std::make_shared<ListInstance>();
     }
 
+    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
+    {
+        return std::make_shared<LinkedListInstance>();
+    }
+
+    if (dynamic_cast<const DequeNewExpr*>(&expr))
+    {
+        return std::make_shared<DequeInstance>();
+    }
+
+    if (dynamic_cast<const QueueNewExpr*>(&expr))
+    {
+        return std::make_shared<QueueInstance>();
+    }
+
+    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
+    {
+        return std::make_shared<PriorityQueueInstance>();
+    }
+
     if (dynamic_cast<const StackNewExpr*>(&expr))
     {
         return std::make_shared<StackInstance>();
@@ -881,6 +1494,27 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     if (dynamic_cast<const SetNewExpr*>(&expr))
     {
         return std::make_shared<SetInstance>();
+    }
+
+    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
+    {
+        return std::make_shared<SortedMapInstance>();
+    }
+
+    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
+    {
+        return std::make_shared<SortedSetInstance>();
+    }
+
+    if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
+    {
+        return std::make_shared<StringInstance>(
+            StringInstance{asStrContent(evaluate(*stringNew->text, env))});
+    }
+
+    if (dynamic_cast<const BufferNewExpr*>(&expr))
+    {
+        return std::make_shared<BufferInstance>();
     }
 
     if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
