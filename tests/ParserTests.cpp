@@ -594,6 +594,108 @@ TEST("Parser builds an index expression, chaining with field access")
     EXPECT_EQ(innerField->field, "items");
 }
 
+TEST("Parser builds a bounded str slice expression - object[start..end]")
+{
+    auto program = parseOne("x = date[5..7]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* slice = dynamic_cast<StrSliceExpr*>(assignment->value.get());
+    EXPECT_TRUE(slice != nullptr);
+    EXPECT_TRUE(dynamic_cast<NameExpr*>(slice->object.get()) != nullptr);
+    auto* start = dynamic_cast<IntegerExpr*>(slice->start.get());
+    EXPECT_TRUE(start != nullptr);
+    EXPECT_EQ(start->value, 5);
+    auto* end = dynamic_cast<IntegerExpr*>(slice->end.get());
+    EXPECT_TRUE(end != nullptr);
+    EXPECT_EQ(end->value, 7);
+}
+
+TEST("Parser builds an open-start str slice expression - object[..end]")
+{
+    auto program = parseOne("x = date[..4]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* slice = dynamic_cast<StrSliceExpr*>(assignment->value.get());
+    EXPECT_TRUE(slice != nullptr);
+    EXPECT_TRUE(slice->start == nullptr);
+    auto* end = dynamic_cast<IntegerExpr*>(slice->end.get());
+    EXPECT_TRUE(end != nullptr);
+    EXPECT_EQ(end->value, 4);
+}
+
+TEST("Parser builds an open-end str slice expression - object[start..]")
+{
+    auto program = parseOne("x = date[8..]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* slice = dynamic_cast<StrSliceExpr*>(assignment->value.get());
+    EXPECT_TRUE(slice != nullptr);
+    auto* start = dynamic_cast<IntegerExpr*>(slice->start.get());
+    EXPECT_TRUE(start != nullptr);
+    EXPECT_EQ(start->value, 8);
+    EXPECT_TRUE(slice->end == nullptr);
+}
+
+TEST("Parser builds a fully-open str slice expression - object[..]")
+{
+    auto program = parseOne("x = date[..]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* slice = dynamic_cast<StrSliceExpr*>(assignment->value.get());
+    EXPECT_TRUE(slice != nullptr);
+    EXPECT_TRUE(slice->start == nullptr);
+    EXPECT_TRUE(slice->end == nullptr);
+}
+
+TEST("Parser still parses a plain index expression, unaffected by the new slice-range shape")
+{
+    auto program = parseOne("f(a: A) -> i32 { a[0] }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* index = dynamic_cast<IndexExpr*>(body->result.get());
+    EXPECT_TRUE(index != nullptr);
+}
+
+TEST("Parser builds a generic method call expression with an explicit type argument")
+{
+    auto program = parseOne("x = \"42\".parse<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->method, "parse");
+    EXPECT_EQ(call->typeArgument, "i32");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(0));
+}
+
+TEST("Parser builds an ordinary method call with an empty type argument, unaffected by the new "
+     "generic-call shape")
+{
+    auto program = parseOne("f() { s = String(\"a\")  s.append(\"b\") }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* call = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_TRUE(call->typeArgument.empty());
+}
+
+TEST("Parser still parses 'field < expr' as a less-than comparison, not a misfired generic "
+     "method call - the 4-token lookahead must not misfire on an ordinary comparison")
+{
+    auto program = parseOne("f(p: P) -> bool { p.field < 10 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* binary = dynamic_cast<BinaryExpr*>(body->result.get());
+    EXPECT_TRUE(binary != nullptr);
+    EXPECT_TRUE(binary->op == TokenKind::Less);
+    auto* field = dynamic_cast<FieldExpr*>(binary->left.get());
+    EXPECT_TRUE(field != nullptr);
+    EXPECT_EQ(field->field, "field");
+}
+
 TEST("Parser builds an index-assignment statement")
 {
     auto program = parseOne("f(values: [i32; 3]) -> i32 { values[0] = 5  1 }");

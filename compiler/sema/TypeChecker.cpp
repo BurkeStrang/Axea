@@ -1331,6 +1331,41 @@ Type TypeChecker::checkExpr(const Expr& expr,
         const Type objectType =
             checkExpr(*methodCall->object, env, expectedReturnType, currentLoopBreakTypes);
 
+        // `.parse<T>()` (see docs/language/0046-generic-methods.md) - the
+        // first generic method call in this codebase, checked before the
+        // object-type-keyed dispatch chain below since it applies across
+        // both str-coercible TypeKinds (String == str, OwnedString ==
+        // String) rather than being tied to one exact TypeKind the way
+        // every other branch here is.
+        if (methodCall->method == "parse")
+        {
+            if (!isStrCoercible(objectType))
+            {
+                throw std::runtime_error("'parse' requires str, got " + typeName(objectType));
+            }
+            if (methodCall->typeArgument.empty())
+            {
+                throw std::runtime_error(
+                    "'parse' requires an explicit type argument, e.g. parse<i32>()");
+            }
+            if (!methodCall->arguments.empty())
+            {
+                throw std::runtime_error("'parse' expects 0 arguments, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            if (methodCall->typeArgument == "i32")
+            {
+                return kI32;
+            }
+            if (methodCall->typeArgument == "bool")
+            {
+                return kBool;
+            }
+            throw std::runtime_error("parse<" + methodCall->typeArgument +
+                                     "> is not supported - only parse<i32> and parse<bool> are "
+                                     "implemented this phase");
+        }
+
         if (objectType.kind == TypeKind::List)
         {
             const Type elementType =
@@ -2103,6 +2138,41 @@ Type TypeChecker::checkExpr(const Expr& expr,
         }
 
         return simpleType(objectType.elementKind, objectType.elementStructName);
+    }
+
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        // Restricted to str-coercible objects (str or String) - a
+        // deliberately narrower scope than IndexExpr's own array/slice
+        // reach, and deliberately *not* extended to arrays/slices in this
+        // phase (sub-slicing an array is explicitly out of scope per
+        // docs/language/0032-slices.md's own "Explicitly out of scope"
+        // section). See docs/language/0045-str-slicing.md.
+        const Type objectType =
+            checkExpr(*strSlice->object, env, expectedReturnType, currentLoopBreakTypes);
+        if (!isStrCoercible(objectType))
+        {
+            throw std::runtime_error("slicing requires str, got " + typeName(objectType));
+        }
+        if (strSlice->start)
+        {
+            const Type startType =
+                checkExpr(*strSlice->start, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(startType == kI32))
+            {
+                throw std::runtime_error("slice start must be i32, found " + typeName(startType));
+            }
+        }
+        if (strSlice->end)
+        {
+            const Type endType =
+                checkExpr(*strSlice->end, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(endType == kI32))
+            {
+                throw std::runtime_error("slice end must be i32, found " + typeName(endType));
+            }
+        }
+        return kStr;
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))

@@ -297,6 +297,25 @@ TEST("RegionChecker accepts returning a char literal or a char parameter directl
                  "b = identity(a)");
 }
 
+TEST("RegionChecker accepts returning a str slice taken directly from a borrowed str/String "
+     "parameter - a slice always allocates a fresh, independently-owned buffer, never aliasing "
+     "the borrowed source (see docs/language/0045-str-slicing.md)")
+{
+    checkRegions("firstFour(d: str) -> str { return d[..4] } "
+                 "date = \"2026-08-18\" "
+                 "a = firstFour(date) "
+                 "sliceOfString(s: String) -> str { return s[0..2] } "
+                 "s = String(\"Axea\") "
+                 "b = sliceOfString(s)");
+}
+
+TEST("RegionChecker accepts returning a parse<T>() result taken directly from a borrowed str "
+     "parameter - i32/bool are plain values with nothing to borrow or alias")
+{
+    checkRegions("toInt(d: str) -> i32 { return d.parse<i32>() } "
+                 "a = toInt(\"42\")");
+}
+
 TEST("RegionChecker rejects returning a struct value read via Stack<T>.peek() from a borrowed "
      "Stack parameter (see docs/language/0035-stacks.md)")
 {

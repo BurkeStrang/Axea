@@ -139,6 +139,21 @@ namespace
             return;
         }
 
+        if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+        {
+            std::cout << pad << "StrSlice\n";
+            printExpr(*strSlice->object, indent + 2);
+            if (strSlice->start)
+            {
+                printExpr(*strSlice->start, indent + 2);
+            }
+            if (strSlice->end)
+            {
+                printExpr(*strSlice->end, indent + 2);
+            }
+            return;
+        }
+
         if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
         {
             std::cout << pad << "ListNew(" << listNew->elementType << ")\n";
@@ -219,7 +234,10 @@ namespace
 
         if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
         {
-            std::cout << pad << "MethodCall(" << methodCall->method << ")\n";
+            std::cout << pad << "MethodCall(" << methodCall->method
+                      << (methodCall->typeArgument.empty() ? ""
+                                                           : "<" + methodCall->typeArgument + ">")
+                      << ")\n";
             printExpr(*methodCall->object, indent + 2);
             for (const auto& argument : methodCall->arguments)
             {
@@ -430,6 +448,23 @@ namespace
         {
             std::cout << pad << "index.set %" << indexSet->object << "[%" << indexSet->index
                       << "] = %" << indexSet->value << "\n";
+            return;
+        }
+
+        if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(&inst))
+        {
+            std::cout << pad << "%" << strSlice->dest << " = str.slice %" << strSlice->object
+                      << "[";
+            if (strSlice->start != -1)
+            {
+                std::cout << "%" << strSlice->start;
+            }
+            std::cout << "..";
+            if (strSlice->end != -1)
+            {
+                std::cout << "%" << strSlice->end;
+            }
+            std::cout << "]\n";
             return;
         }
 
@@ -759,6 +794,13 @@ namespace
         {
             std::cout << pad << "%" << bufferFinish->dest << " = buffer.finish %"
                       << bufferFinish->buffer << "\n";
+            return;
+        }
+
+        if (const auto* parse = dynamic_cast<const IrParse*>(&inst))
+        {
+            std::cout << pad << "%" << parse->dest << " = parse<" << parse->targetType << "> %"
+                      << parse->object << "\n";
             return;
         }
 

@@ -538,3 +538,20 @@ TEST("CapabilityChecker infers read for a char parameter - a plain value with no
                                              "x = identity('A')");
     EXPECT_TRUE(capabilities.at("identity")[0] == Capability::Read);
 }
+
+TEST("CapabilityChecker infers read for a str parameter that is only sliced, never mutated - "
+     "slicing produces a fresh copy, same as every other read-only operation")
+{
+    const auto capabilities = capabilitiesOf("firstFour(d: str) -> str { return d[..4] } "
+                                             "date = \"2026-08-18\" "
+                                             "x = firstFour(date)");
+    EXPECT_TRUE(capabilities.at("firstFour")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for a str parameter that is only parsed, never mutated - "
+     "parse<T>() is read-only, same as every other read-only operation")
+{
+    const auto capabilities = capabilitiesOf("toInt(d: str) -> i32 { return d.parse<i32>() } "
+                                             "x = toInt(\"42\")");
+    EXPECT_TRUE(capabilities.at("toInt")[0] == Capability::Read);
+}

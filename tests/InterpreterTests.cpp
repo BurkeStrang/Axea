@@ -1392,3 +1392,96 @@ TEST("Interpreter constructs a List<char> and prints it with each element's own 
                                "x = xs";
     EXPECT_EQ(toString(run(source)), "[a, é, 🚀]");
 }
+
+TEST("Interpreter slices a str with a bounded, open-start, open-end, and fully-open range")
+{
+    EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[..4]")), "2026");
+    EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[5..7]")), "08");
+    EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[8..]")), "18");
+    EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[..]")), "2026-08-18");
+}
+
+TEST("Interpreter slices a String, str-coerced the same way .append's own argument is")
+{
+    const std::string source = "s = String(\"Axea Language\") "
+                               "x = s[0..4]";
+    EXPECT_EQ(toString(run(source)), "Axea");
+}
+
+TEST("Interpreter's str slice is a real, independent copy - mutating the source String "
+     "afterward must not retroactively change an already-taken slice")
+{
+    const std::string source = "f() -> str { "
+                               "  s = String(\"Axea\") "
+                               "  sliced = s[0..4] "
+                               "  s.append(\" Language\") "
+                               "  return sliced "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(toString(run(source)), "Axea");
+}
+
+TEST("Interpreter produces an empty str for a zero-length slice range")
+{
+    EXPECT_EQ(toString(run("x = \"hello\"[2..2]")), "");
+}
+
+TEST("Interpreter rejects an out-of-bounds slice range")
+{
+    EXPECT_THROWS(run("x = \"hi\"[0..5]"));
+}
+
+TEST("Interpreter rejects a slice range where start exceeds end")
+{
+    EXPECT_THROWS(run("x = \"hello\"[3..1]"));
+}
+
+TEST("Interpreter slices using runtime-computed bounds, not just integer literals")
+{
+    const std::string source = "n = 4 "
+                               "date = \"2026-08-18\" "
+                               "x = date[0..n]";
+    EXPECT_EQ(toString(run(source)), "2026");
+}
+
+TEST("Interpreter parses str to i32, including a negative sign")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"42\".parse<i32>()")), 42);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"-17\".parse<i32>()")), -17);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"0\".parse<i32>()")), 0);
+}
+
+TEST("Interpreter's parse<i32> yields 0 for invalid input - a defined fallback, not an error, "
+     "matching the compiled backend's own identical choice")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"abc\".parse<i32>()")), 0);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"\".parse<i32>()")), 0);
+}
+
+TEST("Interpreter parses str to bool, requiring an exact 'true' match")
+{
+    EXPECT_EQ(std::get<bool>(run("x = \"true\".parse<bool>()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"false\".parse<bool>()")), false);
+    EXPECT_EQ(std::get<bool>(run("x = \"TRUE\".parse<bool>()")), false);
+    EXPECT_EQ(std::get<bool>(run("x = \"trueX\".parse<bool>()")), false);
+    EXPECT_EQ(std::get<bool>(run("x = \"\".parse<bool>()")), false);
+}
+
+TEST("Interpreter parses a str slice result directly - date[..4].parse<i32>()")
+{
+    const std::string source = "date = \"2026-08-18\" "
+                               "x = date[..4].parse<i32>()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2026);
+}
+
+TEST("Interpreter parses a String, str-coerced the same way .append's own argument is")
+{
+    const std::string source = "s = String(\"123\") "
+                               "x = s.parse<i32>()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 123);
+}
+
+TEST("Interpreter rejects parse<T>() for an unsupported target type")
+{
+    EXPECT_THROWS(run("x = \"5\".parse<str>()"));
+}

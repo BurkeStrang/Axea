@@ -240,6 +240,13 @@ private:
     // the only way one is ever produced), so this never needs to validate
     // its input, only encode it.
     std::string encodeCharUtf8(const std::string& codepointRef, FunctionContext& fctx);
+    // Lazily registers (memoized by target type, mirroring
+    // registerMapInstantiation's own "register once" pattern) a single
+    // shared `@axea.parse.i32`/`@axea.parse.bool` runtime function for
+    // `.parse<T>()` (see docs/language/0046-generic-methods.md), appended
+    // to parseRuntimeText_. Returns the function's own name.
+    std::string registerParseRuntime(const std::string& targetType);
+    void emitParse(const IrParse& parse, FunctionContext& fctx);
 
     // Registers (if not already registered, memoized by the canonical
     // "Map<K,V>"/"Set<T>" Axea string) a fresh monomorphized instantiation:
@@ -364,6 +371,16 @@ private:
     void emitArrayNew(const IrArrayNew& arrayNew, FunctionContext& fctx);
     void emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fctx);
     void emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fctx);
+    // `object[start..end]` etc (see docs/language/0045-str-slicing.md) -
+    // resolves `object` to a bare i8* (resolveStrPtr, shared with
+    // emitStringNew/emitStringAppend), defaults a missing `start` to 0 and
+    // a missing `end` to a runtime @strlen call, then mallocs and copies
+    // exactly `end - start` bytes plus a null terminator - a genuine copy,
+    // not a zero-copy view, despite the design doc's own "no allocation"
+    // framing (see that document's own Design section for why `str`'s
+    // existing null-terminated-buffer representation makes a real
+    // sub-range view impossible without changing `str` itself).
+    void emitStrSlice(const IrStrSlice& strSlice, FunctionContext& fctx);
     // A fresh, empty {length: 0, data: null} heap record - same malloc +
     // null-GEP sizeof idiom as emitStructNew/emitArrayNew (see
     // docs/language/0033-lists.md).
@@ -653,4 +670,13 @@ private:
     int nextSortedSetInstantiationId_ = 0;
     std::ostringstream sortedSetTypeDeclsText_;
     std::ostringstream sortedSetRuntimeText_;
+
+    // `.parse<T>()` (see docs/language/0046-generic-methods.md) - only two
+    // possible target types this phase, so plain flags rather than a
+    // dedup-by-string map/set are enough (mirrors the same "register
+    // once" pattern as mapInstantiationIds_ above, at the smallest scale
+    // that pattern comes in).
+    bool parseI32Registered_ = false;
+    bool parseBoolRegistered_ = false;
+    std::ostringstream parseRuntimeText_;
 };

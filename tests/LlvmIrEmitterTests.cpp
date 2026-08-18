@@ -1196,6 +1196,77 @@ TEST("LlvmIrEmitter prints a List<char> element via the same UTF-8 encoder, not 
     EXPECT_TRUE(ir.find("@axea.print.i24") == std::string::npos);
 }
 
+TEST("LlvmIrEmitter's bounded str slice mallocs a fresh buffer and copies exactly end-start "
+     "bytes via a hand-rolled loop, no phi")
+{
+    auto ir = emitLlvmIr("f() -> str { date = \"2026-08-18\"  return date[5..7] }");
+    EXPECT_TRUE(ir.find("= sub i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("strslice.copy.header") != std::string::npos);
+    EXPECT_TRUE(ir.find("strslice.copy.body") != std::string::npos);
+    EXPECT_TRUE(ir.find("strslice.copy.done") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's open-start str slice defaults start to the literal 0")
+{
+    auto ir = emitLlvmIr("f() -> str { date = \"2026-08-18\"  return date[..4] }");
+    EXPECT_TRUE(ir.find("= sub i32 %") != std::string::npos);
+    EXPECT_TRUE(ir.find(", 0\n") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's open-end str slice computes the missing end via a runtime @strlen call")
+{
+    auto ir = emitLlvmIr("f() -> str { date = \"2026-08-18\"  return date[8..] }");
+    EXPECT_TRUE(ir.find("call i64 @strlen(i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's str slice result is a bare i8*, not a String header - always str, "
+     "regardless of whether the sliced object was itself a str or a String")
+{
+    auto ir = emitLlvmIr("useStr(s: str) -> str { return s } "
+                         "f() -> str { s = String(\"Axea Language\")  return useStr(s[0..4]) }");
+    EXPECT_TRUE(ir.find("call i8* @useStr(i8* %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's parse<i32>() calls a single shared @axea.parse.i32 runtime function, not "
+     "inlined logic at each call site")
+{
+    auto ir = emitLlvmIr("f() -> i32 { return \"42\".parse<i32>() }");
+    EXPECT_TRUE(ir.find("define i32 @axea.parse.i32(i8* %s)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.parse.i32(i8*") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's parse<bool>() calls a single shared @axea.parse.bool runtime function, "
+     "returning a real i1")
+{
+    auto ir = emitLlvmIr("f() -> bool { return \"true\".parse<bool>() }");
+    EXPECT_TRUE(ir.find("define i1 @axea.parse.bool(i8* %s)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i1 @axea.parse.bool(i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers @axea.parse.i32 only once even when parse<i32>() is called "
+     "multiple times in the same program")
+{
+    auto ir = emitLlvmIr("f() -> i32 { "
+                         "  a = \"1\".parse<i32>() "
+                         "  b = \"2\".parse<i32>() "
+                         "  return a + b "
+                         "}");
+    const auto first = ir.find("define i32 @axea.parse.i32");
+    EXPECT_TRUE(first != std::string::npos);
+    const auto second = ir.find("define i32 @axea.parse.i32", first + 1);
+    EXPECT_TRUE(second == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's parse<i32> resolves a String argument to a bare i8* first, the same "
+     "str-coercion resolveStrPtr already shares with String.append/Buffer.append")
+{
+    auto ir = emitLlvmIr("f() -> i32 { s = String(\"42\")  return s.parse<i32>() }");
+    EXPECT_TRUE(ir.find("call i32 @axea.parse.i32(i8*") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter hoists a string literal into a module-level global constant")
 {
     auto ir = emitLlvmIr("greeting(name: str) -> str { return \"hello\" }");

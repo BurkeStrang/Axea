@@ -770,6 +770,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             isBufferExpr(*methodCall->object, ctx.function, scope);
         const int object = lowerExpr(*methodCall->object, scope, ctx);
 
+        if (methodCall->method == "parse")
+        {
+            // Unambiguous by name alone - no disambiguation kind needed
+            // (see docs/language/0046-generic-methods.md).
+            auto inst = std::make_unique<IrParse>();
+            inst->object = object;
+            inst->targetType = methodCall->typeArgument;
+            return emit(ctx, std::move(inst));
+        }
+
         if (methodCall->method == "push")
         {
             // "push" is unit-typed (see docs/language/0033-lists.md), but
@@ -1214,6 +1224,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         auto inst = std::make_unique<IrIndexGet>();
         inst->object = object;
         inst->index = indexReg;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        const int object = lowerExpr(*strSlice->object, scope, ctx);
+        auto inst = std::make_unique<IrStrSlice>();
+        inst->object = object;
+        inst->start = strSlice->start ? lowerExpr(*strSlice->start, scope, ctx) : -1;
+        inst->end = strSlice->end ? lowerExpr(*strSlice->end, scope, ctx) : -1;
         return emit(ctx, std::move(inst));
     }
 

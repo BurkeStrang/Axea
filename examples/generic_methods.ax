@@ -1,0 +1,17 @@
+extractYear(date: str) -> i32
+{
+    return date[..4].parse<i32>()
+}
+
+date = "2026-08-18"
+year = extractYear(date)
+
+count = "42".parse<i32>()
+negative = "-17".parse<i32>()
+invalid = "abc".parse<i32>()
+
+enabled = "true".parse<bool>()
+disabled = "false".parse<bool>()
+
+s = String("123")
+fromString = s.parse<i32>()

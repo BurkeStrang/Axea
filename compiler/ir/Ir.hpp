@@ -106,6 +106,20 @@ struct IrIndexSet final : IrInst
     int value;
 };
 
+// `object[start..end]` / `object[..end]` / `object[start..]` / `object[..]`
+// (see docs/language/0045-str-slicing.md) - `object` is always
+// str-coercible (str or String, resolved to a bare i8* at the LLVM layer
+// exactly like IrStringAppend's own operands are). `start`/`end` are each
+// independently -1 when absent (mirrors IrInst's own dest == -1
+// "no destination" convention) - -1 means "0" for start, "the object's
+// own runtime strlen" for end.
+struct IrStrSlice final : IrInst
+{
+    int object;
+    int start;
+    int end;
+};
+
 // `List<elem>()` - a fresh, empty, growable list (see docs/language/0033-lists.md).
 // `elementTypeName` is carried explicitly (unlike IrArrayNew, which infers it
 // from its own elements) - a brand-new empty list has no elements to infer
@@ -440,6 +454,19 @@ struct IrBufferReserve final : IrInst
 struct IrBufferFinish final : IrInst
 {
     int buffer;
+};
+
+// `object.parse<T>()` (see docs/language/0046-generic-methods.md) - the
+// first generic method call in this codebase. `object` is always
+// str-coercible (str or String, resolved to a bare i8* at the LLVM layer
+// exactly like IrStringAppend's own operands). `targetType` is the
+// canonical Axea type string of the explicit type argument, restricted
+// to "i32"/"bool" this phase (TypeChecker already rejects anything else
+// before this instruction is ever lowered).
+struct IrParse final : IrInst
+{
+    int object;
+    std::string targetType;
 };
 
 // `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's

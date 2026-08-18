@@ -177,6 +177,34 @@ struct IndexExpr final : Expr
     std::unique_ptr<Expr> index;
 };
 
+// `object[start..end]` / `object[..end]` / `object[start..]` / `object[..]`
+// - a zero-copy-*conceptually* (see docs/language/0045-str-slicing.md for
+// why this implementation actually copies) range slice, restricted to a
+// str-coercible `object` (str or String). Deliberately a separate AST
+// node from IndexExpr, not a variant of it - a bare `arr[i]` and a range
+// `str[a..b]` apply to entirely different object types and produce
+// entirely different results, the same "separate over shared" call this
+// codebase already makes for every other pair of genuinely different
+// operations. `start`/`end` are each independently optional (null means
+// "from the beginning" / "to the end"), never both null and no `..` at
+// the same time - that shape is a plain IndexExpr instead, decided by
+// the parser.
+struct StrSliceExpr final : Expr
+{
+    StrSliceExpr(std::unique_ptr<Expr> object,
+                 std::unique_ptr<Expr> start,
+                 std::unique_ptr<Expr> end)
+        : object(std::move(object)),
+          start(std::move(start)),
+          end(std::move(end))
+    {
+    }
+
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> start; // null => 0
+    std::unique_ptr<Expr> end;   // null => the object's own runtime length
+};
+
 // `List<elem>()` - always empty parens this phase (construction only, no
 // initial elements). `elementType` is a single identifier, same one-level
 // restriction arrays/slices already have. See docs/language/0033-lists.md.
@@ -197,20 +225,31 @@ struct ListNewExpr final : Expr
 // user-defined method system) - anything else is a TypeChecker error, not a
 // parser one, mirroring how ".length" vs. any other field name is resolved
 // for arrays/slices.
+// `object.method(args)`, and now also `object.method<TypeArg>(args)` (see
+// docs/language/0046-generic-methods.md) - `typeArgument` is empty for
+// every ordinary method call (every collection method up to this phase),
+// non-empty only for a generic call's own explicit type argument
+// (currently only `.parse<T>()` uses this). Reusing this same node rather
+// than adding a dedicated one keeps every existing pass that already
+// walks `object`/`arguments` generically (CapabilityChecker,
+// RegionChecker) working unchanged for the new shape too.
 struct MethodCallExpr final : Expr
 {
     MethodCallExpr(std::unique_ptr<Expr> object,
                    std::string method,
-                   std::vector<std::unique_ptr<Expr>> arguments)
+                   std::vector<std::unique_ptr<Expr>> arguments,
+                   std::string typeArgument = "")
         : object(std::move(object)),
           method(std::move(method)),
-          arguments(std::move(arguments))
+          arguments(std::move(arguments)),
+          typeArgument(std::move(typeArgument))
     {
     }
 
     std::unique_ptr<Expr> object;
     std::string method;
     std::vector<std::unique_ptr<Expr>> arguments;
+    std::string typeArgument; // empty => not a generic call
 };
 
 // `Map<key,value>()` - always empty parens (construction only, no initial

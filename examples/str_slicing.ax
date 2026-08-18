@@ -1,0 +1,15 @@
+extractYear(date: str) -> str
+{
+    return date[..4]
+}
+
+date = "2026-08-18"
+year = date[..4]
+month = date[5..7]
+day = date[8..]
+whole = date[..]
+
+viaFn = extractYear(date)
+
+name = String("Axea Language")
+firstFour = name[0..4]

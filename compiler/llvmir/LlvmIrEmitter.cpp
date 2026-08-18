@@ -596,6 +596,19 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[constChar->dest] = "i24";
         }
+        else if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(inst.get()))
+        {
+            // Always a bare i8* (see docs/language/0045-str-slicing.md) -
+            // the result is always a fresh str, never a String, regardless
+            // of whether `object` itself was a str or a String.
+            fctx.registerTypes[strSlice->dest] = "i8*";
+        }
+        else if (const auto* parse = dynamic_cast<const IrParse*>(inst.get()))
+        {
+            // See docs/language/0046-generic-methods.md - TypeChecker
+            // already restricts targetType to "i32"/"bool".
+            fctx.registerTypes[parse->dest] = parse->targetType == "bool" ? "i1" : "i32";
+        }
         else if (const auto* binOp = dynamic_cast<const IrBinOp*>(inst.get()))
         {
             const bool isComparison =
@@ -4775,6 +4788,95 @@ void LlvmIrEmitter::emitStringAppend(const IrStringAppend& stringAppend, Functio
     *fctx.out << "  store i8* %" << newDataReg << ", i8** %" << dataPtrPtrReg << "\n";
 }
 
+void LlvmIrEmitter::emitStrSlice(const IrStrSlice& strSlice, FunctionContext& fctx)
+{
+    const std::string objectPtr = resolveStrPtr(strSlice.object, fctx);
+
+    std::string startRef = "0";
+    if (strSlice.start != -1)
+    {
+        startRef = ref(strSlice.start, fctx);
+    }
+
+    std::string endRef;
+    if (strSlice.end != -1)
+    {
+        endRef = ref(strSlice.end, fctx);
+    }
+    else
+    {
+        const int objLen64Reg = allocateRegister(fctx);
+        *fctx.out << "  %" << objLen64Reg << " = call i64 @strlen(i8* " << objectPtr << ")\n";
+        const int objLenReg = allocateRegister(fctx);
+        *fctx.out << "  %" << objLenReg << " = trunc i64 %" << objLen64Reg << " to i32\n";
+        endRef = "%" + std::to_string(objLenReg);
+    }
+
+    const int lengthReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lengthReg << " = sub i32 " << endRef << ", " << startRef << "\n";
+
+    const int length64Reg = allocateRegister(fctx);
+    *fctx.out << "  %" << length64Reg << " = zext i32 %" << lengthReg << " to i64\n";
+    const int bufBytesReg = allocateRegister(fctx);
+    *fctx.out << "  %" << bufBytesReg << " = add i64 %" << length64Reg << ", 1\n";
+    const int destReg = defineRegister(strSlice.dest, fctx);
+    *fctx.out << "  %" << destReg << " = call i8* @malloc(i64 %" << bufBytesReg << ")\n";
+
+    // Copy loop: `length` bytes from objectPtr[start..start+length) into
+    // the new buffer[0..length) - same hand-verified alloca/load/store
+    // counter idiom every other copy loop in this backend uses, no phi.
+    const int labelId = fctx.nextLabel++;
+    const std::string headerLabel = "strslice.copy.header" + std::to_string(labelId);
+    const std::string bodyLabel = "strslice.copy.body" + std::to_string(labelId);
+    const std::string doneLabel = "strslice.copy.done" + std::to_string(labelId);
+
+    const int counterSlotReg = allocateRegister(fctx);
+    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << headerLabel << ":\n";
+    fctx.currentLabel = headerLabel;
+    const int iReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int condReg = allocateRegister(fctx);
+    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << lengthReg << "\n";
+    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
+              << "\n";
+
+    *fctx.out << bodyLabel << ":\n";
+    fctx.currentLabel = bodyLabel;
+    const int iForSrcReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int srcOffReg = allocateRegister(fctx);
+    *fctx.out << "  %" << srcOffReg << " = add i32 " << startRef << ", %" << iForSrcReg << "\n";
+    const int srcPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << srcPtrReg << " = getelementptr i8, i8* " << objectPtr << ", i32 %"
+              << srcOffReg << "\n";
+    const int byteValReg = allocateRegister(fctx);
+    *fctx.out << "  %" << byteValReg << " = load i8, i8* %" << srcPtrReg << "\n";
+    const int iForDstReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int dstPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstPtrReg << " = getelementptr i8, i8* %" << destReg << ", i32 %"
+              << iForDstReg << "\n";
+    *fctx.out << "  store i8 %" << byteValReg << ", i8* %" << dstPtrReg << "\n";
+    const int iForIncReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int iNextReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << doneLabel << ":\n";
+    fctx.currentLabel = doneLabel;
+
+    const int nullPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << nullPtrReg << " = getelementptr i8, i8* %" << destReg << ", i32 %"
+              << lengthReg << "\n";
+    *fctx.out << "  store i8 0, i8* %" << nullPtrReg << "\n";
+}
+
 void LlvmIrEmitter::ensureBufferCapacity(const std::string& bufferRef,
                                          const std::string& neededRef,
                                          FunctionContext& fctx)
@@ -4989,6 +5091,140 @@ std::string LlvmIrEmitter::encodeCharUtf8(const std::string& codepointRef, Funct
     fctx.currentLabel = doneLabel;
 
     return "%" + std::to_string(bufReg);
+}
+
+std::string LlvmIrEmitter::registerParseRuntime(const std::string& targetType)
+{
+    if (targetType == "i32")
+    {
+        const std::string fnName = "@axea.parse.i32";
+        if (parseI32Registered_)
+        {
+            return fnName;
+        }
+        parseI32Registered_ = true;
+
+        // Hand-rolled digit loop (see docs/language/0046-generic-methods.md)
+        // - optional leading '-', then decimal digits until a
+        // non-digit/null terminator. No overflow checking, and invalid
+        // input (no digits at all) parses as 0 - a defined, documented
+        // fallback, matching every other "no bounds checking in compiled
+        // code" simplification in this backend. alloca/load/store for
+        // every loop-carried value (idx/acc/sign), no phi, `select` to
+        // apply the sign at the end - the same idioms
+        // ensureBufferCapacity/encodeCharUtf8 already established.
+        parseRuntimeText_ << R"(
+define i32 @axea.parse.i32(i8* %s) {
+entry:
+  %idxSlot = alloca i32
+  %accSlot = alloca i32
+  %negSlot = alloca i32
+  store i32 0, i32* %accSlot
+  %c0p = getelementptr i8, i8* %s, i32 0
+  %c0 = load i8, i8* %c0p
+  %isNeg = icmp eq i8 %c0, 45
+  br i1 %isNeg, label %neg, label %nonneg
+neg:
+  store i32 1, i32* %idxSlot
+  store i32 1, i32* %negSlot
+  br label %loophdr
+nonneg:
+  store i32 0, i32* %idxSlot
+  store i32 0, i32* %negSlot
+  br label %loophdr
+loophdr:
+  %idx = load i32, i32* %idxSlot
+  %cp = getelementptr i8, i8* %s, i32 %idx
+  %c = load i8, i8* %cp
+  %ge0 = icmp sge i8 %c, 48
+  %le9 = icmp sle i8 %c, 57
+  %isDigit = and i1 %ge0, %le9
+  br i1 %isDigit, label %loopbody, label %loopdone
+loopbody:
+  %acc0 = load i32, i32* %accSlot
+  %acc1 = mul i32 %acc0, 10
+  %dv8 = sub i8 %c, 48
+  %dv32 = zext i8 %dv8 to i32
+  %acc2 = add i32 %acc1, %dv32
+  store i32 %acc2, i32* %accSlot
+  %idx2 = load i32, i32* %idxSlot
+  %idx3 = add i32 %idx2, 1
+  store i32 %idx3, i32* %idxSlot
+  br label %loophdr
+loopdone:
+  %finalAcc = load i32, i32* %accSlot
+  %negFlag = load i32, i32* %negSlot
+  %isNegBool = icmp ne i32 %negFlag, 0
+  %negated = sub i32 0, %finalAcc
+  %result = select i1 %isNegBool, i32 %negated, i32 %finalAcc
+  ret i32 %result
+}
+)";
+        return fnName;
+    }
+
+    // "bool"
+    const std::string fnName = "@axea.parse.bool";
+    if (parseBoolRegistered_)
+    {
+        return fnName;
+    }
+    parseBoolRegistered_ = true;
+
+    // Hand-rolled short-circuit byte comparison against the fixed literal
+    // "true" (see docs/language/0046-generic-methods.md) - branches, not
+    // an unrolled straight-line chain, specifically so a short input
+    // (e.g. "t") never reads past its own null terminator: each
+    // subsequent byte is only read after confirming the previous one
+    // matched a non-null expected character, guaranteeing the string
+    // continues at least that far. Anything other than exactly "true"
+    // (including "TRUE", "false", "", "trueish") parses as false - a
+    // defined, lenient fallback, not an error, matching parse<i32>'s own
+    // "invalid input yields a harmless default" choice.
+    parseRuntimeText_ << R"(
+define i1 @axea.parse.bool(i8* %s) {
+entry:
+  %c0p = getelementptr i8, i8* %s, i32 0
+  %c0 = load i8, i8* %c0p
+  %e0 = icmp eq i8 %c0, 116
+  br i1 %e0, label %check1, label %isfalse
+check1:
+  %c1p = getelementptr i8, i8* %s, i32 1
+  %c1 = load i8, i8* %c1p
+  %e1 = icmp eq i8 %c1, 114
+  br i1 %e1, label %check2, label %isfalse
+check2:
+  %c2p = getelementptr i8, i8* %s, i32 2
+  %c2 = load i8, i8* %c2p
+  %e2 = icmp eq i8 %c2, 117
+  br i1 %e2, label %check3, label %isfalse
+check3:
+  %c3p = getelementptr i8, i8* %s, i32 3
+  %c3 = load i8, i8* %c3p
+  %e3 = icmp eq i8 %c3, 101
+  br i1 %e3, label %check4, label %isfalse
+check4:
+  %c4p = getelementptr i8, i8* %s, i32 4
+  %c4 = load i8, i8* %c4p
+  %e4 = icmp eq i8 %c4, 0
+  br i1 %e4, label %istrue, label %isfalse
+istrue:
+  ret i1 1
+isfalse:
+  ret i1 0
+}
+)";
+    return fnName;
+}
+
+void LlvmIrEmitter::emitParse(const IrParse& parse, FunctionContext& fctx)
+{
+    const std::string objectPtr = resolveStrPtr(parse.object, fctx);
+    const std::string fnName = registerParseRuntime(parse.targetType);
+    const std::string retType = parse.targetType == "bool" ? "i1" : "i32";
+    const int destReg = defineRegister(parse.dest, fctx);
+    *fctx.out << "  %" << destReg << " = call " << retType << " " << fnName << "(i8* " << objectPtr
+              << ")\n";
 }
 
 void LlvmIrEmitter::emitBufferNew(const IrBufferNew& bufferNew, FunctionContext& fctx)
@@ -6183,6 +6419,16 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitIndexSet(*indexSet, fctx);
             continue;
         }
+        if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(inst.get()))
+        {
+            emitStrSlice(*strSlice, fctx);
+            continue;
+        }
+        if (const auto* parse = dynamic_cast<const IrParse*>(inst.get()))
+        {
+            emitParse(*parse, fctx);
+            continue;
+        }
         if (const auto* listNew = dynamic_cast<const IrListNew*>(inst.get()))
         {
             emitListNew(*listNew, fctx);
@@ -7367,6 +7613,14 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // docs/language/0041-sorted-sets.md).
     out << sortedSetTypeDeclsText_.str();
     out << sortedSetRuntimeText_.str();
+    // Same reasoning again, for `.parse<T>()` (see
+    // docs/language/0046-generic-methods.md) - registerParseRuntime is
+    // driven by emitParse itself (called during emitFunction/emitMain
+    // above), not by inferTypes/llvmType like every registration above,
+    // but the ordering guarantee is identical: every function and
+    // topLevel has already been fully emitted by this point, so
+    // parseRuntimeText_ is complete.
+    out << parseRuntimeText_.str();
     out << helpers.str();
     out << mainOut.str();
 

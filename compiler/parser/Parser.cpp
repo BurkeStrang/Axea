@@ -610,14 +610,34 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
         {
             const auto& field = expect(TokenKind::Identifier, "expected field name after '.'");
 
-            // `object.method(args)` vs. `object.field` (docs/language/0033-lists.md)
-            // - decided purely by whether '(' follows the identifier.
-            if (match(TokenKind::LeftParen))
+            // `object.method<T>(args)` (see docs/language/0046-generic-methods.md)
+            // - committed to only on the exact 4-token lookahead
+            // '<' Identifier '>' '(' immediately following the method
+            // name, so an ordinary comparison like `x.field < y` (where
+            // '<' is the less-than operator, not a generic-call opener)
+            // is never misparsed: if this exact shape isn't present,
+            // nothing is consumed here and parsing falls through to the
+            // existing method-call-vs-field logic below unchanged.
+            std::string typeArgument;
+            if (current().kind == TokenKind::Less && peek(1).kind == TokenKind::Identifier &&
+                peek(2).kind == TokenKind::Greater && peek(3).kind == TokenKind::LeftParen)
             {
+                advance();                     // '<'
+                typeArgument = advance().text; // the type argument identifier
+                advance();                     // '>'
+            }
+
+            // `object.method(args)` vs. `object.field` (docs/language/0033-lists.md)
+            // - decided purely by whether '(' follows the identifier (or,
+            // for a generic call, was already confirmed present above).
+            const bool isCall = !typeArgument.empty() || current().kind == TokenKind::LeftParen;
+            if (isCall)
+            {
+                expect(TokenKind::LeftParen, "expected '(' after method name");
                 auto args = parseArgumentList();
                 expect(TokenKind::RightParen, "expected ')' after method arguments");
-                expr =
-                    std::make_unique<MethodCallExpr>(std::move(expr), field.text, std::move(args));
+                expr = std::make_unique<MethodCallExpr>(
+                    std::move(expr), field.text, std::move(args), typeArgument);
                 continue;
             }
 
@@ -627,9 +647,31 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
 
         if (match(TokenKind::LeftBracket))
         {
-            auto index = parseExpression();
+            // Either a plain index (`arr[i]`) or a range slice
+            // (`str[a..b]`/`str[..b]`/`str[a..]`/`str[..]` - see
+            // docs/language/0045-str-slicing.md), distinguished by
+            // whether '..' follows the (optional) start expression.
+            std::unique_ptr<Expr> start;
+            if (current().kind != TokenKind::DotDot)
+            {
+                start = parseExpression();
+            }
+
+            if (match(TokenKind::DotDot))
+            {
+                std::unique_ptr<Expr> end;
+                if (current().kind != TokenKind::RightBracket)
+                {
+                    end = parseExpression();
+                }
+                expect(TokenKind::RightBracket, "expected ']' after slice range");
+                expr = std::make_unique<StrSliceExpr>(
+                    std::move(expr), std::move(start), std::move(end));
+                continue;
+            }
+
             expect(TokenKind::RightBracket, "expected ']' after index");
-            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(start));
             continue;
         }
 

@@ -878,6 +878,43 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     {
         auto objectValue = evaluate(*methodCall->object, env);
 
+        // `.parse<T>()` (see docs/language/0046-generic-methods.md) - the
+        // first generic method call in this codebase, checked before the
+        // object-type-keyed dispatch chain below for the same reason
+        // TypeChecker checks it first. Mirrors LlvmIrEmitter's own
+        // @axea.parse.i32/@axea.parse.bool hand-rolled logic exactly (same
+        // leading-'-' handling, same digit loop, same "invalid input
+        // yields a harmless default" fallback; same "must be exactly
+        // 'true'" bool rule) so the interpreter and the compiled backend
+        // agree byte-for-byte, verified directly via the usual
+        // diff-against-compiled-output discipline.
+        if (methodCall->method == "parse")
+        {
+            const std::string content = asStrContent(objectValue);
+            if (methodCall->typeArgument == "i32")
+            {
+                std::size_t idx = 0;
+                bool negative = false;
+                if (!content.empty() && content[0] == '-')
+                {
+                    negative = true;
+                    idx = 1;
+                }
+                std::int64_t acc = 0;
+                while (idx < content.size() && content[idx] >= '0' && content[idx] <= '9')
+                {
+                    acc = acc * 10 + (content[idx] - '0');
+                    ++idx;
+                }
+                return negative ? -acc : acc;
+            }
+            if (methodCall->typeArgument == "bool")
+            {
+                return content == "true";
+            }
+            throw std::runtime_error("parse<" + methodCall->typeArgument + "> is not supported");
+        }
+
         if (const auto* list = std::get_if<std::shared_ptr<ListInstance>>(&objectValue))
         {
             if (methodCall->method == "push")
@@ -1533,6 +1570,28 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                                      std::to_string(indexable->length));
         }
         return (*indexable->elements)[static_cast<std::size_t>(indexValue)];
+    }
+
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        // A real substring copy, not a zero-copy view - see
+        // docs/language/0045-str-slicing.md. Unlike the LLVM backend
+        // (which never bounds-checks - matches every other out-of-bounds
+        // case there), this validates the range at runtime, the same
+        // "interpreter checks, compiled code does not" split every other
+        // indexing operation here already follows.
+        const std::string content = asStrContent(evaluate(*strSlice->object, env));
+        const auto length = static_cast<std::int64_t>(content.size());
+        const std::int64_t start = strSlice->start ? asInt(evaluate(*strSlice->start, env)) : 0;
+        const std::int64_t end = strSlice->end ? asInt(evaluate(*strSlice->end, env)) : length;
+        if (start < 0 || end > length || start > end)
+        {
+            throw std::runtime_error("invalid slice range [" + std::to_string(start) + ".." +
+                                     std::to_string(end) + "] for str of length " +
+                                     std::to_string(length));
+        }
+        return content.substr(static_cast<std::size_t>(start),
+                              static_cast<std::size_t>(end - start));
     }
 
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))

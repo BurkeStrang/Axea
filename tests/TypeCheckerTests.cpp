@@ -1054,3 +1054,82 @@ TEST("TypeChecker accepts char as a parameter, return type, local declared type,
           "y = identity(x) "
           "l = Letter { value: 'Z' }");
 }
+
+TEST("TypeChecker accepts bounded, open-start, open-end, and fully-open str slice expressions")
+{
+    check("date = \"2026-08-18\" "
+          "year = date[..4] "
+          "month = date[5..7] "
+          "day = date[8..] "
+          "whole = date[..]");
+}
+
+TEST("TypeChecker accepts slicing a String - String lends a str the same way .append does")
+{
+    check("s = String(\"Axea\") "
+          "x = s[0..2]");
+}
+
+TEST("TypeChecker requires i32 slice bounds")
+{
+    EXPECT_THROWS(check("date = \"2026-08-18\"  x = date[\"a\"..4]"));
+    EXPECT_THROWS(check("date = \"2026-08-18\"  x = date[0..true]"));
+}
+
+TEST("TypeChecker rejects slicing a non-str-coercible type")
+{
+    EXPECT_THROWS(check("x = [1, 2, 3][..2]"));
+    EXPECT_THROWS(check("x = 5[..2]"));
+}
+
+TEST("TypeChecker types a str slice expression as str, not String")
+{
+    check("date = \"2026-08-18\" "
+          "greet(name: str) -> str { return name } "
+          "x = greet(date[..4])");
+}
+
+TEST("TypeChecker accepts parse<i32>() and parse<bool>(), typing the result as i32/bool "
+     "respectively")
+{
+    check("n: i32 = \"42\".parse<i32>() "
+          "b: bool = \"true\".parse<bool>()");
+}
+
+TEST("TypeChecker accepts parse<T>() on a String, str-coerced the same way .append's own "
+     "argument is")
+{
+    check("s = String(\"42\") "
+          "n = s.parse<i32>()");
+}
+
+TEST("TypeChecker rejects parse<T>() on a non-str-coercible object")
+{
+    EXPECT_THROWS(check("x = 5.parse<i32>()"));
+    EXPECT_THROWS(check("x = true.parse<i32>()"));
+}
+
+TEST("TypeChecker rejects parse<T>() for an unsupported target type")
+{
+    EXPECT_THROWS(check("x = \"5\".parse<str>()"));
+    EXPECT_THROWS(check("x = \"5\".parse<char>()"));
+}
+
+TEST("TypeChecker rejects parse() with no explicit type argument")
+{
+    EXPECT_THROWS(check("x = \"5\".parse()"));
+}
+
+TEST("TypeChecker rejects parse<T>() called with an argument")
+{
+    EXPECT_THROWS(check("x = \"5\".parse<i32>(1)"));
+}
+
+TEST("TypeChecker still parses/checks 'field < expr' as a comparison, not a misfired generic "
+     "call, when the field itself happens to be i32")
+{
+    check("struct P { field: i32 } "
+          "f(p: P) -> bool { return p.field < 10 } "
+          "p = P { field: 5 } "
+          "x = f(p)");
+}

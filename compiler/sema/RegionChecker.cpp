@@ -586,6 +586,27 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        // Same reasoning as StringNewExpr above - a slice always allocates
+        // a fresh, independently-owned buffer and copies the relevant
+        // bytes into it (see docs/language/0045-str-slicing.md), never
+        // aliasing `object`'s own buffer, so the result is always Owned
+        // regardless of `object`'s own region. All three sub-expressions
+        // are still walked for the same recursive-region-tracking reason
+        // every other sub-expression here is.
+        regionOfExpr(*strSlice->object, env, function, currentLoopBreakRegions);
+        if (strSlice->start)
+        {
+            regionOfExpr(*strSlice->start, env, function, currentLoopBreakRegions);
+        }
+        if (strSlice->end)
+        {
+            regionOfExpr(*strSlice->end, env, function, currentLoopBreakRegions);
+        }
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
         for (const auto& argument : call->arguments)

@@ -127,6 +127,25 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        // Read-only, same as IndexExpr above - produces a fresh str, never
+        // mutates `object` (see docs/language/0045-str-slicing.md).
+        // start/end recurse purely so a mutating expression nested inside
+        // one of them (unusual, but not disallowed - e.g. a call with a
+        // write-capability argument) is still detected.
+        inferExpr(*strSlice->object, function, changed);
+        if (strSlice->start)
+        {
+            inferExpr(*strSlice->start, function, changed);
+        }
+        if (strSlice->end)
+        {
+            inferExpr(*strSlice->end, function, changed);
+        }
+        return;
+    }
+
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
         for (const auto& argument : call->arguments)
@@ -328,6 +347,20 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
     {
         checkMovesInExpr(*index->object, function, moved);
         checkMovesInExpr(*index->index, function, moved);
+        return;
+    }
+
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        checkMovesInExpr(*strSlice->object, function, moved);
+        if (strSlice->start)
+        {
+            checkMovesInExpr(*strSlice->start, function, moved);
+        }
+        if (strSlice->end)
+        {
+            checkMovesInExpr(*strSlice->end, function, moved);
+        }
         return;
     }
 

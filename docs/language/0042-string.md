@@ -11,16 +11,17 @@
 string," with `String("Axea")` construction and `.append(...)`. This phase
 implements exactly that surface - construction, `.append`, `.length` - and
 nothing from the wider `docs/std/strings/` design set beyond it:
-`Buffer` (`0004-buffer.md`) followed in its own later phase
-(`docs/language/0043-buffer.md`); interpolation-lowering, slicing
-(`0005-slicing.md`), Unicode-aware operations (`0006-unicode.md`),
-FFI/`cstr` (`0007-ffi.md`), and `.parse<T>()` (`0008-parsing-formatting.md`)
-remain out of scope. Every one of those needs a language feature that
-doesn't exist yet (range-slicing syntax, generic method calls, `extern`
-declarations, a `?` operator) - this phase's own scope is deliberately just
-the byte-buffer type itself, the same "scope down to what's actually
-implementable, defer the rest explicitly" call every collection this
-session has made.
+`Buffer` (`0004-buffer.md`), range-slicing (`0005-slicing.md`), and
+`.parse<T>()` (`0008-parsing-formatting.md`) all followed in their own
+later phases (`docs/language/0043-buffer.md`, `docs/language/0045-str-slicing.md`,
+`docs/language/0046-generic-methods.md`); interpolation-lowering,
+Unicode-aware operations (`0006-unicode.md`), and FFI/`cstr`
+(`0007-ffi.md`) remain out of scope. Every one of those still needs a
+language feature that doesn't exist yet (`extern` declarations, the `?`
+operator) - this phase's own scope is deliberately just the byte-buffer
+type itself, the same "scope down to what's actually implementable, defer
+the rest explicitly" call every
+collection this session has made.
 
 ```ax
 name = String("Axea")
@@ -174,7 +175,9 @@ in ordinary function-call argument checking (see `docs/language/0032-slices.md`
 for that check's own original shape). `.length` gets its own standalone
 `checkFieldType` case, mirroring every non-indexable collection's own
 identical pattern - `String` is deliberately not added to `isIndexable`
-(slicing is out of scope this phase).
+(single-character `[i]` indexing remains out of scope; range-slicing
+`String[a..b]` followed later via a separate, dedicated AST node rather
+than `isIndexable` - see `docs/language/0045-str-slicing.md`).
 
 ```text
 $ ax capabilities bad.ax   # x = String(5)
@@ -325,9 +328,11 @@ diverge.
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No `[i]`/slicing.** `docs/std/strings/0005-slicing.md`'s own
-  `date[..4]` syntax needs a range-slicing operator that exists nowhere in
-  this language yet.
+- **No single-character `[i]` indexing.** Range-slicing (`date[..4]`) is
+  now implemented separately (`docs/language/0045-str-slicing.md`), but
+  indexing a single character out of a `str`/`String` still isn't -
+  `char` (`docs/language/0044-char.md`) exists as a type now, but nothing
+  yet extracts one out of a string's own bytes.
 - **No interpolation-lowering.** `Buffer`/`.finish()` itself is now
   implemented (`docs/language/0043-buffer.md`), but the compiler-driven
   lowering of string interpolation into it is still purely aspirational -
@@ -342,9 +347,10 @@ diverge.
   language yet - though `String`'s own null-terminated buffer already
   makes an eventual `to_cstr()` a trivial "return the data pointer"
   operation once `extern` exists.
-- **No `.parse<T>()`.** `docs/std/strings/0008-parsing-formatting.md`'s own
-  sketch needs both generic method-call syntax and the `?` operator,
-  neither of which exist yet.
+- **`.parse<T>()` is now implemented** (`docs/language/0046-generic-methods.md`),
+  restricted to `T ∈ {i32, bool}` and returning `T` directly rather than a
+  fallible result - `docs/std/strings/0008-parsing-formatting.md`'s own
+  `?`-based sketch still needs the `?` operator, which doesn't exist yet.
 - **`append` is not amortized O(1).** Every call reallocates the entire
   buffer - the same complexity shortfall `List<T>.push`'s own docs already
   accept and document.
