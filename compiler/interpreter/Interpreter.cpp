@@ -158,6 +158,27 @@ namespace
         }
         return out;
     }
+
+    // Counts Unicode scalar values (codepoints) in a UTF-8 byte sequence -
+    // the standard "count non-continuation bytes" algorithm: every byte
+    // whose top two bits aren't `10` starts a new codepoint (see
+    // docs/language/0047-unicode.md). Mirrors
+    // LlvmIrEmitter::registerUtf8CountRuntime's own @axea.utf8.count
+    // exactly (same byte-mask test), just as plain C++ instead of
+    // hand-emitted LLVM IR - the interpreter's own ".length" (str/String/
+    // Buffer) now means this, not `.size()`, which moved to `.bytes`.
+    std::size_t countCodepoints(const std::string& text)
+    {
+        std::size_t count = 0;
+        for (const unsigned char byte : text)
+        {
+            if ((byte & 0xC0) != 0x80)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
 } // namespace
 
 std::string toString(const Value& value)
@@ -1388,9 +1409,36 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // byte-for-byte List<i8>'s shape), the interpreter's dispatch is by
         // real C++ type, not by shape, so this needs its own standalone
         // case just like every other non-List-backed collection here does.
+        // A bare str's `.length`/`.bytes` (see docs/language/0047-unicode.md)
+        // - previously unsupported entirely (str had no field access at
+        // all); now added alongside the same swap String/Buffer get below,
+        // since all three text types share the same "count codepoints, not
+        // bytes, by default" story.
+        if (const auto* str = std::get_if<std::string>(&objectValue))
+        {
+            if (field->field == "length")
+            {
+                return static_cast<std::int64_t>(countCodepoints(*str));
+            }
+            if (field->field == "bytes")
+            {
+                return static_cast<std::int64_t>(str->size());
+            }
+            throw std::runtime_error("no such field: " + field->field);
+        }
+
+        // `.length` now counts Unicode codepoints, not bytes - `.bytes` is
+        // the new name for what `.length` used to return (see
+        // docs/language/0047-unicode.md). A real, deliberate behavior
+        // change to already-shipped semantics (docs/language/0042-string.md's
+        // own "byte count, not codepoint count" framing is now reversed).
         if (const auto* string = std::get_if<std::shared_ptr<StringInstance>>(&objectValue))
         {
             if (field->field == "length")
+            {
+                return static_cast<std::int64_t>(countCodepoints((*string)->data));
+            }
+            if (field->field == "bytes")
             {
                 return static_cast<std::int64_t>((*string)->data.size());
             }
@@ -1402,11 +1450,16 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // std::string's own `.capacity()` directly - its exact numeric
         // value is expected to diverge from the LLVM backend's own
         // explicit doubling formula (see BufferInstance's own comment
-        // above); `.length` (content size) is not expected to diverge and
-        // must match exactly.
+        // above); `.length`/`.bytes` are not expected to diverge and must
+        // match exactly. Same `.length`-now-counts-codepoints swap as
+        // String above.
         if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&objectValue))
         {
             if (field->field == "length")
+            {
+                return static_cast<std::int64_t>(countCodepoints((*buffer)->data));
+            }
+            if (field->field == "bytes")
             {
                 return static_cast<std::int64_t>((*buffer)->data.size());
             }

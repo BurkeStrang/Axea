@@ -632,14 +632,21 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             const std::string objectType = typeOf(fieldGet->object, fctx);
             if (isSliceType(objectType) || isListType(objectType) || isMapType(objectType) ||
                 isSetType(objectType) || isLinkedListType(objectType) || isDequeType(objectType) ||
-                isSortedMapType(objectType) || isSortedSetType(objectType))
+                isSortedMapType(objectType) || isSortedSetType(objectType) || objectType == "i8*" ||
+                isStringType(objectType) || isBufferType(objectType))
             {
-                // Only "length" ever reaches a slice, List, Map, Set,
-                // LinkedList, Deque, SortedMap, or SortedSet via IrFieldGet -
-                // TypeChecker already guarantees this (see
+                // Only "length"/"bytes"/"capacity" ever reach a slice,
+                // List, Map, Set, LinkedList, Deque, SortedMap, SortedSet,
+                // str, String, or Buffer via IrFieldGet, and all of them
+                // are i32 - TypeChecker already guarantees this (see
                 // docs/language/0032-slices.md, 0033-lists.md,
                 // 0034-maps-and-sets.md, 0036-linked-lists.md,
-                // 0037-deques.md, 0040-sorted-maps.md, 0041-sorted-sets.md).
+                // 0037-deques.md, 0040-sorted-maps.md, 0041-sorted-sets.md,
+                // 0047-unicode.md). str/String/Buffer are explicitly listed
+                // (not left to fall into isDequeType's own coincidental
+                // structural match the way Buffer's raw header shape
+                // would) for the same "explicit, not accidental" reasoning
+                // docs/language/0043-buffer.md already established.
                 fctx.registerTypes[fieldGet->dest] = "i32";
             }
             else
@@ -3137,17 +3144,96 @@ void LlvmIrEmitter::emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fc
         return;
     }
 
+    if (objectType == "i8*")
+    {
+        // A bare str's ".length"/".bytes" (see docs/language/0047-unicode.md) -
+        // previously unreachable here at all (TypeChecker rejected every
+        // str field access). ".bytes" is the exact same runtime @strlen
+        // call String/Buffer's own construction/append already use for an
+        // operand's byte length; ".length" calls the new shared
+        // @axea.utf8.count runtime directly on the bare pointer - no data
+        // extraction needed, since str already *is* the data pointer.
+        if (fieldGet.field == "bytes")
+        {
+            const int len64Reg = allocateRegister(fctx);
+            *fctx.out << "  %" << len64Reg << " = call i64 @strlen(i8* "
+                      << ref(fieldGet.object, fctx) << ")\n";
+            const int destReg = defineRegister(fieldGet.dest, fctx);
+            *fctx.out << "  %" << destReg << " = trunc i64 %" << len64Reg << " to i32\n";
+        }
+        else
+        {
+            const std::string fnName = registerUtf8CountRuntime();
+            const int destReg = defineRegister(fieldGet.dest, fctx);
+            *fctx.out << "  %" << destReg << " = call i32 " << fnName << "(i8* "
+                      << ref(fieldGet.object, fctx) << ")\n";
+        }
+        return;
+    }
+
+    if (isStringType(objectType))
+    {
+        // Checked *before* the shared chain below - String's own header
+        // is List<i8>-shaped, so ".bytes" (the raw stored count - what
+        // ".length" itself used to mean, see docs/language/0042-string.md)
+        // still rides that shared field-0 shape, but ".length" no longer
+        // can: it now means "count codepoints", a genuine runtime scan
+        // over the data pointer, not a stored field read at all (see
+        // docs/language/0047-unicode.md). A dedicated branch is required
+        // the moment even *one* of a type's own fields needs behavior the
+        // shared chain can't express - the same reasoning Buffer's own
+        // dedicated branch below was already built on.
+        const std::string headerType = objectType.substr(0, objectType.size() - 1);
+        if (fieldGet.field == "bytes")
+        {
+            const int lenPtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", "
+                      << objectType << " " << ref(fieldGet.object, fctx) << ", i32 0, i32 0\n";
+            const int destReg = defineRegister(fieldGet.dest, fctx);
+            *fctx.out << "  %" << destReg << " = load i32, i32* %" << lenPtrReg << "\n";
+        }
+        else
+        {
+            const int dataPtrPtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", "
+                      << objectType << " " << ref(fieldGet.object, fctx) << ", i32 0, i32 1\n";
+            const int dataPtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << dataPtrReg << " = load i8*, i8** %" << dataPtrPtrReg << "\n";
+            const std::string fnName = registerUtf8CountRuntime();
+            const int destReg = defineRegister(fieldGet.dest, fctx);
+            *fctx.out << "  %" << destReg << " = call i32 " << fnName << "(i8* %" << dataPtrReg
+                      << ")\n";
+        }
+        return;
+    }
+
     if (isBufferType(objectType))
     {
         // Checked *before* the shared chain below - Buffer's own 3-field
         // header ({i32 length, i32 capacity, i8* data}*) is structurally
         // identical to Deque<T>'s own ("{i32, i32, ...}*"), which would
         // otherwise silently match isDequeType's own looser test there and
-        // always read field 0 regardless of whether "length" or Buffer's
-        // own new "capacity" was actually requested - the one collection
-        // field-get here that genuinely needs two different indices, not
-        // just "length" at index 0 (see docs/language/0043-buffer.md).
+        // always read field 0 regardless of which field was actually
+        // requested (see docs/language/0043-buffer.md). ".bytes" (the raw
+        // stored byte count - what ".length" itself used to mean) and
+        // ".capacity" are still plain field reads; ".length" now means
+        // "count codepoints", a runtime scan over the extracted data
+        // pointer (field 2), same as String's own identical split above
+        // (see docs/language/0047-unicode.md).
         const std::string headerType = objectType.substr(0, objectType.size() - 1);
+        if (fieldGet.field == "length")
+        {
+            const int dataPtrPtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", "
+                      << objectType << " " << ref(fieldGet.object, fctx) << ", i32 0, i32 2\n";
+            const int dataPtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << dataPtrReg << " = load i8*, i8** %" << dataPtrPtrReg << "\n";
+            const std::string fnName = registerUtf8CountRuntime();
+            const int destReg = defineRegister(fieldGet.dest, fctx);
+            *fctx.out << "  %" << destReg << " = call i32 " << fnName << "(i8* %" << dataPtrReg
+                      << ")\n";
+            return;
+        }
         const int fieldIndex = fieldGet.field == "capacity" ? 1 : 0;
         const int fieldPtrReg = allocateRegister(fctx);
         *fctx.out << "  %" << fieldPtrReg << " = getelementptr " << headerType << ", " << objectType
@@ -5225,6 +5311,56 @@ void LlvmIrEmitter::emitParse(const IrParse& parse, FunctionContext& fctx)
     const int destReg = defineRegister(parse.dest, fctx);
     *fctx.out << "  %" << destReg << " = call " << retType << " " << fnName << "(i8* " << objectPtr
               << ")\n";
+}
+
+std::string LlvmIrEmitter::registerUtf8CountRuntime()
+{
+    const std::string fnName = "@axea.utf8.count";
+    if (utf8CountRegistered_)
+    {
+        return fnName;
+    }
+    utf8CountRegistered_ = true;
+
+    // Standard "count non-continuation bytes" UTF-8 codepoint count (see
+    // docs/language/0047-unicode.md): every byte whose top two bits
+    // aren't `10` (i.e. `byte & 0xC0 != 0x80`) starts a new codepoint.
+    // alloca/load/store for idx/count, no phi - `select` (not a branch)
+    // to conditionally bump the counter, since both the "count" and
+    // "count + 1" values are cheap to compute unconditionally and this
+    // avoids yet another basic block for what's otherwise a tight,
+    // single-block loop body.
+    utf8CountRuntimeText_ << R"(
+define i32 @axea.utf8.count(i8* %s) {
+entry:
+  %idxSlot = alloca i32
+  %cntSlot = alloca i32
+  store i32 0, i32* %idxSlot
+  store i32 0, i32* %cntSlot
+  br label %loophdr
+loophdr:
+  %idx = load i32, i32* %idxSlot
+  %cp = getelementptr i8, i8* %s, i32 %idx
+  %c = load i8, i8* %cp
+  %atEnd = icmp eq i8 %c, 0
+  br i1 %atEnd, label %done, label %body
+body:
+  %masked = and i8 %c, 192
+  %isCont = icmp eq i8 %masked, 128
+  %cnt0 = load i32, i32* %cntSlot
+  %cntPlus1 = add i32 %cnt0, 1
+  %newCnt = select i1 %isCont, i32 %cnt0, i32 %cntPlus1
+  store i32 %newCnt, i32* %cntSlot
+  %idx2 = load i32, i32* %idxSlot
+  %idx3 = add i32 %idx2, 1
+  store i32 %idx3, i32* %idxSlot
+  br label %loophdr
+done:
+  %final = load i32, i32* %cntSlot
+  ret i32 %final
+}
+)";
+    return fnName;
 }
 
 void LlvmIrEmitter::emitBufferNew(const IrBufferNew& bufferNew, FunctionContext& fctx)
@@ -7621,6 +7757,11 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // topLevel has already been fully emitted by this point, so
     // parseRuntimeText_ is complete.
     out << parseRuntimeText_.str();
+    // Same reasoning again, for `.length`'s own codepoint-counting
+    // runtime (see docs/language/0047-unicode.md) - registerUtf8CountRuntime
+    // is driven by emitFieldGet itself, same lazy-during-emission timing
+    // as registerParseRuntime above.
+    out << utf8CountRuntimeText_.str();
     out << helpers.str();
     out << mainOut.str();
 

@@ -1091,38 +1091,56 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  "' (did you mean 'length'?)");
     }
 
-    // String isn't indexable either this phase - slicing (`s[..4]`) is
-    // deliberately out of scope (see docs/language/0042-string.md, and
-    // docs/std/strings/0005-slicing.md for the still-aspirational full
-    // design).
-    if (objectType.kind == TypeKind::OwnedString)
+    // str isn't indexable either this phase - slicing (`s[..4]`) is its own
+    // separate AST node, not FieldExpr (see docs/language/0045-str-slicing.md).
+    // `.length`/`.bytes` (see docs/language/0047-unicode.md) - `.length`
+    // counts Unicode codepoints, `.bytes` the raw byte count. Previously
+    // str had no field access at all; both are new.
+    if (objectType.kind == TypeKind::String)
     {
-        if (field == "length")
+        if (field == "length" || field == "bytes")
         {
             return kI32;
         }
         throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
+                                 "' (did you mean 'length' or 'bytes'?)");
+    }
+
+    // String isn't indexable either this phase - same reasoning as str
+    // above (see docs/language/0042-string.md). `.length`/`.bytes` mirror
+    // str's own identical split (see docs/language/0047-unicode.md) -
+    // `.length` now counts codepoints, a real deliberate change from this
+    // type's own original "byte count" framing; `.bytes` is the new name
+    // for what `.length` used to mean.
+    if (objectType.kind == TypeKind::OwnedString)
+    {
+        if (field == "length" || field == "bytes")
+        {
+            return kI32;
+        }
+        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
+                                 "' (did you mean 'length' or 'bytes'?)");
     }
 
     // Buffer isn't indexable either (see docs/language/0043-buffer.md).
-    // Unlike every other collection's own single "length" field, Buffer
-    // exposes two - "length" (bytes actually written) and "capacity"
-    // (bytes currently allocated) - the real, meaningful distinction that
-    // makes Buffer's own amortized growth observable, unlike every other
-    // collection here which reallocates every push/append and so has no
-    // capacity worth exposing. Deliberately spelled "length", not the
-    // design doc's own "len" (docs/std/strings/0004-buffer.md) - kept
-    // consistent with every other collection's own ".length" here rather
-    // than introducing the one differently-spelled field in this codebase.
+    // "capacity" (bytes currently allocated) is the real, meaningful
+    // distinction that makes Buffer's own amortized growth observable,
+    // unlike every other collection here which reallocates every
+    // push/append and so has no capacity worth exposing. Deliberately
+    // spelled "length", not the design doc's own "len"
+    // (docs/std/strings/0004-buffer.md) - kept consistent with every
+    // other collection's own ".length" here rather than introducing the
+    // one differently-spelled field in this codebase. "length"/"bytes"
+    // split the same way str/String's own do (see
+    // docs/language/0047-unicode.md).
     if (objectType.kind == TypeKind::Buffer)
     {
-        if (field == "length" || field == "capacity")
+        if (field == "length" || field == "bytes" || field == "capacity")
         {
             return kI32;
         }
         throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length' or 'capacity'?)");
+                                 "' (did you mean 'length', 'bytes', or 'capacity'?)");
     }
 
     // Stack<T> isn't indexable either - LIFO access only, via push/pop/peek,

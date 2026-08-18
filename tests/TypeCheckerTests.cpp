@@ -1133,3 +1133,36 @@ TEST("TypeChecker still parses/checks 'field < expr' as a comparison, not a misf
           "p = P { field: 5 } "
           "x = f(p)");
 }
+
+TEST("TypeChecker accepts .length and .bytes on a bare str - previously str had no field "
+     "access at all")
+{
+    check("f() -> i32 { "
+          "  s = \"hello\" "
+          "  return s.length + s.bytes "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts .length and .bytes on String")
+{
+    check("f() -> i32 { "
+          "  s = String(\"hello\") "
+          "  return s.length + s.bytes "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts .length, .bytes, and .capacity on Buffer")
+{
+    check("f() -> i32 { "
+          "  b = Buffer() "
+          "  return b.length + b.bytes + b.capacity "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects an unknown field on str, suggesting length/bytes")
+{
+    EXPECT_THROWS(check("x = \"hi\".foo"));
+}

@@ -555,3 +555,11 @@ TEST("CapabilityChecker infers read for a str parameter that is only parsed, nev
                                              "x = toInt(\"42\")");
     EXPECT_TRUE(capabilities.at("toInt")[0] == Capability::Read);
 }
+
+TEST("CapabilityChecker infers read for a str parameter whose .length/.bytes are read - field "
+     "reads never raise write, same as every other field access")
+{
+    const auto capabilities = capabilitiesOf("count(d: str) -> i32 { return d.length + d.bytes } "
+                                             "x = count(\"hello\")");
+    EXPECT_TRUE(capabilities.at("count")[0] == Capability::Read);
+}

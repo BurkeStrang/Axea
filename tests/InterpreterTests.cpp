@@ -1485,3 +1485,45 @@ TEST("Interpreter rejects parse<T>() for an unsupported target type")
 {
     EXPECT_THROWS(run("x = \"5\".parse<str>()"));
 }
+
+TEST("Interpreter's str .length counts Unicode codepoints, not bytes - .bytes is the raw byte "
+     "count (see docs/language/0047-unicode.md)")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"héllo\".length")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"héllo\".bytes")), 6);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"hello\".length")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"hello\".bytes")), 5);
+}
+
+TEST("Interpreter's String .length counts Unicode codepoints, .bytes is the raw byte count")
+{
+    const std::string source = "s = String(\"héllo\") "
+                               "len = s.length "
+                               "x = s.bytes";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("len")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("x")), 6);
+}
+
+TEST("Interpreter's Buffer .length counts Unicode codepoints, .bytes is the raw byte count, "
+     ".capacity is unaffected")
+{
+    const std::string source = "b = Buffer() "
+                               "t = b.append(\"héllo\") "
+                               "len = b.length "
+                               "x = b.bytes";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("len")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("x")), 6);
+}
+
+TEST("Interpreter counts multi-byte (4-byte) codepoints correctly - three rockets is length 3, "
+     "bytes 12")
+{
+    const std::string source = "s = \"🚀🚀🚀\" "
+                               "len = s.length "
+                               "x = s.bytes";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("len")), 3);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("x")), 12);
+}

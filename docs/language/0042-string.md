@@ -338,10 +338,11 @@ diverge.
   lowering of string interpolation into it is still purely aspirational -
   string interpolation itself (`"Hello {name}"`) has no lexer/parser
   support at all yet.
-- **No Unicode-aware operations.** Every byte is treated as, well, a byte -
-  `.length` is a byte count, not a codepoint or grapheme count
-  (`docs/std/strings/0006-unicode.md`'s own `.bytes`-vs-default distinction
-  has no counterpart here: there's only the one, byte-level view).
+- **`.length`/`.bytes` are now Unicode-aware** (`docs/language/0047-unicode.md`)
+  - `.length` counts codepoints, `.bytes` gives the raw byte count,
+  reversing this document's own original "byte count" framing above. Not
+  grapheme-cluster-aware: no Unicode property tables exist in this
+  compiler, so a multi-codepoint grapheme still counts as more than one.
 - **No FFI/`cstr` type.** `docs/std/strings/0007-ffi.md`'s own `extern c`/
   `to_cstr()` design needs `extern` declarations, which don't exist in this
   language yet - though `String`'s own null-terminated buffer already

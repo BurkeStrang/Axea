@@ -1021,13 +1021,22 @@ TEST("LlvmIrEmitter's String.append grows via two copy loops - the existing cont
     EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
 }
 
-TEST("LlvmIrEmitter reads a String's .length via GEP+load field 0, not a compile-time constant "
-     "- rides isListType's own existing check for free, exactly like Stack<T>'s own header "
-     "reuse (see docs/language/0035-stacks.md)")
+TEST("LlvmIrEmitter reads a String's .bytes via GEP+load field 0, not a compile-time constant - "
+     "the raw stored byte count, what .length itself used to mean (see "
+     "docs/language/0047-unicode.md)")
 {
-    auto ir = emitLlvmIr("len(s: String) -> i32 { return s.length }");
+    auto ir = emitLlvmIr("len(s: String) -> i32 { return s.bytes }");
     EXPECT_TRUE(ir.find("getelementptr {i32, i8*}, {i32, i8*}* %0, i32 0, i32 0") !=
                 std::string::npos);
+}
+
+TEST("LlvmIrEmitter's String.length now counts Unicode codepoints via the shared "
+     "@axea.utf8.count runtime, not a stored field read")
+{
+    auto ir = emitLlvmIr("len(s: String) -> i32 { return s.length }");
+    EXPECT_TRUE(ir.find("define i32 @axea.utf8.count(i8* %s)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.utf8.count(i8*") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
 }
 
 TEST("LlvmIrEmitter passes a String argument as a bare i8* at a str-parameter call boundary - "
@@ -1110,15 +1119,47 @@ TEST("LlvmIrEmitter's Buffer.finish mallocs a fresh 2-field String header and re
     EXPECT_TRUE(ir.find("call i8* @malloc(i64 1)") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter reads a Buffer's .length via field 0 and .capacity via field 1, distinct "
-     "GEP indices - the one collection field-get here that needs two, not just .length at "
-     "index 0")
+TEST("LlvmIrEmitter reads a Buffer's .bytes via field 0 and .capacity via field 1, distinct GEP "
+     "indices - .bytes is the raw stored count, what .length itself used to mean (see "
+     "docs/language/0047-unicode.md)")
 {
-    auto ir = emitLlvmIr("f(b: Buffer) -> i32 { return b.length + b.capacity }");
+    auto ir = emitLlvmIr("f(b: Buffer) -> i32 { return b.bytes + b.capacity }");
     EXPECT_TRUE(ir.find("getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %0, i32 0, i32 0") !=
                 std::string::npos);
     EXPECT_TRUE(ir.find("getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %0, i32 0, i32 1") !=
                 std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Buffer.length now counts Unicode codepoints via the shared "
+     "@axea.utf8.count runtime, called on the extracted data pointer (field 2), not a stored "
+     "field read")
+{
+    auto ir = emitLlvmIr("f(b: Buffer) -> i32 { return b.length }");
+    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %0, i32 0, i32 2") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @axea.utf8.count(i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter reads a bare str's .bytes via @strlen and .length via @axea.utf8.count - "
+     "previously unreachable here at all, since str had no field access before")
+{
+    auto ir = emitLlvmIr("bytesOf(s: str) -> i32 { return s.bytes }");
+    EXPECT_TRUE(ir.find("call i64 @strlen(i8* %0)") != std::string::npos);
+
+    auto ir2 = emitLlvmIr("lengthOf(s: str) -> i32 { return s.length }");
+    EXPECT_TRUE(ir2.find("call i32 @axea.utf8.count(i8* %0)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers @axea.utf8.count only once even when .length is read on str, "
+     "String, and Buffer in the same program")
+{
+    auto ir = emitLlvmIr("f(s: str, o: String, b: Buffer) -> i32 { "
+                         "  return s.length + o.length + b.length "
+                         "}");
+    const auto first = ir.find("define i32 @axea.utf8.count");
+    EXPECT_TRUE(first != std::string::npos);
+    const auto second = ir.find("define i32 @axea.utf8.count", first + 1);
+    EXPECT_TRUE(second == std::string::npos);
 }
 
 TEST("LlvmIrEmitter Buffer.append and String.append resolve to distinct emit functions despite "

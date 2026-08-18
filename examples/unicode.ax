@@ -1,0 +1,28 @@
+describe(text: str) -> i32
+{
+    return text.length
+}
+
+ascii = "hello"
+asciiLength = ascii.length
+asciiBytes = ascii.bytes
+
+accented = "héllo wörld"
+accentedLength = accented.length
+accentedBytes = accented.bytes
+
+rockets = "🚀🚀🚀"
+rocketsLength = rockets.length
+rocketsBytes = rockets.bytes
+
+viaFn = describe(accented)
+
+owned = String("héllo")
+ownedLength = owned.length
+ownedBytes = owned.bytes
+
+buf = Buffer()
+appended = buf.append("héllo")
+bufLength = buf.length
+bufBytes = buf.bytes
+bufCapacity = buf.capacity

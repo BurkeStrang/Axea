@@ -247,6 +247,13 @@ private:
     // to parseRuntimeText_. Returns the function's own name.
     std::string registerParseRuntime(const std::string& targetType);
     void emitParse(const IrParse& parse, FunctionContext& fctx);
+    // Lazily registers (once, mirroring registerParseRuntime's own
+    // pattern at its smallest scale - a single fixed function, not one
+    // per target type) `@axea.utf8.count(i8*) -> i32`, the shared
+    // codepoint-counting routine `.length` now calls for str/String/
+    // Buffer (see docs/language/0047-unicode.md). Returns the function's
+    // own name ("@axea.utf8.count").
+    std::string registerUtf8CountRuntime();
 
     // Registers (if not already registered, memoized by the canonical
     // "Map<K,V>"/"Set<T>" Axea string) a fresh monomorphized instantiation:
@@ -679,4 +686,11 @@ private:
     bool parseI32Registered_ = false;
     bool parseBoolRegistered_ = false;
     std::ostringstream parseRuntimeText_;
+
+    // `.length` on str/String/Buffer (see docs/language/0047-unicode.md) -
+    // single shared runtime function, same "register once" pattern as
+    // parseI32Registered_/parseBoolRegistered_ above, at an even smaller
+    // scale (exactly one possible registration).
+    bool utf8CountRegistered_ = false;
+    std::ostringstream utf8CountRuntimeText_;
 };
