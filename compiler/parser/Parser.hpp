@@ -23,7 +23,22 @@ private:
     const Token& expect(TokenKind kind, const char* message);
 
     std::unique_ptr<Stmt> parseItem();
+    // Disambiguates `Identifier '('` at item level - a function
+    // declaration (`foo(x: i32) -> i32 { ... }`) or a bare top-level call
+    // kept for its side effect (`print("hi")`) - both start identically.
+    // Only called with current() == Identifier and peek() == LeftParen
+    // already confirmed; looks past that '(' at what a real Param can
+    // only ever start with (see parseParam: `[read|write|take]?
+    // Identifier ':'`, never anything an argument expression could also
+    // start with) to decide without backtracking.
+    bool looksLikeFunctionDecl() const;
     std::unique_ptr<Stmt> parseFunctionDecl();
+    // `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md) -
+    // no body, no capability prefixes on its own params (mirrors a plain C
+    // signature - parseExternParam is a simpler, dedicated parse than
+    // parseParam's own read/write/take-aware version).
+    std::unique_ptr<Stmt> parseExternDecl();
+    Param parseExternParam();
     std::unique_ptr<Stmt> parseStructDecl();
     std::unique_ptr<Stmt> parseAssignment();
     std::unique_ptr<Stmt> parseReturn();
@@ -66,6 +81,17 @@ private:
     // non-surrogate codepoint - empty ('' ), multi-character ('ab'), and
     // malformed UTF-8 are all parse errors here, not silently truncated.
     static std::int32_t decodeCharLiteral(const std::string& bytes);
+    // Splits a string literal's own already-quote-stripped raw content on
+    // unescaped `{...}` spans (see
+    // docs/language/Axea_Printing_Formatting.md) - `{{`/`}}` are literal
+    // brace escapes. A literal with no interpolation span at all returns
+    // a plain StringExpr, unaffected (every pre-existing string literal
+    // in this codebase takes this path); one or more spans returns an
+    // InterpolatedStringExpr instead. Each span's own content is parsed
+    // as a standalone expression via a fresh, nested Lexer+Parser -
+    // legal to call `.parseExpression()` on another Parser instance
+    // directly since C++ access control is per-class, not per-object.
+    std::unique_ptr<Expr> parseStringLiteral(const std::string& text);
 
     std::vector<Token> tokens_;
     std::size_t index_{0};

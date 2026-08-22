@@ -228,36 +228,66 @@ Function(build)
 # Interpreter: `std::string`'s Own Growth, for Free
 
 ```cpp
-struct BufferInstance { std::string data; };
+struct BufferInstance { std::string data; std::int64_t capacity = 1; };
 ```
 
-Same reference-semantics shape as `StringInstance`, for the same reason.
-But unlike the LLVM backend, the interpreter writes **no** growth logic at
-all: `std::string` already tracks its own capacity and grows it
-amortized internally, so `.append`/`.append_line` are just `+=`,
-`.clear()` is `std::string::clear()`, `.reserve(n)` is
-`std::string::reserve(n)`, and `.length`/`.capacity` are
-`.size()`/`.capacity()` directly. `.finish()` `std::move`s `data` into a
+(`capacity` was added by a later follow-up - see below; originally just
+`std::string data;`.) Same reference-semantics shape as `StringInstance`,
+for the same reason. Unlike the LLVM backend, the interpreter writes no
+growth logic for `data` itself: `std::string` already tracks its own
+internal storage and grows it amortized, so `.append`/`.append_line` are
+still just `+=`, `.clear()` is still `std::string::clear()`, `.reserve(n)`
+is still `std::string::reserve(n)`, and `.length` is still `.size()`.
+`.capacity` itself, however, now reads the explicitly-tracked `capacity`
+field, not `data.capacity()` - see the follow-up below.  `.finish()`
+`std::move`s `data` into a
 fresh `StringInstance`, then immediately resets the buffer's own `data` to
 a fresh `std::string()` - moved-from state is valid-but-unspecified by the
 standard, and this interpreter never leaves it that way, matching
 `emitBufferFinish`'s own "always reset to a known-good empty state"
 guarantee exactly.
 
-**Documented, expected divergence:** `.capacity`'s *exact* numeric value
-is not expected to match between the interpreter (`std::string`'s own
-internal growth heuristic) and the compiled backend (the explicit
-doubling formula in `ensureBufferCapacity`) - confirmed directly:
+**Follow-up: the "documented, expected divergence" below was wrong, and
+caused a real bug.** This section originally argued `.capacity`'s exact
+value didn't need to match between backends, the same way two different
+real-world `std::string` implementations might legitimately disagree.
+That reasoning missed something: those two hypothetical `std::string`
+implementations would each be *consistent with themselves* across a
+program's own two backends; this interpreter's `.capacity` wasn't
+consistent with *this language's own* compiled backend at all, which is
+the comparison a real program (`examples/unicode.ax`) actually depends
+on. `std::string::capacity()` reports libstdc++'s own implementation-
+defined growth/SSO threshold (15 characters on a typical 64-bit build,
+*regardless* of what was actually appended, since a short string lives
+entirely in the small-string-optimization's own inline buffer) - not a
+proxy for "how many bytes would this language's own doubling algorithm
+have allocated," which is what `.capacity` is actually supposed to mean.
+`Buffer().append("héllo")` (6 UTF-8 bytes) landed on interpreter
+`.capacity() == 15` (the SSO threshold, unrelated to the 6 bytes
+appended) against the compiled backend's own correctly-computed `7`
+(`ensureBufferCapacity`'s real doubling result) - caught only by an
+actual byte-for-byte comparison run across every example, not by
+reasoning about the type checker or either backend in isolation.
 
-```text
-interpreter:  c0=15  c1=15  c2=15  c3=15  c4=61
-compiled:     c0=1   c1=2   c2=4   c3=12  c4=62
-```
-
-This is treated as an acceptable, implementation-defined difference, the
-same way two different real-world `std::string` implementations would
-also disagree with each other. `.length`, content, and `.finish()`'s
-result are *not* expected to diverge, and were verified not to.
+Fixed by tracking capacity explicitly: `BufferInstance` gained a real
+`std::int64_t capacity` field (default `1`, matching `emitBufferNew`'s
+own initial state), updated by a new `growBufferCapacity` helper that
+transcribes `ensureBufferCapacity`'s own doubling rule bit for bit
+(`needed > capacity ? (needed > capacity*2 ? needed : capacity*2) :
+capacity`, unchanged otherwise) at every one of `.append`/`.append_line`/
+`.reserve`'s own call sites - matching each one's own exact `needed`
+computation too (`.append`: `oldLen + textLen + 1`; `.append_line`: `+2`,
+for the appended `'\n'` *and* the null terminator, one combined growth
+check rather than two separate ones, mirroring
+`emitBufferAppendLine`'s own identical single check; `.reserve(n)`: `n`
+directly, no `+1`, mirroring `emitBufferReserve`'s own unmodified pass-
+through). `.clear()` leaves `capacity` untouched (matches
+`emitBufferClear`'s own identical choice - the underlying storage isn't
+reallocated, just logically emptied) and `.finish()` resets it back to
+`1` (matches `emitBufferFinish`'s own identical reset). `data` itself is
+unaffected by any of this - content is content regardless of which
+algorithm sized the storage behind it, so `+=`/`.clear()` still ride
+`std::string`'s own machinery exactly as before.
 
 ---
 
@@ -312,8 +342,8 @@ lengthAfterClear = 0
 reused = ()
 lengthAfterReuse = 6
 $ ax llvm-ir examples/buffer.ax | clang -x ir -O1 - -o out && ./out
-# byte-for-byte identical (also re-verified at -O0), except notesCapacity
-# (documented divergence above)
+# byte-for-byte identical (also re-verified at -O0), including
+# notesCapacity - no longer a documented exception, see the follow-up above
 ```
 
 `reportLength = 25` confirms `build()`'s three appends (`"Axea"` + `"
@@ -336,9 +366,6 @@ reusable after `.clear()` - no reallocation was needed for the following
   own "Compiler Optimizations" section (lowering `"Hello {name}"` into a
   `Buffer` automatically) needs lexer/parser support for interpolation
   syntax that doesn't exist yet.
-- **`.capacity`'s exact value is implementation-defined**, expected (and
-  confirmed) to diverge between the interpreter and the compiled backend -
-  see Interpreter above.
 - **No `[i]`/slicing, no iteration, not hashable, not a struct field
   type.** Mirrors `String`'s own first-phase restrictions exactly.
 - **`Buffer()`/its five methods are compiler intrinsics, not real

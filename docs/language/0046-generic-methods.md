@@ -18,40 +18,55 @@ named as a blocker in three earlier docs (`docs/language/0032-slices.md`,
 language had no support for at all. This phase implements the general
 `object.method<TypeArg>(args)` **syntax and dispatch mechanism**, and uses
 it for exactly one concrete method: `.parse<T>()` on `str`/`String`,
-restricted to `T ∈ {i32, bool}` - the two primitive types with an obvious,
-unambiguous text encoding. No user-defined generic methods, no multiple
-type arguments, no method-resolution-by-type-argument beyond this one
-built-in - the same "build the general mechanism, ship the one concrete
-use case the roadmap actually named" scoping call this whole session has
-made repeatedly.
+originally restricted to `T ∈ {i32, bool}` - the two primitive types with
+an obvious, unambiguous text encoding. `T ∈ {i32, i64, f64, bool}` as of
+`docs/language/0051-numeric-widening.md`, once `i64`/`f64` themselves
+existed to parse into. No user-defined generic methods, no multiple type
+arguments, no method-resolution-by-type-argument beyond this one built-in
+- the same "build the general mechanism, ship the one concrete use case
+the roadmap actually named" scoping call this whole session has made
+repeatedly.
 
 ```ax
 n = "42".parse<i32>()
 b = "true".parse<bool>()
 year = date[..4].parse<i32>()
+big = "123456789012".parse<i64>()
+pi = "3.14159".parse<f64>()
 ```
 
-**Deliberately without the `?` operator.** The design doc's own example
-uses `.parse<i32>()?`, implying a fallible result (`Optional<i32>` or
-similar) that `?` unwraps. Neither `Optional<T>` nor `?` exist in this
-language. Rather than block `.parse<T>()` entirely on building an entire
-error-handling story, `.parse<T>()` here returns `T` **directly**, with a
-defined, harmless fallback on invalid input (`0` for `i32`, `false` for
-`bool`) rather than raising an error - the same kind of scope-narrowing
-deviation `str[a..b]`'s own "copies instead of viewing" and `Buffer`'s
-`.len` rename already made, documented here rather than silently assumed.
+**Originally, deliberately without the `?` operator.** The design doc's
+own example uses `.parse<i32>()?`, implying a fallible result
+(`Optional<i32>` or similar) that `?` unwraps. At the time this phase
+first landed, neither `Optional<T>` nor `?` existed in this language.
+Rather than block `.parse<T>()` entirely on building an entire error-
+handling story, `.parse<T>()` originally returned `T` **directly**, with
+a defined, harmless fallback on invalid input (`0` for `i32`/`i64`, `0.0`
+for `f64`, `false` for `bool`) rather than raising an error - the same
+kind of scope-narrowing deviation `str[a..b]`'s own "copies instead of
+viewing" and `Buffer`'s `.len` rename already made, documented here
+rather than silently assumed. `Optional<T>`/`?` are both real now (see
+`docs/language/0052-optional.md`), and `.parse<T>()` was rebuilt to
+return `Optional<T>` with genuine success/failure detection as part of
+that same phase - the design doc's own `.parse<i32>()?` example is
+reproducible today.
 
 ---
 
-# Design: Two Hand-Rolled Runtime Functions, Not Inlined Logic
+# Design: Four Shared Runtime Functions, Not Inlined Logic
 
 `.parse<T>()`'s object is resolved to a bare `i8*` via `resolveStrPtr`
 (shared with `String`/`Buffer`'s own str-coercion), then handed to one of
-two **shared, lazily-registered, module-level runtime functions** -
-`@axea.parse.i32`/`@axea.parse.bool` - the same "register once, call
-everywhere" pattern `registerMapInstantiation` already established for
-monomorphized collections, at the smallest possible scale (exactly two
-possible registrations, not per-shape).
+four **shared, lazily-registered, module-level runtime functions** -
+`@axea.parse.i32`/`@axea.parse.i64`/`@axea.parse.f64`/`@axea.parse.bool`
+- the same "register once, call everywhere" pattern
+`registerMapInstantiation` already established for monomorphized
+collections, at a small scale (four possible registrations, not
+per-shape). `@axea.parse.i64` was added alongside `i64` itself
+(`docs/language/0051-numeric-widening.md`) - a mechanical width
+translation of `@axea.parse.i32`'s own loop, nothing new. `@axea.parse.f64`
+is the one genuinely different addition: unlike the other three, it isn't
+hand-rolled - see below.
 
 **`@axea.parse.i32`**: a hand-rolled digit loop - checks for a leading
 `-`, then accumulates `acc = acc*10 + digit` over consecutive ASCII
@@ -62,7 +77,24 @@ each iteration - the same "no `phi` anywhere" convention every loop in
 this backend has followed since its first one. Invalid input (no digits
 at all) simply never enters the accumulation branch, yielding `0` -
 no separate validation path needed, the loop's own structure already
-produces the documented fallback for free.
+produces the documented fallback for free. `@axea.parse.i64` is the
+identical loop at `i64` width throughout (wider `acc`/negation, same
+`i32`-width `idx` since a string index never needs 64 bits) - no new
+algorithm.
+
+**`@axea.parse.f64`**: a real `declare double @strtod(i8*, i8**)` libc
+call, `endptr` always `null` - a deliberate departure from every other
+`@axea.parse.*` function's own hand-rolled style. Decimal-to-binary
+floating-point parsing is a real, easy-to-get-subtly-wrong algorithm
+(rounding, exponents, edge cases around denormals) - the same "reuse
+libc's own well-tested logic rather than risking a hand-written bug"
+reasoning `registerI32ToStrRuntime`'s own choice of `sprintf` over
+hand-rolled itoa already established, just in the parsing direction
+instead of formatting. `strtod` already returns `0.0` for input with no
+valid leading number, giving the documented invalid-input fallback for
+free, with zero extra logic - the same "the primitive's own natural
+behavior already matches what we wanted" luck `@axea.parse.i32`'s own
+loop structure has for `0`.
 
 **`@axea.parse.bool`**: a hand-rolled **short-circuit** byte-by-byte
 comparison against the fixed literal `"true"` - real branches, not an
@@ -128,14 +160,17 @@ applies across two different `TypeKind`s (`str` is `TypeKind::String`;
 `String` is confusingly `TypeKind::OwnedString` - see `0042-string.md`'s
 own naming note) rather than being tied to one. Validates, in order:
 `object` is str-coercible, `typeArgument` is non-empty, zero arguments
-were given, and `typeArgument` is one of the two supported names -
-returning `kI32`/`kBool` respectively.
+were given, and `typeArgument` is one of the four supported names -
+returning `Optional<i32>`/`Optional<i64>`/`Optional<f64>`/`Optional<bool>`
+respectively (as of `docs/language/0052-optional.md` - originally, before
+`Optional<T>` existed, this returned `kI32`/`kI64`/`kF64`/`kBool`
+directly).
 
 ```text
 $ ax capabilities bad.ax   # x = 5.parse<i32>()
 error: 'parse' requires str, got i32
 $ ax capabilities bad.ax   # x = "5".parse<str>()
-error: parse<str> is not supported - only parse<i32> and parse<bool> are implemented this phase
+error: parse<str> is not supported - only parse<i32>, parse<i64>, parse<f64>, and parse<bool> are implemented this phase
 $ ax capabilities bad.ax   # x = "5".parse()
 error: 'parse' requires an explicit type argument, e.g. parse<i32>()
 ```
@@ -151,9 +186,9 @@ existing generic `MethodCallExpr` walk (recurse into `object`/
 `Read`. `RegionChecker`'s own generic `MethodCallExpr` case already
 returns `Region::Owned` for any method whose name isn't `"get"`/`"peek"`
 (the two aliasing exceptions, neither of which `.parse<T>()` is) - and
-since the result is always a plain `i32`/`bool` value, "owned" here means
-exactly what it already means for every other primitive, needing no new
-reasoning at all.
+since the result is always a plain `i32`/`i64`/`f64`/`bool` value,
+"owned" here means exactly what it already means for every other
+primitive, needing no new reasoning at all.
 
 ---
 
@@ -166,16 +201,31 @@ same as `append_line`/`enqueue`/`dequeue` before it).
 
 The interpreter's own `.parse<T>()` handling is a **second, independent
 implementation** of the exact same rules `@axea.parse.i32`/
-`@axea.parse.bool` hand-emit as LLVM IR - the same leading-`-` handling,
-the same digit loop, the same "invalid input yields the documented
-fallback" choice, the same "must be exactly `'true'`" bool rule - written
-in plain C++ instead. Not shared with the LLVM backend (per this
-codebase's "separate over shared" convention for interpreter-vs-backend
-logic - they're different *operations*, one running at compile time
-producing IR text, the other running directly), but verified to agree
-byte-for-byte via the same diff-against-compiled-output discipline every
-prior feature here has used - including the negative-number, invalid-
-input, and case-sensitivity edge cases specifically.
+`@axea.parse.i64`/`@axea.parse.bool` hand-emit as LLVM IR - the same
+leading-`-` handling, the same digit loop (`i32`/`i64` share it outright
+in the interpreter, since both already share the one `std::int64_t`
+`Value` alternative - see `docs/language/0051-numeric-widening.md`), the
+same success/failure rule, the same three-way `'true'`/`'false'`/invalid
+bool rule - written in plain C++ instead. `f64` is the one case that
+*isn't* independently reimplemented: both backends call the identical
+underlying libc `strtod` (`std::strtod` in the interpreter, `@strtod` in
+the compiled backend), so they agree by construction rather than by
+parallel-implementation-and-verification. Not shared with the LLVM
+backend otherwise (per this codebase's "separate over shared" convention
+for interpreter-vs-backend logic - they're different *operations*, one
+running at compile time producing IR text, the other running directly),
+but verified to agree byte-for-byte via the same diff-against-compiled-
+output discipline every prior feature here has used - including the
+negative-number, invalid-input, and case-sensitivity edge cases
+specifically.
+
+As of `docs/language/0052-optional.md`, both backends wrap their result in
+a real `Optional<T>` with genuine success/failure detection (a real
+`digitCount`/`endptr`-driven check, not the "invalid input yields a
+silently-returned fallback" contract originally described here) - see that
+doc's own `LlvmIrEmitter`/Interpreter sections for the exact rework;
+`IrParse` itself is unchanged, still the single instruction described
+above.
 
 ```text
 $ ax ir examples/generic_methods.ax
@@ -187,16 +237,17 @@ $ ax ir examples/generic_methods.ax
 
 # Worked Example
 
-`examples/generic_methods.ax`:
+`examples/generic_methods.ax` (updated for `docs/language/0052-optional.md`
+- `extractYear` now returns `Optional<i32>`, unwrapped at the call site):
 
 ```ax
-extractYear(date: str) -> i32
+extractYear(date: str) -> Optional<i32>
 {
     return date[..4].parse<i32>()
 }
 
 date = "2026-08-18"
-year = extractYear(date)
+year = extractYear(date).unwrap_or(0)
 
 count = "42".parse<i32>()
 negative = "-17".parse<i32>()
@@ -207,44 +258,64 @@ disabled = "false".parse<bool>()
 
 s = String("123")
 fromString = s.parse<i32>()
+
+bigCount = "123456789012".parse<i64>()
+pi = "3.14159".parse<f64>()
+invalidFloat = "abc".parse<f64>()
 ```
 
 ```text
 $ ax run examples/generic_methods.ax
 date = 2026-08-18
 year = 2026
-count = 42
-negative = -17
-invalid = 0
-enabled = true
-disabled = false
+count = Some(42)
+negative = Some(-17)
+invalid = None
+enabled = Some(true)
+disabled = Some(false)
 s = 123
-fromString = 123
+fromString = Some(123)
+bigCount = Some(123456789012)
+pi = Some(3.14159)
+invalidFloat = None
 $ ax llvm-ir examples/generic_methods.ax | clang -x ir -O1 - -o out && ./out
 # byte-for-byte identical (also re-verified at -O0)
 ```
 
 `year = 2026` confirms `.parse<i32>()` composes directly with `str`
-slicing's own result through a borrowed function parameter; `invalid = 0`
-confirms the documented invalid-input fallback, not a crash or thrown
-error, matching the "no `?` operator yet" scope decision above.
+slicing's own result through a borrowed function parameter, unwrapped via
+`.unwrap_or(0)`; `invalid = None`/`invalidFloat = None` confirm real
+failure detection now, not a silently-returned fallback - printed as
+`None` via `docs/language/0052-optional.md`'s own top-level `Optional<T>`
+stringification. `bigCount = Some(123456789012)` is a value that
+genuinely doesn't fit in `i32`, confirming `parse<i64>()` isn't just
+`parse<i32>()` truncated.
 
 ---
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No `Optional<T>`/`?` operator.** `.parse<T>()` returns `T` directly
-  with a silent fallback on invalid input, not a fallible result - the
-  design doc's own `.parse<i32>()?` isn't reproducible until both of
-  those exist.
-- **Only `T ∈ {i32, bool}`.** No `parse<char>`, `parse<f32>` (no float
-  type exists yet), or any user-defined target type.
-- **No overflow checking for `parse<i32>`.** A very large digit sequence
-  wraps silently, matching plain `i32` arithmetic's own existing
-  unchecked-overflow behavior everywhere else in this backend.
-- **`parse<bool>` accepts only the exact literal `"true"`/anything-else`
-  distinction** - no case-insensitivity, no `"1"`/`"0"`, no
-  `"yes"`/`"no"`.
+- **`Optional<T>`/`?` now exist** - see `docs/language/0052-optional.md`.
+  `.parse<T>()` returns a real `Optional<T>`, not `T` directly with a
+  silent fallback; the design doc's own `.parse<i32>()?` is reproducible
+  now, inside a function whose own return type is `Optional<U>`.
+- **Only `T ∈ {i32, i64, f64, bool}`.** No `parse<char>`, `parse<f32>`/
+  `parse<i8>`/... (only `i32`/`i64`/`f64` themselves exist as real
+  numeric types - see `docs/language/0051-numeric-widening.md`), or any
+  user-defined target type.
+- **No overflow checking for `parse<i32>`/`parse<i64>`.** A very large
+  digit sequence still wraps silently and returns `Some(<wrapped
+  result>)`, not `None` - overflow isn't treated as failure, matching
+  plain `i32`/`i64` arithmetic's own existing unchecked-overflow behavior
+  everywhere else in this backend. `parse<f64>` doesn't share this gap -
+  `strtod` itself already saturates to `+-HUGE_VAL` on overflow rather
+  than wrapping, libc's own well-defined behavior, inherited for free.
+- **`parse<bool>` accepts only the exact literals `"true"`/`"false"`** -
+  `Some(true)`/`Some(false)` respectively, `None` for anything else
+  (see `docs/language/0052-optional.md` - originally, before
+  `Optional<T>` existed, anything not exactly `"true"` parsed as a
+  defined `false`, not a distinguishable failure). No case-insensitivity,
+  no `"1"`/`"0"`, no `"yes"`/`"no"`.
 - **No general user-defined generic methods.** The `<T>` syntax exists
   only for this one compiler-intrinsic method; there is no mechanism for
   Axea source to define its own generic method.

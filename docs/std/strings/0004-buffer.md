@@ -8,8 +8,9 @@
 `.len` below, for consistency with every other collection type in the
 codebase (`List`, `Map`, `String`, ... all use `.length`). The "Compiler
 Optimizations" section below (automatic string-interpolation lowering) is
-still aspirational - string interpolation itself has no lexer/parser
-support yet.
+now implemented, not aspirational - string interpolation
+(`"Hello {name}"`) really does lower into `Buffer` new/append/finish
+operations under the hood, essentially exactly as sketched there.
 
 It replaces the traditional `StringBuilder` name with a shorter, more general API.
 
@@ -47,7 +48,7 @@ message = buf.finish()
 
 ## Compiler Optimizations
 
-The compiler may automatically lower string interpolation into a `Buffer`.
+The compiler automatically lowers string interpolation into a `Buffer`.
 
 Source:
 

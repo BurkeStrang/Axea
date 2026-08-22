@@ -23,7 +23,7 @@ sum([1, 2, 3, 4, 5, 6, 7]) // also fine - same function, different array size
 
 **Deliberately scoped to function parameters only** — not a local-variable type, not a return type, not a struct field type. Rejected explicitly, with a clear error, everywhere else `parseTypeName` would otherwise happily accept it (see "Why Parameter-Only" below).
 
-**Explicitly out of scope**, not silently missing: `array[a..b]` sub-slicing syntax (the grammar's own `slice_suffix`), and re-slicing an existing slice into a shorter one.
+**Explicitly out of scope**, not silently missing: `array[a..b]` sub-slicing *into a `slice<T>`* (the grammar's own `slice_suffix`), and re-slicing an existing slice into a shorter one. **Update (`docs/language/0050-collection-join-and-slicing.md`):** `array[a..b]`/`list[a..b]` syntax is now implemented, but produces a fresh, owned `List<T>` (a real copy), not a `slice<T>` view — this section's own "no sub-slicing" scope call was specifically about `slice<T>`, which remains untouched (still parameter-only, still no re-slicing).
 
 ---
 
@@ -196,7 +196,7 @@ Byte-for-byte identical — the same `sum` correctly handles a 3-element and a 7
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No sub-slicing.** `array[a..b]` (the grammar's own `slice_suffix`, `header = bytes[0..20]` from `0005-type-system.md`) isn't implemented — a slice can only be constructed via the implicit whole-array conversion at a call boundary.
+- **No sub-slicing *into a `slice<T>`*.** A `slice<T>` can only be constructed via the implicit whole-array conversion at a call boundary. `array[a..b]`/`list[a..b]` syntax itself is now implemented (see `docs/language/0050-collection-join-and-slicing.md`), but produces an owned `List<T>`, not a `slice<T>`.
 - **No re-slicing.** An existing slice can be forwarded unchanged to another slice parameter, but not narrowed into a shorter one.
 - **Slice cannot be a return type, a local variable's declared type, or a struct field's type.** Explicitly rejected with a clear error at each of those three resolution sites, not merely unimplemented — this is what keeps `RegionChecker` correct without any changes (see "Why Parameter-Only" above).
 - **No real lifetime tracking.** Nothing checks that a slice's backing array actually outlives the slice's use — consistent with this backend's broader stance of doing no real memory management at all (nothing is ever freed anywhere).

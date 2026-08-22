@@ -1,6 +1,25 @@
 # Axea Printing & Formatting
 
-> **Status:** Draft
+> **Status:** Partially implemented - see `docs/language/0049-printing-formatting.md`,
+> `docs/language/0050-collection-join-and-slicing.md`, and
+> `docs/language/0054-collection-printing.md`.
+> `print()`/`write()` (both usable bare at the top level, no assignment
+> required, matching this doc's own examples - see 0049's own Parsing
+> section follow-up), basic `{expr}` string interpolation (the "Printing"
+> and "String Interpolation" sections below, for `i32`, `i64`, `f64`,
+> `bool`, `char`, `str`, `String` - wider than `i32`/`bool`/`char`/`str`/
+> `String` alone, once `i64`/`f64` themselves existed - see
+> `docs/language/0051-numeric-widening.md` - and now with real support
+> for a nested string literal inside an interpolation span, e.g.
+> `"{x.join(",")}"`), and collection `.join()`/`array[a..b]` slicing (the
+> "Collections" section below, same element-type restriction) are
+> implemented. `print()`/`write()`/interpolation now also accept a
+> struct, `Optional<T>`, or any collection value (`Array`/`List`/`Map`/
+> `Set`/`Deque`/`Queue`/`PriorityQueue`/`LinkedList`/`SortedMap`/
+> `SortedSet`/`Stack`) directly - see `0054-collection-printing.md`;
+> `slice<T>` is the one remaining unsupported type. Numeric formatting,
+> alignment, debug formatting, `Buffer.write()`, traits/`Display`, and
+> raw/multiline string literals remain Draft - not yet implemented.
 
 This document defines Axea's proposed printing, string interpolation,
 formatting, debug formatting, raw strings, multiline strings, and

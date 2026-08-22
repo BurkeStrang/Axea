@@ -25,11 +25,17 @@ has = ids.contains(87)   // true
 ids.remove(93)
 ```
 
-**Scope restriction, and why: `T` is `i32` only this phase.** Identical
-reasoning to `PriorityQueue<T>`'s element type and `SortedMap<K,V>`'s key
-(`docs/language/0039-priority-queues.md`, `docs/language/0040-sorted-maps.md`)
-- `<`/`<=`/`>`/`>=` only ever typecheck for `i32` operands, so `i32` is the
-only type a tree can order today.
+**Scope restriction, and why: `T` is `i32`, `i64`, `f64`, `char`, or `str`
+only this phase.** Identical reasoning to `PriorityQueue<T>`'s element type
+and `SortedMap<K,V>`'s key (`docs/language/0039-priority-queues.md`,
+`docs/language/0040-sorted-maps.md`) - `<`/`<=`/`>`/`>=` only ever
+typecheck for those five kinds, so they're the only types a tree can order
+today (`str` compares via a real lexicographic byte-walk,
+`registerOrderRuntime`/`@axea.less.str` - see docs/language/0042-string.md;
+`i64`/`f64` are `docs/language/0051-numeric-widening.md`'s own addition).
+The *owned* `String` type stays excluded
+even though it's str-coercible everywhere else - ordering only ever
+considers the bare value type.
 
 **API**: `add(x)`, `contains(x) -> bool`, `remove(x)`, `.length` -
 byte-for-byte `Set<T>`'s own signatures, exactly the way `SortedMap<K,V>`'s
@@ -109,17 +115,26 @@ Function(build)
 tag) - `SortedSet<T>` is "`Set<T>`, but ordered," so it mirrors `Set<T>`'s
 own representation choice, not the array-like collections'.
 `resolveType`'s `"SortedSet<elem>"` branch requires
-`elementType.kind == TypeKind::I32` directly, the identical orderability
+`isOrderableKind(elementType.kind)` directly, the identical orderability
 check `SortedMap<K,V>`'s own key uses - not `Set<T>`'s `isHashable` call,
 since the real constraint here is orderability, not hashability.
+`isOrderableKind` accepts `i32`/`i64` (numeric order), `f64` (numeric
+order via `fcmp`'s *ordered* predicates - see
+docs/language/0051-numeric-widening.md), `char` (codepoint order - see
+docs/language/0044-char.md), and `str` (real lexicographic byte order via
+`registerOrderRuntime`/`@axea.less.str` - see docs/language/0042-string.md);
+the *owned* `String` type is deliberately excluded even though it's
+str-coercible everywhere else, since ordering only ever considers the bare
+value type.
 `MethodCallExpr` gets its own `TypeKind::SortedSet` case, copied
 byte-for-byte from `Set<T>`'s own: `add`/`contains`/`remove` (1 argument,
 `contains` returns `bool`, the others return `unit`).
 
 ```text
 $ ax capabilities bad.ax   # s = SortedSet<bool>()
-error: SortedSet<T> requires an orderable element type (i32 only in this
-phase - no other type is comparable yet), found SortedSet<bool>
+error: SortedSet<T> requires an orderable element type (i32, i64, f64,
+char, or str only in this phase - no other type is comparable yet), found
+SortedSet<bool>
 ```
 
 ---

@@ -1,7 +1,26 @@
 #include "llvmir/LlvmIrEmitter.hpp"
 
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+
 namespace
 {
+    // LLVM IR's own hexadecimal float-constant form - 16 hex digits, the
+    // IEEE 754 bit pattern of the double directly (see the LLVM Language
+    // Reference's "Simple Constants" section) - used unconditionally
+    // rather than plain decimal notation, since decimal notation is only
+    // guaranteed exact for values LLVM's parser happens to round-trip
+    // losslessly; the hex form is always exact, for any double.
+    std::string formatDoubleLiteral(double value)
+    {
+        std::uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        std::ostringstream oss;
+        oss << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(16) << bits;
+        return oss.str();
+    }
+
     std::string llvmEscape(const std::string& text)
     {
         static const char* hex = "0123456789ABCDEF";
@@ -57,6 +76,17 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     {
         return "i32";
     }
+    if (axeaTypeName == "i64")
+    {
+        return "i64";
+    }
+    if (axeaTypeName == "f64")
+    {
+        // LLVM's own name for a 64-bit IEEE 754 float (see
+        // docs/language/0005-type-system.md) - "f64" only ever refers to
+        // Axea source text; "double" is this type's actual LLVM spelling.
+        return "double";
+    }
     if (axeaTypeName == "bool")
     {
         return "i1";
@@ -75,6 +105,16 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     }
     if (axeaTypeName == "str")
     {
+        return "i8*";
+    }
+    if (axeaTypeName == "cstr")
+    {
+        // Representationally identical to str (see
+        // docs/language/0048-ffi.md and docs/language/0042-string.md's own
+        // Design section) - both a bare, null-terminated i8*. The two stay
+        // distinct Axea types (no implicit coercion either direction) so
+        // `.to_cstr()` remains a real, deliberate step at the type level,
+        // even though it produces bit-identical output.
         return "i8*";
     }
     if (axeaTypeName == "String")
@@ -111,6 +151,13 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
             axeaTypeName.substr(semicolon + 1, closeBracket - semicolon - 1);
         return "[" + sizeText + " x " + llvmType(elementName) + "]*";
     }
+    if (axeaTypeName.starts_with("Optional<"))
+    {
+        // "Optional<elem>" - the canonical form Parser::parseTypeName
+        // always produces (see docs/language/0052-optional.md).
+        const std::string elementName = axeaTypeName.substr(9, axeaTypeName.size() - 10);
+        return registerOptionalInstantiation(elementName);
+    }
     if (axeaTypeName.starts_with("slice<"))
     {
         // "slice<elem>" - the canonical form Parser::parseTypeName always
@@ -127,12 +174,19 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     {
         // "List<elem>" - the canonical form Parser::parseTypeName always
         // produces (see docs/language/0033-lists.md). A *pointer* to an
-        // anonymous 2-field heap record {length, data} - unlike slice<T>,
-        // List<T> genuinely owns its storage (a stable heap pointer, mutated
-        // in place on push/pop), so it follows struct/array's "always by
-        // pointer" convention, not slice's by-value one.
+        // anonymous 3-field heap record {length, data, capacity} - unlike
+        // slice<T>, List<T> genuinely owns its storage (a stable heap
+        // pointer, mutated in place on push/pop), so it follows
+        // struct/array's "always by pointer" convention, not slice's
+        // by-value one. `capacity` (amortized doubling growth - see
+        // ensureListCapacity) is deliberately field *2*, at the end, not
+        // field 1 the way Buffer's own {length, capacity, data} order
+        // puts it: field 1 has to stay `T* data` (unchanged from before
+        // this field existed) to avoid colliding with Deque<T>'s own
+        // `{i32, i32, T*}*` header text - see ensureListCapacity's own
+        // comment for the full reasoning.
         const std::string elementName = axeaTypeName.substr(5, axeaTypeName.size() - 6);
-        return "{i32, " + llvmType(elementName) + "*}*";
+        return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
     if (axeaTypeName.starts_with("Stack<"))
     {
@@ -147,7 +201,7 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
         // checks (`.length`, top-level printing) already handle a Stack<T>
         // value correctly with no changes at all.
         const std::string elementName = axeaTypeName.substr(6, axeaTypeName.size() - 7);
-        return "{i32, " + llvmType(elementName) + "*}*";
+        return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
     if (axeaTypeName.starts_with("Map<"))
     {
@@ -232,17 +286,18 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     if (axeaTypeName.starts_with("PriorityQueue<"))
     {
         // PriorityQueue<T> (see docs/language/0039-priority-queues.md): a
-        // real binary heap, but stored in the *exact same* two-field header
-        // List<T>/Stack<T> already use - "{i32, " + llvmType(elementName) +
-        // "*}*" - genuinely the same LLVM type, not merely similarly shaped.
-        // The heap-vs-list/stack distinction lives entirely at the Axea/IR
-        // level (TypeKind::PriorityQueue,
-        // IrPriorityQueueNew/Push/Pop/Peek); isListType's own existing
-        // structural check already handles a PriorityQueue<T> value
-        // correctly for `.length` and top-level printing, no new predicate
-        // needed - the same free ride Stack<T> got before it.
+        // real binary heap, but stored in the *exact same* three-field
+        // header List<T>/Stack<T> already use - "{i32, " +
+        // llvmType(elementName) + "*, i32}*" - genuinely the same LLVM
+        // type, not merely similarly shaped. The heap-vs-list/stack
+        // distinction lives entirely at the Axea/IR level
+        // (TypeKind::PriorityQueue, IrPriorityQueueNew/Push/Pop/Peek);
+        // isListType's own existing structural check already handles a
+        // PriorityQueue<T> value correctly for `.length` and top-level
+        // printing, no new predicate needed - the same free ride Stack<T>
+        // got before it.
         const std::string elementName = axeaTypeName.substr(14, axeaTypeName.size() - 15);
-        return "{i32, " + llvmType(elementName) + "*}*";
+        return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
     return "%" + axeaTypeName + "*"; // struct type: always by pointer
 }
@@ -272,6 +327,132 @@ std::string LlvmIrEmitter::binOpMnemonic(TokenKind op) const
         case TokenKind::BangEqual: return "icmp ne";
         default: return "add"; // unreachable for a well-checked program
     }
+}
+
+std::string LlvmIrEmitter::floatBinOpMnemonic(TokenKind op) const
+{
+    switch (op)
+    {
+        case TokenKind::Plus: return "fadd";
+        case TokenKind::Minus: return "fsub";
+        case TokenKind::Star: return "fmul";
+        case TokenKind::Slash: return "fdiv";
+        case TokenKind::Less: return "fcmp olt";
+        case TokenKind::LessEqual: return "fcmp ole";
+        case TokenKind::Greater: return "fcmp ogt";
+        case TokenKind::GreaterEqual: return "fcmp oge";
+        case TokenKind::EqualEqual: return "fcmp oeq";
+        case TokenKind::BangEqual: return "fcmp one";
+        default: return "fadd"; // unreachable for a well-checked program
+    }
+}
+
+void LlvmIrEmitter::emitStrComparison(int axeaDest,
+                                      TokenKind op,
+                                      const std::string& lhsPtr,
+                                      const std::string& rhsPtr,
+                                      FunctionContext& fctx)
+{
+    // `defineRegister(axeaDest, ...)` must be the *last* register allocated
+    // in each branch below, right before the line that defines it - LLVM
+    // requires unnamed (numeric) registers to be defined in strictly
+    // increasing textual order, so any intermediate register this function
+    // needs (eqReg/notLessReg) has to be allocated - and its own defining
+    // line written - *before* destReg's, not after.
+    if (op == TokenKind::EqualEqual)
+    {
+        const auto [unusedHashFn, eqFn] = registerKeyRuntime("str");
+        const int destReg = defineRegister(axeaDest, fctx);
+        *fctx.out << "  %" << destReg << " = call i1 " << eqFn << "(i8* " << lhsPtr << ", i8* "
+                  << rhsPtr << ")\n";
+        return;
+    }
+    if (op == TokenKind::BangEqual)
+    {
+        const auto [unusedHashFn, eqFn] = registerKeyRuntime("str");
+        const int eqReg = allocateRegister(fctx);
+        *fctx.out << "  %" << eqReg << " = call i1 " << eqFn << "(i8* " << lhsPtr << ", i8* "
+                  << rhsPtr << ")\n";
+        const int destReg = defineRegister(axeaDest, fctx);
+        *fctx.out << "  %" << destReg << " = xor i1 %" << eqReg << ", 1\n";
+        return;
+    }
+
+    const std::string lessFn = registerOrderRuntime("str");
+    if (op == TokenKind::Less)
+    {
+        const int destReg = defineRegister(axeaDest, fctx);
+        *fctx.out << "  %" << destReg << " = call i1 " << lessFn << "(i8* " << lhsPtr << ", i8* "
+                  << rhsPtr << ")\n";
+        return;
+    }
+    if (op == TokenKind::Greater)
+    {
+        const int destReg = defineRegister(axeaDest, fctx);
+        *fctx.out << "  %" << destReg << " = call i1 " << lessFn << "(i8* " << rhsPtr << ", i8* "
+                  << lhsPtr << ")\n";
+        return;
+    }
+    // LessEqual: a<=b iff not(b<a). GreaterEqual: a>=b iff not(a<b) - only a
+    // strict less-than primitive exists, so both derive from one call with
+    // the operands (not) swapped.
+    const bool isLessEqual = op == TokenKind::LessEqual;
+    const std::string& notLessLhs = isLessEqual ? rhsPtr : lhsPtr;
+    const std::string& notLessRhs = isLessEqual ? lhsPtr : rhsPtr;
+    const int notLessReg = allocateRegister(fctx);
+    *fctx.out << "  %" << notLessReg << " = call i1 " << lessFn << "(i8* " << notLessLhs << ", i8* "
+              << notLessRhs << ")\n";
+    const int destReg = defineRegister(axeaDest, fctx);
+    *fctx.out << "  %" << destReg << " = xor i1 %" << notLessReg << ", 1\n";
+}
+
+int LlvmIrEmitter::emitPriorityQueueCompare(const std::string& elementType,
+                                            const std::string& predicate,
+                                            const std::string& lhsRef,
+                                            const std::string& rhsRef,
+                                            FunctionContext& fctx)
+{
+    // Returns the freshly allocated destReg (rather than taking one as a
+    // parameter) for the same reason emitStrComparison above defines its
+    // own destReg last: LLVM requires unnamed registers in strictly
+    // increasing textual definition order, so a destReg the *caller*
+    // pre-allocated could end up numerically higher than an intermediate
+    // register (notLessReg below) this function still needs to allocate
+    // and define first.
+    if (elementType == "double")
+    {
+        // fcmp's own *ordered* predicate spelling ("o" + the same
+        // "lt"/"le" suffix `predicate` already carries, e.g. "slt" ->
+        // "olt") - icmp only ever accepts integer/pointer operands, never
+        // float (see docs/language/0005-type-system.md).
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = fcmp o" << predicate.substr(1) << " double " << lhsRef
+                  << ", " << rhsRef << "\n";
+        return destReg;
+    }
+    if (elementType != "i8*")
+    {
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = icmp " << predicate << " " << elementType << " "
+                  << lhsRef << ", " << rhsRef << "\n";
+        return destReg;
+    }
+    const std::string lessFn = registerOrderRuntime("str");
+    if (predicate == "slt")
+    {
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i1 " << lessFn << "(i8* " << lhsRef << ", i8* "
+                  << rhsRef << ")\n";
+        return destReg;
+    }
+    // "sle": lhs <= rhs iff not(rhs < lhs) - only a strict less-than
+    // primitive exists (see registerOrderRuntime).
+    const int notLessReg = allocateRegister(fctx);
+    *fctx.out << "  %" << notLessReg << " = call i1 " << lessFn << "(i8* " << rhsRef << ", i8* "
+              << lhsRef << ")\n";
+    const int destReg = allocateRegister(fctx);
+    *fctx.out << "  %" << destReg << " = xor i1 %" << notLessReg << ", 1\n";
+    return destReg;
 }
 
 int LlvmIrEmitter::allocateRegister(FunctionContext& fctx) const
@@ -395,6 +576,11 @@ std::string LlvmIrEmitter::structNameFromPointerType(const std::string& pointerT
     return pointerType.substr(1, pointerType.size() - 2); // strip leading '%' and trailing '*'
 }
 
+bool LlvmIrEmitter::isNamedStructPointerType(const std::string& type) const
+{
+    return type.size() > 1 && type.front() == '%' && type.back() == '*';
+}
+
 std::string LlvmIrEmitter::arrayElementType(const std::string& pointerType) const
 {
     // "[N x T]*" - strip the leading "[N x " and trailing "]*".
@@ -406,6 +592,43 @@ int LlvmIrEmitter::arraySizeFromPointerType(const std::string& pointerType) cons
 {
     // "[N x T]*" - N is everything between the leading '[' and the first ' '.
     return std::stoi(pointerType.substr(1, pointerType.find(' ') - 1));
+}
+
+std::string LlvmIrEmitter::registerOptionalInstantiation(const std::string& payloadAxeaType)
+{
+    return registerOptionalInstantiationForLlvmPayload(llvmType(payloadAxeaType));
+}
+
+std::string
+LlvmIrEmitter::registerOptionalInstantiationForLlvmPayload(const std::string& payloadLlvmType)
+{
+    if (const auto it = optionalInstantiationIds_.find(payloadLlvmType);
+        it != optionalInstantiationIds_.end())
+    {
+        return "%axea.Optional." + std::to_string(it->second);
+    }
+
+    const int id = nextOptionalInstantiationId_++;
+    optionalInstantiationIds_[payloadLlvmType] = id;
+    const std::string name = "%axea.Optional." + std::to_string(id);
+
+    optionalTypeDeclsText_ << name << " = type { i1, " << payloadLlvmType << " }\n";
+    optionalPayloadTypeById_[id] = payloadLlvmType;
+
+    return name;
+}
+
+bool LlvmIrEmitter::isOptionalType(const std::string& type) const
+{
+    return type.starts_with("%axea.Optional.");
+}
+
+std::string LlvmIrEmitter::optionalPayloadType(const std::string& type) const
+{
+    // "%axea.Optional.<id>" - the id is everything after the last '.'.
+    const auto lastDot = type.rfind('.');
+    const int id = std::stoi(type.substr(lastDot + 1));
+    return optionalPayloadTypeById_.at(id);
 }
 
 bool LlvmIrEmitter::isSliceType(const std::string& type) const
@@ -429,8 +652,10 @@ bool LlvmIrEmitter::isListType(const std::string& type) const
 
 std::string LlvmIrEmitter::listElementType(const std::string& type) const
 {
-    // "{i32, T*}*" - strip the leading "{i32, " and trailing "*}*".
-    return type.substr(6, type.size() - 6 - std::string("*}*").size());
+    // "{i32, T*, i32}*" - strip the leading "{i32, " and trailing
+    // "*, i32}*" (capacity - see ensureListCapacity's own comment for why
+    // it's field 2, at the end, rather than field 1).
+    return type.substr(6, type.size() - 6 - std::string("*, i32}*").size());
 }
 
 bool LlvmIrEmitter::isMapType(const std::string& type) const
@@ -551,19 +776,907 @@ std::string LlvmIrEmitter::typeOf(int reg, const FunctionContext& fctx) const
 
 std::string LlvmIrEmitter::resolveStrPtr(int reg, FunctionContext& fctx) const
 {
-    if (typeOf(reg, fctx) == "i8*")
+    return resolveStrPtrOfType(typeOf(reg, fctx), ref(reg, fctx), fctx);
+}
+
+std::string LlvmIrEmitter::resolveStrPtrOfType(const std::string& type,
+                                               const std::string& valueRef,
+                                               FunctionContext& fctx) const
+{
+    if (type == "i8*")
     {
-        return ref(reg, fctx);
+        return valueRef;
     }
     // Must be a String header ({i32, i8*}*) - TypeChecker's own
     // isStrCoercible already guarantees no other type reaches here (see
     // docs/language/0042-string.md).
     const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr {i32, i8*}, {i32, i8*}* "
-              << ref(reg, fctx) << ", i32 0, i32 1\n";
+    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr {i32, i8*}, {i32, i8*}* " << valueRef
+              << ", i32 0, i32 1\n";
     const int dataPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << dataPtrReg << " = load i8*, i8** %" << dataPtrPtrReg << "\n";
     return "%" + std::to_string(dataPtrReg);
+}
+
+std::string LlvmIrEmitter::registerI32ToStrRuntime()
+{
+    const std::string fnName = "@axea.i32.to_str";
+    if (i32ToStrRegistered_)
+    {
+        return fnName;
+    }
+    i32ToStrRegistered_ = true;
+
+    // A real `sprintf` call, not hand-rolled itoa (see
+    // docs/language/Axea_Printing_Formatting.md) - reuses libc's own
+    // well-tested integer formatting (correct sign handling, including
+    // INT32_MIN, for free) rather than risking a hand-written digit-math
+    // bug. 12 bytes is always enough ("-2147483648\0" is 12 characters).
+    // The format-string global is declared in this exact same
+    // self-contained block (not via hoistString/stringGlobals_), so
+    // there's no dependency on collectStrings/emitStringGlobals' own
+    // timing - referencing a global by name never requires it to be
+    // declared earlier in the same module textually.
+    toStrRuntimeText_ << R"(
+@axea.fmt.d = private unnamed_addr constant [3 x i8] c"%d\00"
+
+define i8* @axea.i32.to_str(i32 %v) {
+entry:
+  %buf = call i8* @malloc(i64 12)
+  %fmtPtr = getelementptr [3 x i8], [3 x i8]* @axea.fmt.d, i64 0, i64 0
+  %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, i32 %v)
+  ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerI64ToStrRuntime()
+{
+    const std::string fnName = "@axea.i64.to_str";
+    if (i64ToStrRegistered_)
+    {
+        return fnName;
+    }
+    i64ToStrRegistered_ = true;
+
+    // Same real-sprintf approach as registerI32ToStrRuntime above, just
+    // "%lld" (64-bit) instead of "%d" - 24 bytes is always enough
+    // ("-9223372036854775808\00" is 22 characters including the
+    // terminator).
+    toStrRuntimeText_ << R"(
+@axea.fmt.lld = private unnamed_addr constant [5 x i8] c"%lld\00"
+
+define i8* @axea.i64.to_str(i64 %v) {
+entry:
+  %buf = call i8* @malloc(i64 24)
+  %fmtPtr = getelementptr [5 x i8], [5 x i8]* @axea.fmt.lld, i64 0, i64 0
+  %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, i64 %v)
+  ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerF64ToStrRuntime()
+{
+    const std::string fnName = "@axea.f64.to_str";
+    if (f64ToStrRegistered_)
+    {
+        return fnName;
+    }
+    f64ToStrRegistered_ = true;
+
+    // "%g" (not "%f") - matches Interpreter.cpp's own toString exactly
+    // (both a real sprintf/snprintf("%g", ...) call), so interpreted and
+    // compiled output stay character-for-character identical (see
+    // docs/language/0005-type-system.md). 32 bytes is comfortably enough
+    // for %g's own output range (6 significant digits by default, plus
+    // sign/decimal point/exponent).
+    toStrRuntimeText_ << R"(
+@axea.fmt.g = private unnamed_addr constant [3 x i8] c"%g\00"
+
+define i8* @axea.f64.to_str(double %v) {
+entry:
+  %buf = call i8* @malloc(i64 32)
+  %fmtPtr = getelementptr [3 x i8], [3 x i8]* @axea.fmt.g, i64 0, i64 0
+  %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, double %v)
+  ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerBoolToStrRuntime()
+{
+    const std::string fnName = "@axea.bool.to_str";
+    if (boolToStrRegistered_)
+    {
+        return fnName;
+    }
+    boolToStrRegistered_ = true;
+
+    // Hand-rolled byte stores (see
+    // docs/language/Axea_Printing_Formatting.md), mirroring
+    // @axea.parse.bool's own self-contained style - no format-string
+    // global needed for a fixed "true"/"false" pair.
+    toStrRuntimeText_ << R"(
+define i8* @axea.bool.to_str(i1 %v) {
+entry:
+  br i1 %v, label %istrue, label %isfalse
+istrue:
+  %tbuf = call i8* @malloc(i64 5)
+  %t0 = getelementptr i8, i8* %tbuf, i64 0
+  store i8 116, i8* %t0
+  %t1 = getelementptr i8, i8* %tbuf, i64 1
+  store i8 114, i8* %t1
+  %t2 = getelementptr i8, i8* %tbuf, i64 2
+  store i8 117, i8* %t2
+  %t3 = getelementptr i8, i8* %tbuf, i64 3
+  store i8 101, i8* %t3
+  %t4 = getelementptr i8, i8* %tbuf, i64 4
+  store i8 0, i8* %t4
+  ret i8* %tbuf
+isfalse:
+  %fbuf = call i8* @malloc(i64 6)
+  %f0 = getelementptr i8, i8* %fbuf, i64 0
+  store i8 102, i8* %f0
+  %f1 = getelementptr i8, i8* %fbuf, i64 1
+  store i8 97, i8* %f1
+  %f2 = getelementptr i8, i8* %fbuf, i64 2
+  store i8 108, i8* %f2
+  %f3 = getelementptr i8, i8* %fbuf, i64 3
+  store i8 115, i8* %f3
+  %f4 = getelementptr i8, i8* %fbuf, i64 4
+  store i8 101, i8* %f4
+  %f5 = getelementptr i8, i8* %fbuf, i64 5
+  store i8 0, i8* %f5
+  ret i8* %fbuf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerOptionalToStrRuntime(const std::string& optionalType)
+{
+    if (const auto it = optionalToStrFnByOptionalType_.find(optionalType);
+        it != optionalToStrFnByOptionalType_.end())
+    {
+        return it->second;
+    }
+
+    const std::string payloadType = optionalPayloadType(optionalType);
+    // "%axea.Optional.<id>" - the id is everything after the last '.'.
+    const std::string idStr = optionalType.substr(optionalType.rfind('.') + 1);
+    const std::string fnName = "@axea.optional." + idStr + ".to_str";
+    optionalToStrFnByOptionalType_[optionalType] = fnName;
+
+    std::string payloadToStrCall;
+    if (payloadType == "i32")
+    {
+        registerI32ToStrRuntime();
+        payloadToStrCall = "  %payloadStr = call i8* @axea.i32.to_str(i32 %payload)\n";
+    }
+    else if (payloadType == "i64")
+    {
+        registerI64ToStrRuntime();
+        payloadToStrCall = "  %payloadStr = call i8* @axea.i64.to_str(i64 %payload)\n";
+    }
+    else if (payloadType == "double")
+    {
+        registerF64ToStrRuntime();
+        payloadToStrCall = "  %payloadStr = call i8* @axea.f64.to_str(double %payload)\n";
+    }
+    else if (payloadType == "i1")
+    {
+        registerBoolToStrRuntime();
+        payloadToStrCall = "  %payloadStr = call i8* @axea.bool.to_str(i1 %payload)\n";
+    }
+    else
+    {
+        // Some(x)/None themselves accept any payload type (see
+        // docs/language/0052-optional.md) - only *printing* one is this
+        // narrow, the same T-restricted set `.parse<T>()` itself produces.
+        throw std::runtime_error(
+            "printing Optional<T> is only supported for T in {i32, i64, f64, bool} this phase, "
+            "found payload type " +
+            payloadType);
+    }
+
+    if (!optionalToStrGlobalsRegistered_)
+    {
+        optionalToStrGlobalsRegistered_ = true;
+        // "Some(%s)\00" is 8 characters + terminator; "None\00" is 4 + 1.
+        toStrRuntimeText_ << R"(
+@axea.fmt.some = private unnamed_addr constant [9 x i8] c"Some(%s)\00"
+@axea.str.none = private unnamed_addr constant [5 x i8] c"None\00"
+)";
+    }
+
+    // A real sprintf call, same as every other *ToStrRuntime above - 48
+    // bytes comfortably covers "Some(" + the longest payload rendering
+    // (32 bytes, f64's own bound) + ")" + terminator.
+    toStrRuntimeText_ << R"(
+define i8* @axea.optional.)"
+                      << idStr << "." << R"(to_str()" << optionalType << R"( %v) {
+entry:
+  %hasValue = extractvalue )"
+                      << optionalType << R"( %v, 0
+  br i1 %hasValue, label %issome, label %isnone
+issome:
+  %payload = extractvalue )"
+                      << optionalType << R"( %v, 1
+)" << payloadToStrCall << R"(  %buf = call i8* @malloc(i64 48)
+  %fmtPtr = getelementptr [9 x i8], [9 x i8]* @axea.fmt.some, i64 0, i64 0
+  %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, i8* %payloadStr)
+  ret i8* %buf
+isnone:
+  %nonePtr = getelementptr [5 x i8], [5 x i8]* @axea.str.none, i64 0, i64 0
+  ret i8* %nonePtr
+}
+)";
+    return fnName;
+}
+
+void LlvmIrEmitter::registerStrbufRuntime()
+{
+    if (strbufRegistered_)
+    {
+        return;
+    }
+    strbufRegistered_ = true;
+
+    // A small growable string buffer - `{i32 len, i32 cap, i8* data}*`,
+    // the exact same header shape Buffer itself uses (see
+    // docs/language/0043-buffer.md), but a fully independent, self-
+    // contained implementation: these need to be callable from any
+    // hand-written stringify function below, not tied to a specific
+    // already-being-emitted function's own live register/label numbering
+    // the way emitBufferNew/Append/ensureBufferCapacity's inline codegen
+    // is (see docs/language/0054-collection-printing.md).
+    toStrRuntimeText_ << R"(
+define {i32, i32, i8*}* @axea.strbuf.new() {
+entry:
+  %hdrSizePtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* null, i32 1
+  %hdrSizeInt = ptrtoint {i32, i32, i8*}* %hdrSizePtr to i64
+  %rawHdr = call i8* @malloc(i64 %hdrSizeInt)
+  %hdr = bitcast i8* %rawHdr to {i32, i32, i8*}*
+  %initData = call i8* @malloc(i64 1)
+  store i8 0, i8* %initData
+  %lenPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %hdr, i32 0, i32 0
+  store i32 0, i32* %lenPtr
+  %capPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %hdr, i32 0, i32 1
+  store i32 1, i32* %capPtr
+  %dataPtrPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %hdr, i32 0, i32 2
+  store i8* %initData, i8** %dataPtrPtr
+  ret {i32, i32, i8*}* %hdr
+}
+
+define void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* %text) {
+entry:
+  %textLen64 = call i64 @strlen(i8* %text)
+  %textLen = trunc i64 %textLen64 to i32
+  %lenPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %buf, i32 0, i32 0
+  %oldLen = load i32, i32* %lenPtr
+  %newLen = add i32 %oldLen, %textLen
+  %needed = add i32 %newLen, 1
+  %capPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %buf, i32 0, i32 1
+  %cap = load i32, i32* %capPtr
+  %needGrow = icmp sgt i32 %needed, %cap
+  br i1 %needGrow, label %grow, label %afterGrow
+grow:
+  %doubled = mul i32 %cap, 2
+  %needsMore = icmp sgt i32 %needed, %doubled
+  %newCap = select i1 %needsMore, i32 %needed, i32 %doubled
+  %newCap64 = zext i32 %newCap to i64
+  %newData = call i8* @malloc(i64 %newCap64)
+  %dataPtrPtr1 = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %buf, i32 0, i32 2
+  %oldData = load i8*, i8** %dataPtrPtr1
+  %oldCopyIdxSlot = alloca i32
+  store i32 0, i32* %oldCopyIdxSlot
+  br label %oldCopyHdr
+oldCopyHdr:
+  %oldCopyIdx = load i32, i32* %oldCopyIdxSlot
+  %oldCopyDone = icmp sge i32 %oldCopyIdx, %oldLen
+  br i1 %oldCopyDone, label %oldCopyFin, label %oldCopyBody
+oldCopyBody:
+  %srcPtr = getelementptr i8, i8* %oldData, i32 %oldCopyIdx
+  %srcByte = load i8, i8* %srcPtr
+  %dstPtr = getelementptr i8, i8* %newData, i32 %oldCopyIdx
+  store i8 %srcByte, i8* %dstPtr
+  %oldCopyIdxNext = add i32 %oldCopyIdx, 1
+  store i32 %oldCopyIdxNext, i32* %oldCopyIdxSlot
+  br label %oldCopyHdr
+oldCopyFin:
+  store i8* %newData, i8** %dataPtrPtr1
+  store i32 %newCap, i32* %capPtr
+  br label %afterGrow
+afterGrow:
+  %dataPtrPtr2 = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %buf, i32 0, i32 2
+  %data = load i8*, i8** %dataPtrPtr2
+  %appendIdxSlot = alloca i32
+  store i32 0, i32* %appendIdxSlot
+  br label %appendHdr
+appendHdr:
+  %appendIdx = load i32, i32* %appendIdxSlot
+  %appendDone = icmp sge i32 %appendIdx, %textLen
+  br i1 %appendDone, label %appendFin, label %appendBody
+appendBody:
+  %textSrcPtr = getelementptr i8, i8* %text, i32 %appendIdx
+  %textByte = load i8, i8* %textSrcPtr
+  %destIdx = add i32 %oldLen, %appendIdx
+  %textDstPtr = getelementptr i8, i8* %data, i32 %destIdx
+  store i8 %textByte, i8* %textDstPtr
+  %appendIdxNext = add i32 %appendIdx, 1
+  store i32 %appendIdxNext, i32* %appendIdxSlot
+  br label %appendHdr
+appendFin:
+  %termPtr = getelementptr i8, i8* %data, i32 %newLen
+  store i8 0, i8* %termPtr
+  store i32 %newLen, i32* %lenPtr
+  ret void
+}
+
+define i8* @axea.strbuf.finish({i32, i32, i8*}* %buf) {
+entry:
+  %dataPtrPtr = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* %buf, i32 0, i32 2
+  %data = load i8*, i8** %dataPtrPtr
+  ret i8* %data
+}
+)";
+
+    // A standalone transcription of encodeCharUtf8's own UTF-8 encoding
+    // (see docs/language/0044-char.md) - same bit-for-bit shift/mask/tag
+    // values per byte-length range, hand-verified against that live-fctx
+    // version's own exact `encodeByte(shift, mask, tag)` calls.
+    toStrRuntimeText_ << R"(
+define i8* @axea.char.to_str(i24 %cp) {
+entry:
+  %buf = call i8* @malloc(i64 5)
+  %isOne = icmp ule i24 %cp, 127
+  br i1 %isOne, label %len1, label %check2
+len1:
+  %b0_1 = trunc i24 %cp to i8
+  %p0_1 = getelementptr i8, i8* %buf, i32 0
+  store i8 %b0_1, i8* %p0_1
+  %pnull_1 = getelementptr i8, i8* %buf, i32 1
+  store i8 0, i8* %pnull_1
+  br label %done
+check2:
+  %isTwo = icmp ule i24 %cp, 2047
+  br i1 %isTwo, label %len2, label %check3
+len2:
+  %hi2 = lshr i24 %cp, 6
+  %hi2t = or i24 %hi2, 192
+  %hi2b = trunc i24 %hi2t to i8
+  %lo2 = and i24 %cp, 63
+  %lo2t = or i24 %lo2, 128
+  %lo2b = trunc i24 %lo2t to i8
+  %p0_2 = getelementptr i8, i8* %buf, i32 0
+  store i8 %hi2b, i8* %p0_2
+  %p1_2 = getelementptr i8, i8* %buf, i32 1
+  store i8 %lo2b, i8* %p1_2
+  %pnull_2 = getelementptr i8, i8* %buf, i32 2
+  store i8 0, i8* %pnull_2
+  br label %done
+check3:
+  %isThree = icmp ule i24 %cp, 65535
+  br i1 %isThree, label %len3, label %len4
+len3:
+  %hi3 = lshr i24 %cp, 12
+  %hi3t = or i24 %hi3, 224
+  %hi3b = trunc i24 %hi3t to i8
+  %mid3 = lshr i24 %cp, 6
+  %mid3m = and i24 %mid3, 63
+  %mid3t = or i24 %mid3m, 128
+  %mid3b = trunc i24 %mid3t to i8
+  %lo3 = and i24 %cp, 63
+  %lo3t = or i24 %lo3, 128
+  %lo3b = trunc i24 %lo3t to i8
+  %p0_3 = getelementptr i8, i8* %buf, i32 0
+  store i8 %hi3b, i8* %p0_3
+  %p1_3 = getelementptr i8, i8* %buf, i32 1
+  store i8 %mid3b, i8* %p1_3
+  %p2_3 = getelementptr i8, i8* %buf, i32 2
+  store i8 %lo3b, i8* %p2_3
+  %pnull_3 = getelementptr i8, i8* %buf, i32 3
+  store i8 0, i8* %pnull_3
+  br label %done
+len4:
+  %hi4 = lshr i24 %cp, 18
+  %hi4t = or i24 %hi4, 240
+  %hi4b = trunc i24 %hi4t to i8
+  %mid4a = lshr i24 %cp, 12
+  %mid4am = and i24 %mid4a, 63
+  %mid4at = or i24 %mid4am, 128
+  %mid4ab = trunc i24 %mid4at to i8
+  %mid4b = lshr i24 %cp, 6
+  %mid4bm = and i24 %mid4b, 63
+  %mid4bt = or i24 %mid4bm, 128
+  %mid4bb = trunc i24 %mid4bt to i8
+  %lo4 = and i24 %cp, 63
+  %lo4t = or i24 %lo4, 128
+  %lo4b = trunc i24 %lo4t to i8
+  %p0_4 = getelementptr i8, i8* %buf, i32 0
+  store i8 %hi4b, i8* %p0_4
+  %p1_4 = getelementptr i8, i8* %buf, i32 1
+  store i8 %mid4ab, i8* %p1_4
+  %p2_4 = getelementptr i8, i8* %buf, i32 2
+  store i8 %mid4bb, i8* %p2_4
+  %p3_4 = getelementptr i8, i8* %buf, i32 3
+  store i8 %lo4b, i8* %p3_4
+  %pnull_4 = getelementptr i8, i8* %buf, i32 4
+  store i8 0, i8* %pnull_4
+  br label %done
+done:
+  ret i8* %buf
+}
+)";
+}
+
+std::string LlvmIrEmitter::emitElementToStrCall(const std::string& elementType,
+                                                const std::string& valueRef,
+                                                std::ostringstream& body,
+                                                int& nextTmp)
+{
+    if (elementType == "i32")
+    {
+        registerI32ToStrRuntime();
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.i32.to_str(i32 " << valueRef << ")\n";
+        return dest;
+    }
+    if (elementType == "i64")
+    {
+        registerI64ToStrRuntime();
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.i64.to_str(i64 " << valueRef << ")\n";
+        return dest;
+    }
+    if (elementType == "double")
+    {
+        registerF64ToStrRuntime();
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.f64.to_str(double " << valueRef << ")\n";
+        return dest;
+    }
+    if (elementType == "i1")
+    {
+        registerBoolToStrRuntime();
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.bool.to_str(i1 " << valueRef << ")\n";
+        return dest;
+    }
+    if (isCharType(elementType))
+    {
+        registerStrbufRuntime(); // also registers @axea.char.to_str
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.char.to_str(i24 " << valueRef << ")\n";
+        return dest;
+    }
+    if (isOptionalType(elementType))
+    {
+        const std::string fnName = registerOptionalToStrRuntime(elementType);
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* " << fnName << "(" << elementType << " " << valueRef
+             << ")\n";
+        return dest;
+    }
+    if (isNamedStructPointerType(elementType))
+    {
+        // Pre-registered, unconditionally, by emitStructToStringHelpers -
+        // safe to reference by fixed name regardless of registration
+        // order (an ordinary function call, unlike Optional<T>'s own
+        // by-value named-type forward-reference constraint - see
+        // docs/language/0052-optional.md).
+        const std::string structName = structNameFromPointerType(elementType);
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* @axea.tostring." << structName << "(" << elementType
+             << " " << valueRef << ")\n";
+        return dest;
+    }
+    if (elementType == "i8*")
+    {
+        // str - already an i8*, nothing to convert.
+        return valueRef;
+    }
+    if (elementType == "{i32, i8*}*")
+    {
+        // String - extract its own data pointer (field 1), same
+        // resolveStrPtrOfType logic every live-fctx caller shares, done
+        // inline here since that helper also needs a live fctx.
+        const std::string ptrPtr = "%t" + std::to_string(nextTmp++);
+        body << "  " << ptrPtr << " = getelementptr {i32, i8*}, {i32, i8*}* " << valueRef
+             << ", i32 0, i32 1\n";
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = load i8*, i8** " << ptrPtr << "\n";
+        return dest;
+    }
+    // A nested collection element - recurse.
+    const std::string fnName = registerCollectionToStrRuntime(elementType);
+    const std::string dest = "%t" + std::to_string(nextTmp++);
+    body << "  " << dest << " = call i8* " << fnName << "(" << elementType << " " << valueRef
+         << ")\n";
+    return dest;
+}
+
+void LlvmIrEmitter::emitStructToStringHelpers(const IrProgram& program)
+{
+    if (program.structs.empty())
+    {
+        return;
+    }
+    registerStrbufRuntime();
+
+    const std::string separator = stringPtrConstant(", ");
+    const std::string closeBrace = stringPtrConstant(" }");
+
+    for (const auto& [name, fields] : program.structs)
+    {
+        const std::string structType = "%" + name;
+        const std::string pointerType = structType + "*";
+        const std::string openBrace = stringPtrConstant(name + " { ");
+
+        std::ostringstream body;
+        int nextTmp = 0;
+        body << "define i8* @axea.tostring." << name << "(" << pointerType << " %v) {\n";
+        body << "entry:\n";
+        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << openBrace << ")\n";
+
+        for (std::size_t i = 0; i < fields.size(); ++i)
+        {
+            const auto& [fieldName, fieldTypeName] = fields[i];
+            if (i > 0)
+            {
+                body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << separator
+                     << ")\n";
+            }
+            const std::string fieldLabel = stringPtrConstant(fieldName + ": ");
+            body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << fieldLabel
+                 << ")\n";
+
+            const std::string fieldLlvmType = llvmType(fieldTypeName);
+            const std::string fieldPtr = "%fptr" + std::to_string(i);
+            const std::string fieldVal = "%fval" + std::to_string(i);
+            body << "  " << fieldPtr << " = getelementptr " << structType << ", " << pointerType
+                 << " %v, i32 0, i32 " << i << "\n";
+            body << "  " << fieldVal << " = load " << fieldLlvmType << ", " << fieldLlvmType << "* "
+                 << fieldPtr << "\n";
+            const std::string fieldStr =
+                emitElementToStrCall(fieldLlvmType, fieldVal, body, nextTmp);
+            body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << fieldStr
+                 << ")\n";
+        }
+
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << closeBrace
+             << ")\n";
+        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+        body << "  ret i8* %result\n";
+        body << "}\n";
+
+        toStrRuntimeText_ << "\n" << body.str();
+    }
+}
+
+std::string LlvmIrEmitter::registerCollectionToStrRuntime(const std::string& llvmType)
+{
+    if (const auto it = collectionToStrFnByLlvmType_.find(llvmType);
+        it != collectionToStrFnByLlvmType_.end())
+    {
+        return it->second;
+    }
+
+    registerStrbufRuntime();
+
+    if (!collectionPunctuationGlobalsRegistered_)
+    {
+        collectionPunctuationGlobalsRegistered_ = true;
+        toStrRuntimeText_ << R"(
+@axea.str.openbracket = private unnamed_addr constant [2 x i8] c"[\00"
+@axea.str.closebracket = private unnamed_addr constant [2 x i8] c"]\00"
+@axea.str.collcomma = private unnamed_addr constant [3 x i8] c", \00"
+@axea.str.map_open = private unnamed_addr constant [5 x i8] c"Map(\00"
+@axea.str.set_open = private unnamed_addr constant [5 x i8] c"Set(\00"
+@axea.str.linkedlist_open = private unnamed_addr constant [12 x i8] c"LinkedList(\00"
+@axea.str.sortedmap_open = private unnamed_addr constant [11 x i8] c"SortedMap(\00"
+@axea.str.sortedset_open = private unnamed_addr constant [11 x i8] c"SortedSet(\00"
+@axea.str.entries_close = private unnamed_addr constant [10 x i8] c" entries)\00"
+)";
+    }
+
+    const int id = static_cast<int>(collectionToStrFnByLlvmType_.size());
+    const std::string fnName = "@axea.tostring.collection." + std::to_string(id);
+    // Inserted *before* the body is built - registerCollectionToStrRuntime
+    // can call itself recursively for a nested collection element (see
+    // emitElementToStrCall), and this guarantees that recursion always
+    // terminates by reusing the same name rather than registering a
+    // second, identical function for an already-in-progress shape.
+    collectionToStrFnByLlvmType_[llvmType] = fnName;
+
+    std::ostringstream body;
+    int nextTmp = 0;
+    const std::string openBracket =
+        "getelementptr ([2 x i8], [2 x i8]* @axea.str.openbracket, i64 0, i64 0)";
+    const std::string closeBracket =
+        "getelementptr ([2 x i8], [2 x i8]* @axea.str.closebracket, i64 0, i64 0)";
+    const std::string comma =
+        "getelementptr ([3 x i8], [3 x i8]* @axea.str.collcomma, i64 0, i64 0)";
+
+    // Dispatch order mirrors the top-level binding printer's own exact
+    // ordering (see e.g. isLinkedListType's own comment) - Map/Set/
+    // LinkedList/SortedMap/SortedSet's headers are all "{i32, ...}*"-
+    // shaped too, so they must be checked before the looser
+    // isDequeType/isListType tests below.
+    if (isMapType(llvmType) || isSetType(llvmType) || isLinkedListType(llvmType) ||
+        isSortedMapType(llvmType) || isSortedSetType(llvmType))
+    {
+        // Count-only, matching the top-level binding printer's own
+        // identical fallback for these (no iteration support this phase -
+        // see docs/language/0034-maps-and-sets.md/0036-linked-lists.md/
+        // 0040-sorted-maps.md/0041-sorted-sets.md).
+        const std::string prefix =
+            isMapType(llvmType)
+                ? "getelementptr ([5 x i8], [5 x i8]* @axea.str.map_open, i64 0, i64 0)"
+            : isSetType(llvmType)
+                ? "getelementptr ([5 x i8], [5 x i8]* @axea.str.set_open, i64 0, i64 0)"
+            : isLinkedListType(llvmType)
+                ? "getelementptr ([12 x i8], [12 x i8]* @axea.str.linkedlist_open, i64 0, i64 0)"
+            : isSortedMapType(llvmType)
+                ? "getelementptr ([11 x i8], [11 x i8]* @axea.str.sortedmap_open, i64 0, i64 0)"
+                : "getelementptr ([11 x i8], [11 x i8]* @axea.str.sortedset_open, i64 0, i64 0)";
+        const std::string suffix =
+            "getelementptr ([10 x i8], [10 x i8]* @axea.str.entries_close, i64 0, i64 0)";
+        registerI32ToStrRuntime();
+
+        const std::string headerType = llvmType.substr(0, llvmType.size() - 1);
+        body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
+        body << "entry:\n";
+        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << prefix << ")\n";
+        body << "  %countPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 0\n";
+        body << "  %count = load i32, i32* %countPtr\n";
+        body << "  %countStr = call i8* @axea.i32.to_str(i32 %count)\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* %countStr)\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << suffix << ")\n";
+        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+        body << "  ret i8* %result\n";
+        body << "}\n";
+
+        toStrRuntimeText_ << "\n" << body.str();
+        return fnName;
+    }
+
+    if (isDequeType(llvmType))
+    {
+        // Full bracket printing (unlike Map/Set/etc. above) - Deque<T>'s
+        // growable-array-with-a-start-offset representation directly
+        // supports it, same reasoning as the top-level binding printer's
+        // own identical Deque branch (see docs/language/0037-deques.md).
+        // Queue<T> shares this exact LLVM shape (see
+        // docs/language/0038-queues.md), so it's covered here too, with
+        // no separate case needed.
+        const std::string headerType = llvmType.substr(0, llvmType.size() - 1);
+        const std::string elementType = dequeElementType(llvmType);
+
+        body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
+        body << "entry:\n";
+        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << openBracket
+             << ")\n";
+        body << "  %lenPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 0\n";
+        body << "  %len = load i32, i32* %lenPtr\n";
+        body << "  %startPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 1\n";
+        body << "  %start = load i32, i32* %startPtr\n";
+        body << "  %dataPtrPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 2\n";
+        body << "  %data = load " << elementType << "*, " << elementType << "** %dataPtrPtr\n";
+        body << "  %idxSlot = alloca i32\n";
+        body << "  store i32 0, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loophdr:\n";
+        body << "  %idx = load i32, i32* %idxSlot\n";
+        body << "  %loopDone = icmp sge i32 %idx, %len\n";
+        body << "  br i1 %loopDone, label %loopdone, label %loopbody\n";
+        body << "loopbody:\n";
+        body << "  %notFirst = icmp sgt i32 %idx, 0\n";
+        body << "  br i1 %notFirst, label %addComma, label %afterComma\n";
+        body << "addComma:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << comma << ")\n";
+        body << "  br label %afterComma\n";
+        body << "afterComma:\n";
+        body << "  %actualIdx = add i32 %start, %idx\n";
+        body << "  %elemPtr = getelementptr " << elementType << ", " << elementType
+             << "* %data, i32 %actualIdx\n";
+        body << "  %elemVal = load " << elementType << ", " << elementType << "* %elemPtr\n";
+        const std::string elemStr = emitElementToStrCall(elementType, "%elemVal", body, nextTmp);
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << elemStr << ")\n";
+        body << "  %idxNext = add i32 %idx, 1\n";
+        body << "  store i32 %idxNext, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loopdone:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << closeBracket
+             << ")\n";
+        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+        body << "  ret i8* %result\n";
+        body << "}\n";
+
+        toStrRuntimeText_ << "\n" << body.str();
+        return fnName;
+    }
+
+    if (isListType(llvmType))
+    {
+        // Stack<T>/PriorityQueue<T> share List<T>'s exact LLVM shape (see
+        // docs/language/0035-stacks.md/0039-priority-queues.md), so
+        // they're covered here too, with no separate case needed.
+        const std::string headerType = llvmType.substr(0, llvmType.size() - 1);
+        const std::string elementType = listElementType(llvmType);
+
+        body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
+        body << "entry:\n";
+        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << openBracket
+             << ")\n";
+        body << "  %lenPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 0\n";
+        body << "  %len = load i32, i32* %lenPtr\n";
+        body << "  %dataPtrPtr = getelementptr " << headerType << ", " << llvmType
+             << " %v, i32 0, i32 1\n";
+        body << "  %data = load " << elementType << "*, " << elementType << "** %dataPtrPtr\n";
+        body << "  %idxSlot = alloca i32\n";
+        body << "  store i32 0, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loophdr:\n";
+        body << "  %idx = load i32, i32* %idxSlot\n";
+        body << "  %loopDone = icmp sge i32 %idx, %len\n";
+        body << "  br i1 %loopDone, label %loopdone, label %loopbody\n";
+        body << "loopbody:\n";
+        body << "  %notFirst = icmp sgt i32 %idx, 0\n";
+        body << "  br i1 %notFirst, label %addComma, label %afterComma\n";
+        body << "addComma:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << comma << ")\n";
+        body << "  br label %afterComma\n";
+        body << "afterComma:\n";
+        body << "  %elemPtr = getelementptr " << elementType << ", " << elementType
+             << "* %data, i32 %idx\n";
+        body << "  %elemVal = load " << elementType << ", " << elementType << "* %elemPtr\n";
+        const std::string elemStr = emitElementToStrCall(elementType, "%elemVal", body, nextTmp);
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << elemStr << ")\n";
+        body << "  %idxNext = add i32 %idx, 1\n";
+        body << "  store i32 %idxNext, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loopdone:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << closeBracket
+             << ")\n";
+        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+        body << "  ret i8* %result\n";
+        body << "}\n";
+
+        toStrRuntimeText_ << "\n" << body.str();
+        return fnName;
+    }
+
+    // Fixed array (see docs/language/0031-arrays.md) - the element count
+    // is statically known, so the loop is unrolled at this (LlvmIrEmitter-
+    // build-time) point rather than emitted as a real runtime loop,
+    // mirroring the top-level binding printer's own identical choice.
+    const std::string elementType = arrayElementType(llvmType);
+    const int size = arraySizeFromPointerType(llvmType);
+    const std::string arrayType = llvmType.substr(0, llvmType.size() - 1);
+
+    body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
+    body << "entry:\n";
+    body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+    body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << openBracket << ")\n";
+    for (int i = 0; i < size; ++i)
+    {
+        if (i > 0)
+        {
+            body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << comma << ")\n";
+        }
+        const std::string elemPtr = "%elemPtr" + std::to_string(i);
+        const std::string elemVal = "%elemVal" + std::to_string(i);
+        body << "  " << elemPtr << " = getelementptr " << arrayType << ", " << llvmType
+             << " %v, i32 0, i32 " << i << "\n";
+        body << "  " << elemVal << " = load " << elementType << ", " << elementType << "* "
+             << elemPtr << "\n";
+        const std::string elemStr = emitElementToStrCall(elementType, elemVal, body, nextTmp);
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << elemStr << ")\n";
+    }
+    body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << closeBracket << ")\n";
+    body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+    body << "  ret i8* %result\n";
+    body << "}\n";
+
+    toStrRuntimeText_ << "\n" << body.str();
+    return fnName;
+}
+
+std::string LlvmIrEmitter::stringifyValue(int reg, FunctionContext& fctx)
+{
+    return stringifyValueOfType(typeOf(reg, fctx), ref(reg, fctx), fctx);
+}
+
+std::string LlvmIrEmitter::stringifyValueOfType(const std::string& type,
+                                                const std::string& valueRef,
+                                                FunctionContext& fctx)
+{
+    if (type == "i32")
+    {
+        const std::string fnName = registerI32ToStrRuntime();
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(i32 " << valueRef << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (type == "i64")
+    {
+        const std::string fnName = registerI64ToStrRuntime();
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(i64 " << valueRef << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (type == "double")
+    {
+        const std::string fnName = registerF64ToStrRuntime();
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(double " << valueRef
+                  << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (type == "i1")
+    {
+        const std::string fnName = registerBoolToStrRuntime();
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(i1 " << valueRef << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (isCharType(type))
+    {
+        return encodeCharUtf8(valueRef, fctx);
+    }
+    if (isOptionalType(type))
+    {
+        const std::string fnName = registerOptionalToStrRuntime(type);
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << type << " " << valueRef
+                  << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (isNamedStructPointerType(type))
+    {
+        // Pre-registered, unconditionally, by emitStructToStringHelpers
+        // (see docs/language/0054-collection-printing.md) - safe to
+        // reference by fixed name regardless of registration order.
+        const std::string fnName = "@axea.tostring." + structNameFromPointerType(type);
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << type << " " << valueRef
+                  << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (type == "i8*" || type == "{i32, i8*}*")
+    {
+        // str or String.
+        return resolveStrPtrOfType(type, valueRef, fctx);
+    }
+    if (!type.empty() && (type.front() == '{' || type.front() == '['))
+    {
+        // A collection - List/Stack/PriorityQueue/Deque/Queue/Map/Set/
+        // LinkedList/SortedMap/SortedSet, or a fixed array (see
+        // docs/language/0054-collection-printing.md) -
+        // registerCollectionToStrRuntime's own dispatch chain covers all
+        // of them, keyed structurally exactly like isListType/isMapType/
+        // etc. already are.
+        const std::string fnName = registerCollectionToStrRuntime(type);
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << type << " " << valueRef
+                  << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    throw std::runtime_error("cannot stringify a value of type " + type + " this phase");
 }
 
 void LlvmIrEmitter::inferTypes(const IrFunction& function, FunctionContext& fctx)
@@ -584,6 +1697,18 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[constInt->dest] = "i32";
         }
+        else if (const auto* constInt64 = dynamic_cast<const IrConstInt64*>(inst.get()))
+        {
+            fctx.registerTypes[constInt64->dest] = "i64";
+        }
+        else if (const auto* constFloat = dynamic_cast<const IrConstFloat*>(inst.get()))
+        {
+            fctx.registerTypes[constFloat->dest] = "double";
+        }
+        else if (const auto* cast = dynamic_cast<const IrCast*>(inst.get()))
+        {
+            fctx.registerTypes[cast->dest] = llvmType(cast->targetType);
+        }
         else if (const auto* constBool = dynamic_cast<const IrConstBool*>(inst.get()))
         {
             fctx.registerTypes[constBool->dest] = "i1";
@@ -598,16 +1723,82 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         }
         else if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(inst.get()))
         {
-            // Always a bare i8* (see docs/language/0045-str-slicing.md) -
-            // the result is always a fresh str, never a String, regardless
-            // of whether `object` itself was a str or a String.
-            fctx.registerTypes[strSlice->dest] = "i8*";
+            // A bare i8* for a str-coercible `object` (see
+            // docs/language/0045-str-slicing.md) - the result is always a
+            // fresh str, never a String, regardless of whether `object`
+            // itself was a str or a String. Widened in
+            // docs/language/0050-collection-join-and-slicing.md: for an
+            // Array/List `object` (already type-inferred by this point,
+            // same reasoning IrFieldGet's own objectType lookup just above
+            // relies on), the result is a fresh List<T> instead.
+            const std::string objectType = typeOf(strSlice->object, fctx);
+            // isStringType is excluded explicitly, not accidentally -
+            // isListType's own loose "{...}*" test also matches String's
+            // own {i32, i8*}* header (same class of collision
+            // isBufferType/isDequeType's own explicit exclusions already
+            // guard against elsewhere - see ensureListCapacity's own
+            // comment for the analogous Deque<T> case). A String `object`
+            // always takes the plain str branch below, matching this
+            // comment's own "always a fresh str... regardless of whether
+            // object itself was a str or a String" rule.
+            const bool isListShaped = isListType(objectType) && !isStringType(objectType);
+            if (isListShaped || (!objectType.empty() && objectType.front() == '['))
+            {
+                const std::string elementType =
+                    isListShaped ? listElementType(objectType) : arrayElementType(objectType);
+                fctx.registerTypes[strSlice->dest] = "{i32, " + elementType + "*, i32}*";
+            }
+            else
+            {
+                fctx.registerTypes[strSlice->dest] = "i8*";
+            }
+        }
+        else if (const auto* join = dynamic_cast<const IrJoin*>(inst.get()))
+        {
+            // Always a fresh String header (see
+            // docs/language/0050-collection-join-and-slicing.md) - built
+            // the same way interpolation's own OwnedString result is.
+            fctx.registerTypes[join->dest] = "{i32, i8*}*";
         }
         else if (const auto* parse = dynamic_cast<const IrParse*>(inst.get()))
         {
-            // See docs/language/0046-generic-methods.md - TypeChecker
-            // already restricts targetType to "i32"/"bool".
-            fctx.registerTypes[parse->dest] = parse->targetType == "bool" ? "i1" : "i32";
+            // Optional<T>, not T directly (see
+            // docs/language/0052-optional.md) - TypeChecker already
+            // restricts targetType to "i32"/"i64"/"f64"/"bool".
+            fctx.registerTypes[parse->dest] = registerOptionalInstantiation(parse->targetType);
+        }
+        else if (const auto* optionalNew = dynamic_cast<const IrOptionalNew*>(inst.get()))
+        {
+            // Some(x): payload type read off `value`'s own already-inferred
+            // register type. None (value == -1): read off payloadTypeName
+            // instead, the only case that carries one (see
+            // docs/language/0052-optional.md and IrOptionalNew's own
+            // comment for why).
+            fctx.registerTypes[optionalNew->dest] =
+                optionalNew->value != -1
+                    ? registerOptionalInstantiationForLlvmPayload(typeOf(optionalNew->value, fctx))
+                    : registerOptionalInstantiation(optionalNew->payloadTypeName);
+        }
+        else if (const auto* isSome = dynamic_cast<const IrOptionalIsSome*>(inst.get()))
+        {
+            fctx.registerTypes[isSome->dest] = "i1";
+        }
+        else if (const auto* unwrap = dynamic_cast<const IrOptionalUnwrap*>(inst.get()))
+        {
+            fctx.registerTypes[unwrap->dest] = optionalPayloadType(typeOf(unwrap->object, fctx));
+        }
+        else if (const auto* toCstr = dynamic_cast<const IrToCstr*>(inst.get()))
+        {
+            // Always a bare i8* (see docs/language/0048-ffi.md) - cstr and
+            // str share the exact same LLVM representation.
+            fctx.registerTypes[toCstr->dest] = "i8*";
+        }
+        else if (dynamic_cast<const IrPrint*>(inst.get()) ||
+                 dynamic_cast<const IrBufferAppendValue*>(inst.get()))
+        {
+            // Unit-typed, same reasoning as IrBufferAppend above (see
+            // docs/language/Axea_Printing_Formatting.md).
+            fctx.registerTypes[inst->dest] = "void";
         }
         else if (const auto* binOp = dynamic_cast<const IrBinOp*>(inst.get()))
         {
@@ -615,7 +1806,15 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
                 binOp->op == TokenKind::Less || binOp->op == TokenKind::LessEqual ||
                 binOp->op == TokenKind::Greater || binOp->op == TokenKind::GreaterEqual ||
                 binOp->op == TokenKind::EqualEqual || binOp->op == TokenKind::BangEqual;
-            fctx.registerTypes[binOp->dest] = isComparison ? "i1" : "i32";
+            // Arithmetic's own result type is whatever numeric kind the
+            // operands share (i32, i64, or f64/"double" - see
+            // TypeChecker::requireInt) - no longer always "i32" now that
+            // i64/f64 arithmetic exists (see docs/language/0005-type-system.md).
+            // `lhs`'s own producing instruction always appears earlier in
+            // this same list (IrGenerator emits operands before the
+            // IrBinOp that consumes them), so its registerTypes entry is
+            // already set by the time this is reached.
+            fctx.registerTypes[binOp->dest] = isComparison ? "i1" : typeOf(binOp->lhs, fctx);
         }
         else if (const auto* call = dynamic_cast<const IrCall*>(inst.get()))
         {
@@ -659,7 +1858,7 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         else if (const auto* listNew = dynamic_cast<const IrListNew*>(inst.get()))
         {
             fctx.registerTypes[listNew->dest] =
-                "{i32, " + llvmType(listNew->elementTypeName) + "*}*";
+                "{i32, " + llvmType(listNew->elementTypeName) + "*, i32}*";
         }
         else if (const auto* listPush = dynamic_cast<const IrListPush*>(inst.get()))
         {
@@ -678,7 +1877,7 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             // llvmType("List<T>") would, since Stack<T> is the same LLVM
             // type as List<T>.
             fctx.registerTypes[stackNew->dest] =
-                "{i32, " + llvmType(stackNew->elementTypeName) + "*}*";
+                "{i32, " + llvmType(stackNew->elementTypeName) + "*, i32}*";
         }
         else if (const auto* stackPush = dynamic_cast<const IrStackPush*>(inst.get()))
         {
@@ -698,7 +1897,7 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             // docs/language/0039-priority-queues.md) - the exact same text
             // llvmType("List<T>")/llvmType("Stack<T>") would.
             fctx.registerTypes[priorityQueueNew->dest] =
-                "{i32, " + llvmType(priorityQueueNew->elementTypeName) + "*}*";
+                "{i32, " + llvmType(priorityQueueNew->elementTypeName) + "*, i32}*";
         }
         else if (const auto* priorityQueuePush =
                      dynamic_cast<const IrPriorityQueuePush*>(inst.get()))
@@ -896,7 +2095,17 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         else if (const auto* indexGet = dynamic_cast<const IrIndexGet*>(inst.get()))
         {
             const std::string objectType = typeOf(indexGet->object, fctx);
-            if (isSliceType(objectType))
+            if (objectType == "i8*" || isStringType(objectType))
+            {
+                // Single-character indexing (`s[i]`) on str/String -
+                // always a char (i24), see registerUtf8CharAtRuntime and
+                // docs/language/0047-unicode.md. Checked before
+                // isSliceType/isListType/etc.: str's own "i8*" would
+                // otherwise fall into the final arrayElementType() else
+                // branch and read garbage.
+                fctx.registerTypes[indexGet->dest] = "i24";
+            }
+            else if (isSliceType(objectType))
             {
                 fctx.registerTypes[indexGet->dest] = sliceElementType(objectType);
             }
@@ -1045,9 +2254,30 @@ namespace
         {
             return "-2147483648";
         }
+        if (valueLlvmType == "i64")
+        {
+            return "-9223372036854775808";
+        }
+        if (valueLlvmType == "double")
+        {
+            // Plain decimal, not formatDoubleLiteral's own hex form - 0.0
+            // is exactly representable in decimal, so LLVM's parser
+            // accepts it directly (see formatDoubleLiteral's own comment
+            // for why every *other* double constant in this backend uses
+            // the hex form instead).
+            return "0.0";
+        }
         if (valueLlvmType == "i1")
         {
             return "0";
+        }
+        if (valueLlvmType.starts_with("%axea.Optional."))
+        {
+            // A byval aggregate (see docs/language/0052-optional.md), not
+            // a pointer - "null" is invalid IR for it. All-zero bits
+            // constructs exactly None (hasValue = i1 0, payload = 0),
+            // itself a perfectly valid "value not present" sentinel.
+            return "zeroinitializer";
         }
         return "null"; // every other valid V is pointer-shaped
     }
@@ -1736,10 +2966,10 @@ createNew:
 compare:
   %kp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp1
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %updateValue
 updateValue:
   %vp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 1
@@ -1776,7 +3006,7 @@ rebalance:
 checkLL:
   %llkp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 0
   %llkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %llkp
-  %isLL = icmp slt <<KEYTYPE>> %key, %llkey
+  %isLL = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %llkey)
   br i1 %isLL, label %doLL, label %doLR
 doLL:
   %resultLL = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %node)
@@ -1792,7 +3022,7 @@ checkRightHeavy:
 checkRR:
   %rrkp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 0
   %rrkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %rrkp
-  %isRR = icmp sgt <<KEYTYPE>> %key, %rrkey
+  %isRR = call i1 <<LESSFN>>(<<KEYTYPE>> %rrkey, <<KEYTYPE>> %key)
   br i1 %isRR, label %doRR, label %doRL
 doRR:
   %resultRR = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %node)
@@ -1850,10 +3080,10 @@ notfound:
 compare:
   %kp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp0
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %foundHere
 goLeft:
   %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
@@ -1991,10 +3221,10 @@ header:
 check:
   %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %found
 goLeft:
   %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
@@ -2030,10 +3260,10 @@ header:
 check:
   %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %found
 goLeft:
   %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
@@ -2183,10 +3413,10 @@ createNew:
 compare:
   %kp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp1
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %alreadyPresent
 alreadyPresent:
   store i1 0, i1* %isNewOut
@@ -2221,7 +3451,7 @@ rebalance:
 checkLL:
   %llkp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 0
   %llkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %llkp
-  %isLL = icmp slt <<KEYTYPE>> %key, %llkey
+  %isLL = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %llkey)
   br i1 %isLL, label %doLL, label %doLR
 doLL:
   %resultLL = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %node)
@@ -2237,7 +3467,7 @@ checkRightHeavy:
 checkRR:
   %rrkp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 0
   %rrkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %rrkp
-  %isRR = icmp sgt <<KEYTYPE>> %key, %rrkey
+  %isRR = call i1 <<LESSFN>>(<<KEYTYPE>> %rrkey, <<KEYTYPE>> %key)
   br i1 %isRR, label %doRR, label %doRL
 doRR:
   %resultRR = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %node)
@@ -2282,10 +3512,10 @@ notfound:
 compare:
   %kp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp0
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %foundHere
 goLeft:
   %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
@@ -2419,10 +3649,10 @@ header:
 check:
   %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
   %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = icmp slt <<KEYTYPE>> %key, %nodeKey
+  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
   br i1 %lessThan, label %goLeft, label %checkGreater
 checkGreater:
-  %greaterThan = icmp sgt <<KEYTYPE>> %key, %nodeKey
+  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
   br i1 %greaterThan, label %goRight, label %found
 goLeft:
   %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 2
@@ -2840,6 +4070,113 @@ notequal:
     throw std::runtime_error("internal error: no key runtime registered for type " + axeaKeyType);
 }
 
+std::string LlvmIrEmitter::registerOrderRuntime(const std::string& axeaKeyType)
+{
+    if (const auto it = orderRuntimeFns_.find(axeaKeyType); it != orderRuntimeFns_.end())
+    {
+        return it->second;
+    }
+
+    if (axeaKeyType == "i32")
+    {
+        mapSetRuntimeText_ << R"(
+define i1 @axea.less.i32(i32 %a, i32 %b) {
+entry:
+  %r = icmp slt i32 %a, %b
+  ret i1 %r
+}
+)";
+        return orderRuntimeFns_[axeaKeyType] = "@axea.less.i32";
+    }
+
+    if (axeaKeyType == "i64")
+    {
+        mapSetRuntimeText_ << R"(
+define i1 @axea.less.i64(i64 %a, i64 %b) {
+entry:
+  %r = icmp slt i64 %a, %b
+  ret i1 %r
+}
+)";
+        return orderRuntimeFns_[axeaKeyType] = "@axea.less.i64";
+    }
+
+    if (axeaKeyType == "f64")
+    {
+        // `fcmp olt` (ordered less-than) - same NaN handling as the
+        // general `<` operator (see TypeChecker::isOrderableKind's own
+        // comment): a NaN key simply compares false against everything.
+        mapSetRuntimeText_ << R"(
+define i1 @axea.less.f64(double %a, double %b) {
+entry:
+  %r = fcmp olt double %a, %b
+  ret i1 %r
+}
+)";
+        return orderRuntimeFns_[axeaKeyType] = "@axea.less.f64";
+    }
+
+    if (axeaKeyType == "char")
+    {
+        mapSetRuntimeText_ << R"(
+define i1 @axea.less.char(i24 %a, i24 %b) {
+entry:
+  %r = icmp slt i24 %a, %b
+  ret i1 %r
+}
+)";
+        return orderRuntimeFns_[axeaKeyType] = "@axea.less.char";
+    }
+
+    if (axeaKeyType == "str")
+    {
+        // Hand-rolled byte-walk lexicographic order - mirrors
+        // registerKeyRuntime's own @axea.eq.str byte-walk exactly, just
+        // resolving to a magnitude comparison instead of an (in)equality
+        // one. Bytes are compared as unsigned (zext to i32, not sign-
+        // extended) - a signed i8 comparison would sort any byte >= 0x80
+        // (any non-ASCII UTF-8 continuation/lead byte) before every ASCII
+        // byte, which is wrong; this matches a textbook strcmp's own
+        // `unsigned char` comparison semantics exactly (see
+        // docs/language/0042-string.md).
+        mapSetRuntimeText_ << R"(
+define i1 @axea.less.str(i8* %a, i8* %b) {
+entry:
+  %i = alloca i32
+  store i32 0, i32* %i
+  br label %header
+header:
+  %i0 = load i32, i32* %i
+  %aptr = getelementptr i8, i8* %a, i32 %i0
+  %bptr = getelementptr i8, i8* %b, i32 %i0
+  %ac = load i8, i8* %aptr
+  %bc = load i8, i8* %bptr
+  %diff = icmp ne i8 %ac, %bc
+  br i1 %diff, label %resolve, label %check
+check:
+  %iszero = icmp eq i8 %ac, 0
+  br i1 %iszero, label %equal, label %next
+next:
+  %i1 = add i32 %i0, 1
+  store i32 %i1, i32* %i
+  br label %header
+resolve:
+  %au = zext i8 %ac to i32
+  %bu = zext i8 %bc to i32
+  %r = icmp slt i32 %au, %bu
+  ret i1 %r
+equal:
+  ret i1 0
+}
+)";
+        return orderRuntimeFns_[axeaKeyType] = "@axea.less.str";
+    }
+
+    // Unreachable for a well-typed program: TypeChecker::isOrderableKind
+    // already validated the element/key before this point.
+    throw std::runtime_error("internal error: no order runtime registered for type " + axeaKeyType);
+}
+
 std::string LlvmIrEmitter::registerMapInstantiation(const std::string& keyAxeaType,
                                                     const std::string& valueAxeaType)
 {
@@ -3007,13 +4344,17 @@ std::string LlvmIrEmitter::registerSortedMapInstantiation(const std::string& key
     const std::string nodePtr = node + "*";
     const std::string headerType = "{i32, " + nodePtr + "}";
     const std::string headerPtr = headerType + "*";
-    // K is always i32 by the time this is reached (TypeChecker's own
-    // orderability restriction - see docs/language/0040-sorted-maps.md), so
-    // no registerKeyRuntime call is needed the way Map<K,V>'s own hashable-
-    // and-arbitrary K requires.
+    // K is any of i32/char/str (TypeChecker's own orderability
+    // restriction, TypeChecker::isOrderableKind - see
+    // docs/language/0040-sorted-maps.md); registerOrderRuntime provides
+    // <<LESSFN>>, the single primitive every key comparison in this
+    // template calls through, so no per-kind branching is needed here -
+    // unlike Map<K,V>'s own registerKeyRuntime, which returns *two*
+    // functions (hash+eq) since a tree needs only ordering, never hashing.
     const std::string keyType = llvmType(keyAxeaType);
     const std::string valueType = llvmType(valueAxeaType);
     sortedMapValueLlvmTypeById_[id] = valueType;
+    const std::string lessFn = registerOrderRuntime(keyAxeaType);
 
     sortedMapTypeDeclsText_ << node << " = type { " << keyType << ", " << valueType << ", i32, "
                             << nodePtr << ", " << nodePtr << " }\n";
@@ -3028,6 +4369,7 @@ std::string LlvmIrEmitter::registerSortedMapInstantiation(const std::string& key
         {"<<VALUETYPEPTR>>", valueType + "*"},
         {"<<VALUETYPE>>", valueType},
         {"<<SENTINEL>>", sentinelFor(valueType)},
+        {"<<LESSFN>>", lessFn},
         {"<<ID>>", idStr},
     };
 
@@ -3062,10 +4404,12 @@ std::string LlvmIrEmitter::registerSortedSetInstantiation(const std::string& ele
     const std::string nodePtr = node + "*";
     const std::string headerType = "{i32, " + nodePtr + "}";
     const std::string headerPtr = headerType + "*";
-    // T is always i32 (TypeChecker's own orderability restriction - see
-    // docs/language/0041-sorted-sets.md), so no registerKeyRuntime call is
-    // needed, same reasoning as SortedMap<K,V>'s own K.
+    // T is any of i32/char/str (TypeChecker's own orderability
+    // restriction, TypeChecker::isOrderableKind - see
+    // docs/language/0041-sorted-sets.md); registerOrderRuntime provides
+    // <<LESSFN>>, same reasoning as SortedMap<K,V>'s own K above.
     const std::string keyType = llvmType(elementAxeaType);
+    const std::string lessFn = registerOrderRuntime(elementAxeaType);
 
     // 4 fields - key, height, left, right - no value field, unlike
     // SortedMap<K,V>'s own 5-field node.
@@ -3079,6 +4423,7 @@ std::string LlvmIrEmitter::registerSortedSetInstantiation(const std::string& ele
         {"<<HEADERTYPE>>", headerType},
         {"<<KEYTYPEPTR>>", keyType + "*"},
         {"<<KEYTYPE>>", keyType},
+        {"<<LESSFN>>", lessFn},
         {"<<ID>>", idStr},
     };
 
@@ -3342,6 +4687,24 @@ void LlvmIrEmitter::emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fc
 {
     const std::string objectType = typeOf(indexGet.object, fctx);
 
+    if (objectType == "i8*" || isStringType(objectType))
+    {
+        // Single-character indexing (`s[i]`) on str/String - a real
+        // Unicode codepoint index via the shared @axea.utf8.char_at
+        // runtime (see registerUtf8CharAtRuntime and
+        // docs/language/0047-unicode.md), not a byte offset. String is
+        // first resolved to its own bare i8* data pointer
+        // (resolveStrPtrOfType), the same str-coercion every other
+        // String-accepting operation already shares.
+        const std::string strPtr =
+            resolveStrPtrOfType(objectType, ref(indexGet.object, fctx), fctx);
+        const std::string fnName = registerUtf8CharAtRuntime();
+        const int destReg = defineRegister(indexGet.dest, fctx);
+        *fctx.out << "  %" << destReg << " = call i24 " << fnName << "(i8* " << strPtr << ", i32 "
+                  << ref(indexGet.index, fctx) << ")\n";
+        return;
+    }
+
     if (isSliceType(objectType))
     {
         // {T*, i32} - extract the flat pointer, then a single-index GEP
@@ -3513,11 +4876,11 @@ void LlvmIrEmitter::emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fc
 void LlvmIrEmitter::emitListNew(const IrListNew& listNew, FunctionContext& fctx)
 {
     const std::string elementType = llvmType(listNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*}";
+    const std::string headerType = "{i32, " + elementType + "*, i32}";
     const std::string pointerType = headerType + "*";
 
-    // sizeof({i32, T*}) via the standard null-pointer GEP idiom - same idiom
-    // as emitStructNew/emitArrayNew.
+    // sizeof({i32, T*, i32}) via the standard null-pointer GEP idiom - same
+    // idiom as emitStructNew/emitArrayNew.
     const int sizePtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
               << " null, i32 1\n";
@@ -3542,6 +4905,15 @@ void LlvmIrEmitter::emitListNew(const IrListNew& listNew, FunctionContext& fctx)
               << " " << ref(listNew.dest, fctx) << ", i32 0, i32 1\n";
     *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
               << "\n";
+
+    // Capacity starts at 0 - ensureListCapacity's own doubling logic
+    // bootstraps correctly from here (needed=1 > doubled=0 on the first
+    // push selects `needed` itself, not the stalled 0*2 - see that
+    // function's own comment).
+    const int capPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
+              << " " << ref(listNew.dest, fctx) << ", i32 0, i32 2\n";
+    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitListPush(const IrListPush& listPush, FunctionContext& fctx)
@@ -3561,102 +4933,36 @@ void LlvmIrEmitter::emitListPush(const IrListPush& listPush, FunctionContext& fc
     const int newLenReg = allocateRegister(fctx);
     *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
 
-    // No amortized growth this phase (a deliberate simplification, not an
-    // oversight - see docs/language/0033-lists.md): every push reallocates
-    // to exactly newLen elements. sizeof(T) via the standard null-pointer GEP
-    // idiom, same as every other heap allocation here.
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newLen64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLen64Reg << " = zext i32 %" << newLenReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newLen64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
+    // Amortized (doubling) growth - see ensureListCapacity. Grows the
+    // backing buffer (and copies every existing element across) only when
+    // `newLen` would exceed the list's own current capacity; otherwise
+    // this is a no-op and the existing buffer still has room.
+    ensureListCapacity(
+        headerType, objectType, listRef, elementType, "%" + std::to_string(newLenReg), fctx);
 
-    // Old data pointer, to copy from.
+    // Reload the data pointer fresh from the header after
+    // ensureListCapacity - either unchanged (no growth needed) or the
+    // freshly grown buffer ensureListCapacity already stored back into the
+    // header in place. No phi needed to reconcile the two branches
+    // (matches this codebase's established alloca/reload-over-phi
+    // convention - see emitStrComparison's own identical reasoning).
     const int dataPtrPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
               << " " << listRef << ", i32 0, i32 1\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
               << dataPtrPtrReg << "\n";
 
-    // Copy loop over 0..oldLen. Uses alloca/load/store for the counter, not a
-    // phi node: this codebase's unnamed SSA registers must appear in strictly
-    // increasing textual order (see IrGenerator's own comment on this, and
-    // docs/language/0028-loops.md for why loop-carried state already uses
-    // this same alloca-based pattern instead of phi for exactly this reason)
-    // - a phi here would need to forward-reference a not-yet-emitted register
-    // from the loop body. Hand-verified against the real clang toolchain (at
-    // both -O0 and -O1) in this exact unnamed-sequential-register shape
-    // before this design was committed to.
-    const int labelId = fctx.nextLabel++;
-    const std::string headerLabel = "list.push.copy.header" + std::to_string(labelId);
-    const std::string bodyLabel = "list.push.copy.body" + std::to_string(labelId);
-    const std::string doneLabel = "list.push.copy.done" + std::to_string(labelId);
-
-    const int counterSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << headerLabel << ":\n";
-    fctx.currentLabel = headerLabel;
-    const int iReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int condReg = allocateRegister(fctx);
-    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << oldLenReg << "\n";
-    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
-              << "\n";
-
-    *fctx.out << bodyLabel << ":\n";
-    fctx.currentLabel = bodyLabel;
-    const int iForSrcReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int srcPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << srcPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << oldDataReg << ", i32 %" << iForSrcReg << "\n";
-    const int valReg = allocateRegister(fctx);
-    *fctx.out << "  %" << valReg << " = load " << elementType << ", " << elementType << "* %"
-              << srcPtrReg << "\n";
-    const int iForDstReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int dstPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dstPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << iForDstReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << valReg << ", " << elementType << "* %"
-              << dstPtrReg << "\n";
-    const int iForIncReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int iNextReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
-    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << doneLabel << ":\n";
-    fctx.currentLabel = doneLabel;
-
-    // Append the pushed value at the new buffer's last slot, then store the
-    // new length/data back into the header's own fields in place - the
-    // header pointer itself never changes, so every existing alias sees the
-    // update, exactly like a struct field-assignment already does.
+    // Store the pushed value at the (now guaranteed in-bounds) last slot,
+    // then the new length - the header pointer itself never changes, so
+    // every existing alias sees the update, exactly like a struct
+    // field-assignment already does.
     const int newElementPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 %" << oldLenReg << "\n";
+              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
     *fctx.out << "  store " << elementType << " " << ref(listPush.value, fctx) << ", "
               << elementType << "* %" << newElementPtrReg << "\n";
     *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
 
     // Unit-typed (see docs/language/0033-lists.md) - deliberately *not*
     // calling defineRegister here, exactly matching how a unit-returning
@@ -3685,9 +4991,10 @@ void LlvmIrEmitter::emitListPop(const IrListPop& listPop, FunctionContext& fctx)
     *fctx.out << "  %" << newLenReg << " = sub i32 %" << oldLenReg << ", 1\n";
     *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
 
-    // No shrink/realloc (matches the "no capacity tracking" simplification -
-    // the buffer just stays at its previous size, only the logical length
-    // shrinks).
+    // No shrink - only push ever calls ensureListCapacity; pop just leaves
+    // capacity (and the backing buffer) exactly where it was, only the
+    // logical length shrinks, matching std::vector's own pop_back (which
+    // doesn't shrink capacity either).
     const int dataPtrPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
               << " " << listRef << ", i32 0, i32 1\n";
@@ -3705,9 +5012,10 @@ void LlvmIrEmitter::emitListPop(const IrListPop& listPop, FunctionContext& fctx)
 void LlvmIrEmitter::emitStackNew(const IrStackNew& stackNew, FunctionContext& fctx)
 {
     // Structurally identical to emitListNew - see that function's own
-    // comments for the sizeof idiom (see docs/language/0035-stacks.md).
+    // comments for the sizeof idiom and field layout (see
+    // docs/language/0035-stacks.md).
     const std::string elementType = llvmType(stackNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*}";
+    const std::string headerType = "{i32, " + elementType + "*, i32}";
     const std::string pointerType = headerType + "*";
 
     const int sizePtrReg = allocateRegister(fctx);
@@ -3734,12 +5042,17 @@ void LlvmIrEmitter::emitStackNew(const IrStackNew& stackNew, FunctionContext& fc
               << " " << ref(stackNew.dest, fctx) << ", i32 0, i32 1\n";
     *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
               << "\n";
+
+    const int capPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
+              << " " << ref(stackNew.dest, fctx) << ", i32 0, i32 2\n";
+    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitStackPush(const IrStackPush& stackPush, FunctionContext& fctx)
 {
-    // Structurally identical to emitListPush, including the hand-verified
-    // alloca/load/store copy loop (no phi - see that function's own
+    // Structurally identical to emitListPush, including its use of
+    // ensureListCapacity for amortized growth (see that function's own
     // comments; see docs/language/0035-stacks.md).
     const std::string objectType = typeOf(stackPush.stack, fctx);
     const std::string headerType =
@@ -3755,84 +5068,22 @@ void LlvmIrEmitter::emitStackPush(const IrStackPush& stackPush, FunctionContext&
     const int newLenReg = allocateRegister(fctx);
     *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
 
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newLen64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLen64Reg << " = zext i32 %" << newLenReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newLen64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
+    ensureListCapacity(
+        headerType, objectType, stackRef, elementType, "%" + std::to_string(newLenReg), fctx);
 
     const int dataPtrPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
               << " " << stackRef << ", i32 0, i32 1\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
               << dataPtrPtrReg << "\n";
-
-    const int labelId = fctx.nextLabel++;
-    const std::string headerLabel = "stack.push.copy.header" + std::to_string(labelId);
-    const std::string bodyLabel = "stack.push.copy.body" + std::to_string(labelId);
-    const std::string doneLabel = "stack.push.copy.done" + std::to_string(labelId);
-
-    const int counterSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << headerLabel << ":\n";
-    fctx.currentLabel = headerLabel;
-    const int iReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int condReg = allocateRegister(fctx);
-    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << oldLenReg << "\n";
-    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
-              << "\n";
-
-    *fctx.out << bodyLabel << ":\n";
-    fctx.currentLabel = bodyLabel;
-    const int iForSrcReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int srcPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << srcPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << oldDataReg << ", i32 %" << iForSrcReg << "\n";
-    const int valReg = allocateRegister(fctx);
-    *fctx.out << "  %" << valReg << " = load " << elementType << ", " << elementType << "* %"
-              << srcPtrReg << "\n";
-    const int iForDstReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int dstPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dstPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << iForDstReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << valReg << ", " << elementType << "* %"
-              << dstPtrReg << "\n";
-    const int iForIncReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int iNextReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
-    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << doneLabel << ":\n";
-    fctx.currentLabel = doneLabel;
 
     const int newElementPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 %" << oldLenReg << "\n";
+              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
     *fctx.out << "  store " << elementType << " " << ref(stackPush.value, fctx) << ", "
               << elementType << "* %" << newElementPtrReg << "\n";
     *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitStackPop(const IrStackPop& stackPop, FunctionContext& fctx)
@@ -3904,10 +5155,10 @@ void LlvmIrEmitter::emitPriorityQueueNew(const IrPriorityQueueNew& priorityQueue
                                          FunctionContext& fctx)
 {
     // Structurally identical to emitStackNew/emitListNew - see that
-    // function's own comments for the sizeof idiom (see
+    // function's own comments for the sizeof idiom and field layout (see
     // docs/language/0039-priority-queues.md).
     const std::string elementType = llvmType(priorityQueueNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*}";
+    const std::string headerType = "{i32, " + elementType + "*, i32}";
     const std::string pointerType = headerType + "*";
 
     const int sizePtrReg = allocateRegister(fctx);
@@ -3934,15 +5185,19 @@ void LlvmIrEmitter::emitPriorityQueueNew(const IrPriorityQueueNew& priorityQueue
               << " " << ref(priorityQueueNew.dest, fctx) << ", i32 0, i32 1\n";
     *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
               << "\n";
+
+    const int capPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
+              << " " << ref(priorityQueueNew.dest, fctx) << ", i32 0, i32 2\n";
+    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitPriorityQueuePush(const IrPriorityQueuePush& priorityQueuePush,
                                           FunctionContext& fctx)
 {
-    // The grow-and-copy-and-append prefix is a direct copy of
-    // emitStackPush's own (see that function's own comments for the
-    // hand-verified alloca/load/store copy-loop idiom) - see
-    // docs/language/0039-priority-queues.md.
+    // The grow-and-append prefix uses ensureListCapacity, the same
+    // amortized-growth helper emitListPush/emitStackPush share (see that
+    // function's own comments) - see docs/language/0039-priority-queues.md.
     const std::string objectType = typeOf(priorityQueuePush.priorityQueue, fctx);
     const std::string headerType = objectType.substr(0, objectType.size() - 1);
     const std::string elementType = listElementType(objectType);
@@ -3956,80 +5211,23 @@ void LlvmIrEmitter::emitPriorityQueuePush(const IrPriorityQueuePush& priorityQue
     const int newLenReg = allocateRegister(fctx);
     *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
 
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newLen64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLen64Reg << " = zext i32 %" << newLenReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newLen64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
+    ensureListCapacity(
+        headerType, objectType, pqRef, elementType, "%" + std::to_string(newLenReg), fctx);
 
+    // Reload the data pointer fresh from the header after
+    // ensureListCapacity (see emitListPush's own identical comment) - the
+    // sift-up loop below reads/writes through this same register
+    // throughout, so it sees the grown buffer if growth happened.
     const int dataPtrPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
               << " " << pqRef << ", i32 0, i32 1\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
               << dataPtrPtrReg << "\n";
-
-    const int copyLabelId = fctx.nextLabel++;
-    const std::string copyHeaderLabel =
-        "priorityqueue.push.copy.header" + std::to_string(copyLabelId);
-    const std::string copyBodyLabel = "priorityqueue.push.copy.body" + std::to_string(copyLabelId);
-    const std::string copyDoneLabel = "priorityqueue.push.copy.done" + std::to_string(copyLabelId);
-
-    const int counterSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << copyHeaderLabel << "\n";
-
-    *fctx.out << copyHeaderLabel << ":\n";
-    fctx.currentLabel = copyHeaderLabel;
-    const int iReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int condReg = allocateRegister(fctx);
-    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << oldLenReg << "\n";
-    *fctx.out << "  br i1 %" << condReg << ", label %" << copyBodyLabel << ", label %"
-              << copyDoneLabel << "\n";
-
-    *fctx.out << copyBodyLabel << ":\n";
-    fctx.currentLabel = copyBodyLabel;
-    const int iForSrcReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int srcPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << srcPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << oldDataReg << ", i32 %" << iForSrcReg << "\n";
-    const int valReg = allocateRegister(fctx);
-    *fctx.out << "  %" << valReg << " = load " << elementType << ", " << elementType << "* %"
-              << srcPtrReg << "\n";
-    const int iForDstReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int dstPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dstPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << iForDstReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << valReg << ", " << elementType << "* %"
-              << dstPtrReg << "\n";
-    const int iForIncReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int iNextReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
-    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << copyHeaderLabel << "\n";
-
-    *fctx.out << copyDoneLabel << ":\n";
-    fctx.currentLabel = copyDoneLabel;
 
     const int newElementPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 %" << oldLenReg << "\n";
+              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
     *fctx.out << "  store " << elementType << " " << ref(priorityQueuePush.value, fctx) << ", "
               << elementType << "* %" << newElementPtrReg << "\n";
 
@@ -4071,19 +5269,21 @@ void LlvmIrEmitter::emitPriorityQueuePush(const IrPriorityQueuePush& priorityQue
     *fctx.out << "  %" << parentReg << " = sdiv i32 %" << idxMinus1Reg << ", 2\n";
     const int parentPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << parentPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << parentReg << "\n";
+              << "* %" << dataReg << ", i32 %" << parentReg << "\n";
     const int parentValReg = allocateRegister(fctx);
     *fctx.out << "  %" << parentValReg << " = load " << elementType << ", " << elementType << "* %"
               << parentPtrReg << "\n";
     const int curPtrReg = allocateRegister(fctx);
     *fctx.out << "  %" << curPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << idxReg << "\n";
+              << "* %" << dataReg << ", i32 %" << idxReg << "\n";
     const int curValReg = allocateRegister(fctx);
     *fctx.out << "  %" << curValReg << " = load " << elementType << ", " << elementType << "* %"
               << curPtrReg << "\n";
-    const int okReg = allocateRegister(fctx);
-    *fctx.out << "  %" << okReg << " = icmp sle i32 %" << parentValReg << ", %" << curValReg
-              << "\n";
+    const int okReg = emitPriorityQueueCompare(elementType,
+                                               "sle",
+                                               "%" + std::to_string(parentValReg),
+                                               "%" + std::to_string(curValReg),
+                                               fctx);
     *fctx.out << "  br i1 %" << okReg << ", label %" << siftDoneLabel << ", label %"
               << siftSwapLabel << "\n";
 
@@ -4099,9 +5299,13 @@ void LlvmIrEmitter::emitPriorityQueuePush(const IrPriorityQueuePush& priorityQue
     *fctx.out << siftDoneLabel << ":\n";
     fctx.currentLabel = siftDoneLabel;
 
+    // No data-pointer store-back here (unlike emitListPush/emitStackPush's
+    // own final store) - `dataReg` was only ever *reloaded* from the
+    // header above, never reassigned to a freshly grown buffer in this
+    // function's own body (ensureListCapacity already did that store, if
+    // growth happened, before this point) - writing it back here would be
+    // a redundant no-op.
     *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitPriorityQueuePop(const IrPriorityQueuePop& priorityQueuePop,
@@ -4216,9 +5420,11 @@ void LlvmIrEmitter::emitPriorityQueuePop(const IrPriorityQueuePop& priorityQueue
     const int leftValReg = allocateRegister(fctx);
     *fctx.out << "  %" << leftValReg << " = load " << elementType << ", " << elementType << "* %"
               << leftPtrReg << "\n";
-    const int rightSmallerReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rightSmallerReg << " = icmp slt i32 %" << rightValReg << ", %"
-              << leftValReg << "\n";
+    const int rightSmallerReg = emitPriorityQueueCompare(elementType,
+                                                         "slt",
+                                                         "%" + std::to_string(rightValReg),
+                                                         "%" + std::to_string(leftValReg),
+                                                         fctx);
     *fctx.out << "  br i1 %" << rightSmallerReg << ", label %" << setRightLabel << ", label %"
               << compareSmallestLabel << "\n";
 
@@ -4243,9 +5449,11 @@ void LlvmIrEmitter::emitPriorityQueuePop(const IrPriorityQueuePop& priorityQueue
     const int curValReg = allocateRegister(fctx);
     *fctx.out << "  %" << curValReg << " = load " << elementType << ", " << elementType << "* %"
               << curPtrReg << "\n";
-    const int needSwapReg = allocateRegister(fctx);
-    *fctx.out << "  %" << needSwapReg << " = icmp slt i32 %" << smallestValReg << ", %" << curValReg
-              << "\n";
+    const int needSwapReg = emitPriorityQueueCompare(elementType,
+                                                     "slt",
+                                                     "%" + std::to_string(smallestValReg),
+                                                     "%" + std::to_string(curValReg),
+                                                     fctx);
     *fctx.out << "  br i1 %" << needSwapReg << ", label %" << swapLabel << ", label %" << doneLabel
               << "\n";
 
@@ -4876,6 +6084,148 @@ void LlvmIrEmitter::emitStringAppend(const IrStringAppend& stringAppend, Functio
 
 void LlvmIrEmitter::emitStrSlice(const IrStrSlice& strSlice, FunctionContext& fctx)
 {
+    const std::string objectType = typeOf(strSlice.object, fctx);
+
+    // Array/List<T> branch (see
+    // docs/language/0050-collection-join-and-slicing.md) - a genuinely
+    // separate operation from the str branch below (element-wise GEP copy
+    // of `elementType`-sized values, not a byte copy), so it's kept
+    // entirely self-contained here rather than threaded through the str
+    // branch's own byte-indexed logic. isStringType is excluded
+    // explicitly, not accidentally - isListType's own loose "{...}*" test
+    // also matches String's own {i32, i8*}* header; a String `object`
+    // must always take the plain str branch below instead (see
+    // docs/language/0042-string.md - str-slicing a String still always
+    // produces a fresh str, never a List).
+    if ((isListType(objectType) && !isStringType(objectType)) ||
+        (!objectType.empty() && objectType.front() == '['))
+    {
+        const IndexableView view = resolveIndexableView(strSlice.object, fctx);
+
+        std::string startRef = "0";
+        if (strSlice.start != -1)
+        {
+            startRef = ref(strSlice.start, fctx);
+        }
+        std::string endRef = view.lengthRef;
+        if (strSlice.end != -1)
+        {
+            endRef = ref(strSlice.end, fctx);
+        }
+
+        const int lengthReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lengthReg << " = sub i32 " << endRef << ", " << startRef << "\n";
+
+        // sizeof(elementType) via the standard null-pointer GEP idiom, same
+        // as emitListPush's own identical growth-allocation idiom.
+        const int elemSizePtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << view.elementType << ", "
+                  << view.elementType << "* null, i32 1\n";
+        const int elemSizeReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << view.elementType << "* %"
+                  << elemSizePtrReg << " to i64\n";
+        const int length64Reg = allocateRegister(fctx);
+        *fctx.out << "  %" << length64Reg << " = zext i32 %" << lengthReg << " to i64\n";
+        const int newBytesReg = allocateRegister(fctx);
+        *fctx.out << "  %" << newBytesReg << " = mul i64 %" << length64Reg << ", %" << elemSizeReg
+                  << "\n";
+        const int rawNewDataReg = allocateRegister(fctx);
+        *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
+        const int newDataReg = allocateRegister(fctx);
+        *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to "
+                  << view.elementType << "*\n";
+
+        // Copy loop: `length` elements from view.dataPtrRef[start..start+length)
+        // into newData[0..length) - same hand-verified alloca/load/store
+        // counter idiom emitStrSlice's own str branch (and every other copy
+        // loop in this backend) uses, no phi. Element-wise via GEP (not
+        // byte-indexed): LLVM computes the correct stride for elementType
+        // automatically, so this works unchanged for any elementType width.
+        const int labelId = fctx.nextLabel++;
+        const std::string headerLabel = "arrslice.copy.header" + std::to_string(labelId);
+        const std::string bodyLabel = "arrslice.copy.body" + std::to_string(labelId);
+        const std::string doneLabel = "arrslice.copy.done" + std::to_string(labelId);
+
+        const int counterSlotReg = allocateRegister(fctx);
+        *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+        *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
+        *fctx.out << "  br label %" << headerLabel << "\n";
+
+        *fctx.out << headerLabel << ":\n";
+        fctx.currentLabel = headerLabel;
+        const int iReg = allocateRegister(fctx);
+        *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+        const int condReg = allocateRegister(fctx);
+        *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << lengthReg << "\n";
+        *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
+                  << "\n";
+
+        *fctx.out << bodyLabel << ":\n";
+        fctx.currentLabel = bodyLabel;
+        const int iForSrcReg = allocateRegister(fctx);
+        *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
+        const int srcIdxReg = allocateRegister(fctx);
+        *fctx.out << "  %" << srcIdxReg << " = add i32 " << startRef << ", %" << iForSrcReg << "\n";
+        const int srcPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << srcPtrReg << " = getelementptr " << view.elementType << ", "
+                  << view.elementType << "* " << view.dataPtrRef << ", i32 %" << srcIdxReg << "\n";
+        const int elemValReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elemValReg << " = load " << view.elementType << ", "
+                  << view.elementType << "* %" << srcPtrReg << "\n";
+        const int iForDstReg = allocateRegister(fctx);
+        *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
+        const int dstPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dstPtrReg << " = getelementptr " << view.elementType << ", "
+                  << view.elementType << "* %" << newDataReg << ", i32 %" << iForDstReg << "\n";
+        *fctx.out << "  store " << view.elementType << " %" << elemValReg << ", "
+                  << view.elementType << "* %" << dstPtrReg << "\n";
+        const int iForIncReg = allocateRegister(fctx);
+        *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+        const int iNextReg = allocateRegister(fctx);
+        *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+        *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+        *fctx.out << "  br label %" << headerLabel << "\n";
+
+        *fctx.out << doneLabel << ":\n";
+        fctx.currentLabel = doneLabel;
+
+        // Fresh List<T> header - same malloc + null-GEP sizeof idiom as
+        // emitListNew, just with lengthReg (a runtime value) instead of the
+        // literal 0 a brand-new empty list stores. Capacity (field 2 - see
+        // ensureListCapacity's own comment for why it's field 2, not field
+        // 1) is set to exactly `lengthReg` too - this is a one-shot,
+        // exact-sized allocation with no extra slack, so capacity and
+        // length start out equal, exactly like emitListNew's own capacity=0
+        // is equal to its own length=0.
+        const std::string headerType = "{i32, " + view.elementType + "*, i32}";
+        const std::string pointerType = headerType + "*";
+        const int sizePtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
+                  << " null, i32 1\n";
+        const int sizeIntReg = allocateRegister(fctx);
+        *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
+                  << " to i64\n";
+        const int rawHeaderReg = allocateRegister(fctx);
+        *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
+        const int destReg = defineRegister(strSlice.dest, fctx);
+        *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawHeaderReg << " to " << pointerType
+                  << "\n";
+        const int lenPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << pointerType
+                  << " " << ref(strSlice.dest, fctx) << ", i32 0, i32 0\n";
+        *fctx.out << "  store i32 %" << lengthReg << ", i32* %" << lenPtrReg << "\n";
+        const int dataFieldPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataFieldPtrReg << " = getelementptr " << headerType << ", "
+                  << pointerType << " " << ref(strSlice.dest, fctx) << ", i32 0, i32 1\n";
+        *fctx.out << "  store " << view.elementType << "* %" << newDataReg << ", "
+                  << view.elementType << "** %" << dataFieldPtrReg << "\n";
+        const int capFieldPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << capFieldPtrReg << " = getelementptr " << headerType << ", "
+                  << pointerType << " " << ref(strSlice.dest, fctx) << ", i32 0, i32 2\n";
+        *fctx.out << "  store i32 %" << lengthReg << ", i32* %" << capFieldPtrReg << "\n";
+        return;
+    }
+
     const std::string objectPtr = resolveStrPtr(strSlice.object, fctx);
 
     std::string startRef = "0";
@@ -4961,6 +6311,272 @@ void LlvmIrEmitter::emitStrSlice(const IrStrSlice& strSlice, FunctionContext& fc
     *fctx.out << "  %" << nullPtrReg << " = getelementptr i8, i8* %" << destReg << ", i32 %"
               << lengthReg << "\n";
     *fctx.out << "  store i8 0, i8* %" << nullPtrReg << "\n";
+}
+
+LlvmIrEmitter::IndexableView LlvmIrEmitter::resolveIndexableView(int objectReg,
+                                                                 FunctionContext& fctx)
+{
+    const std::string objectType = typeOf(objectReg, fctx);
+    const std::string objectRef = ref(objectReg, fctx);
+
+    if (isListType(objectType) && !isStringType(objectType))
+    {
+        // {i32, T*, i32}* - GEP+load both the length field (0) and the data
+        // pointer field (1), same field layout emitListNew/emitListPush/
+        // emitIndexGet's own List branch already use. isStringType is
+        // excluded explicitly, not accidentally - isListType's own loose
+        // "{...}*" test also matches String's own {i32, i8*}* header, and
+        // neither of this function's own two callers (emitStrSlice,
+        // emitJoin) is ever legitimately called with a String object (see
+        // emitStrSlice's own identical exclusion at its call site).
+        const std::string headerType = objectType.substr(0, objectType.size() - 1);
+        const std::string elementType = listElementType(objectType);
+        const int lenPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
+                  << " " << objectRef << ", i32 0, i32 0\n";
+        const int lenReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lenReg << " = load i32, i32* %" << lenPtrReg << "\n";
+        const int dataPtrPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", "
+                  << objectType << " " << objectRef << ", i32 0, i32 1\n";
+        const int dataPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrReg << " = load " << elementType << "*, " << elementType
+                  << "** %" << dataPtrPtrReg << "\n";
+        return IndexableView{
+            elementType, "%" + std::to_string(dataPtrReg), "%" + std::to_string(lenReg)};
+    }
+
+    // "[N x T]*" - a fixed-size array. N is already known at compile time
+    // (arraySizeFromPointerType), so lengthRef is a literal, not a runtime
+    // load - the one genuine difference from the List branch above.
+    const std::string llvmArrayType = objectType.substr(0, objectType.size() - 1);
+    const std::string elementType = arrayElementType(objectType);
+    const int size = arraySizeFromPointerType(objectType);
+    const int dataPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataPtrReg << " = getelementptr " << llvmArrayType << ", " << objectType
+              << " " << objectRef << ", i32 0, i32 0\n";
+    return IndexableView{elementType, "%" + std::to_string(dataPtrReg), std::to_string(size)};
+}
+
+void LlvmIrEmitter::appendTextToBuffer(const std::string& bufferRef,
+                                       const std::string& textPtrRef,
+                                       FunctionContext& fctx)
+{
+    const int textLen64Reg = allocateRegister(fctx);
+    *fctx.out << "  %" << textLen64Reg << " = call i64 @strlen(i8* " << textPtrRef << ")\n";
+    const int textLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << textLenReg << " = trunc i64 %" << textLen64Reg << " to i32\n";
+
+    const int lenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lenPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 0\n";
+    const int oldLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
+    const int newLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", %" << textLenReg << "\n";
+    const int neededReg = allocateRegister(fctx);
+    *fctx.out << "  %" << neededReg << " = add i32 %" << newLenReg << ", 1\n";
+
+    ensureBufferCapacity(bufferRef, "%" + std::to_string(neededReg), fctx);
+
+    const int dataPtrPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 2\n";
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = load i8*, i8** %" << dataPtrPtrReg << "\n";
+
+    const int labelId = fctx.nextLabel++;
+    const std::string headerLabel = "join.append.copy.header" + std::to_string(labelId);
+    const std::string bodyLabel = "join.append.copy.body" + std::to_string(labelId);
+    const std::string doneLabel = "join.append.copy.done" + std::to_string(labelId);
+
+    const int counterSlotReg = allocateRegister(fctx);
+    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << headerLabel << ":\n";
+    fctx.currentLabel = headerLabel;
+    const int iReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int condReg = allocateRegister(fctx);
+    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << textLenReg << "\n";
+    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
+              << "\n";
+
+    *fctx.out << bodyLabel << ":\n";
+    fctx.currentLabel = bodyLabel;
+    const int iForSrcReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int srcElemPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << srcElemPtrReg << " = getelementptr i8, i8* " << textPtrRef << ", i32 %"
+              << iForSrcReg << "\n";
+    const int byteValReg = allocateRegister(fctx);
+    *fctx.out << "  %" << byteValReg << " = load i8, i8* %" << srcElemPtrReg << "\n";
+    const int iForDstReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int dstOffReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstOffReg << " = add i32 %" << oldLenReg << ", %" << iForDstReg << "\n";
+    const int dstElemPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstElemPtrReg << " = getelementptr i8, i8* %" << dataReg << ", i32 %"
+              << dstOffReg << "\n";
+    *fctx.out << "  store i8 %" << byteValReg << ", i8* %" << dstElemPtrReg << "\n";
+    const int iForIncReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int iNextReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << doneLabel << ":\n";
+    fctx.currentLabel = doneLabel;
+
+    const int nullPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << nullPtrReg << " = getelementptr i8, i8* %" << dataReg << ", i32 %"
+              << newLenReg << "\n";
+    *fctx.out << "  store i8 0, i8* %" << nullPtrReg << "\n";
+    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitJoin(const IrJoin& join, FunctionContext& fctx)
+{
+    const IndexableView view = resolveIndexableView(join.object, fctx);
+    const std::string sepPtr = resolveStrPtr(join.separator, fctx);
+
+    // A fresh Buffer, same initial {length: 0, capacity: 1, data: malloc(1)}
+    // state emitBufferNew produces - this one has no Axea-level register of
+    // its own (never referenced again after this function), so it's built
+    // inline rather than via a real IrBufferNew instruction.
+    const int sizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizePtrReg
+              << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* null, i32 1\n";
+    const int sizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizeIntReg << " = ptrtoint {i32, i32, i8*}* %" << sizePtrReg
+              << " to i64\n";
+    const int rawHeaderReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
+    const int bufferReg = allocateRegister(fctx);
+    *fctx.out << "  %" << bufferReg << " = bitcast i8* %" << rawHeaderReg
+              << " to {i32, i32, i8*}*\n";
+    const std::string bufferRef = "%" + std::to_string(bufferReg);
+    const int initDataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << initDataReg << " = call i8* @malloc(i64 1)\n";
+    *fctx.out << "  store i8 0, i8* %" << initDataReg << "\n";
+    const int lenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lenPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 0\n";
+    *fctx.out << "  store i32 0, i32* %" << lenPtrReg << "\n";
+    const int capPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 1\n";
+    *fctx.out << "  store i32 1, i32* %" << capPtrReg << "\n";
+    const int dataFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataFieldPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 2\n";
+    *fctx.out << "  store i8* %" << initDataReg << ", i8** %" << dataFieldPtrReg << "\n";
+
+    // Guard: skip element 0 (and the whole loop) entirely if the object is
+    // empty - avoids needing an `i != 0` branch inside the loop body to
+    // decide whether to append the separator (see
+    // docs/language/0050-collection-join-and-slicing.md's own Design
+    // section: "append element 0 unconditionally, then loop from 1
+    // appending separator+element").
+    const int labelId = fctx.nextLabel++;
+    const std::string nonEmptyLabel = "join.nonempty" + std::to_string(labelId);
+    const std::string headerLabel = "join.loop.header" + std::to_string(labelId);
+    const std::string bodyLabel = "join.loop.body" + std::to_string(labelId);
+    const std::string doneLabel = "join.done" + std::to_string(labelId);
+
+    const int isEmptyReg = allocateRegister(fctx);
+    *fctx.out << "  %" << isEmptyReg << " = icmp eq i32 " << view.lengthRef << ", 0\n";
+    *fctx.out << "  br i1 %" << isEmptyReg << ", label %" << doneLabel << ", label %"
+              << nonEmptyLabel << "\n";
+
+    *fctx.out << nonEmptyLabel << ":\n";
+    fctx.currentLabel = nonEmptyLabel;
+    const int elem0PtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elem0PtrReg << " = getelementptr " << view.elementType << ", "
+              << view.elementType << "* " << view.dataPtrRef << ", i32 0\n";
+    const int elem0ValReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elem0ValReg << " = load " << view.elementType << ", " << view.elementType
+              << "* %" << elem0PtrReg << "\n";
+    const std::string elem0Text =
+        stringifyValueOfType(view.elementType, "%" + std::to_string(elem0ValReg), fctx);
+    appendTextToBuffer(bufferRef, elem0Text, fctx);
+
+    const int counterSlotReg = allocateRegister(fctx);
+    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+    *fctx.out << "  store i32 1, i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << headerLabel << ":\n";
+    fctx.currentLabel = headerLabel;
+    const int iReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int condReg = allocateRegister(fctx);
+    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", " << view.lengthRef << "\n";
+    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
+              << "\n";
+
+    *fctx.out << bodyLabel << ":\n";
+    fctx.currentLabel = bodyLabel;
+    appendTextToBuffer(bufferRef, sepPtr, fctx);
+    const int iForElemReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForElemReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int elemPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemPtrReg << " = getelementptr " << view.elementType << ", "
+              << view.elementType << "* " << view.dataPtrRef << ", i32 %" << iForElemReg << "\n";
+    const int elemValReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemValReg << " = load " << view.elementType << ", " << view.elementType
+              << "* %" << elemPtrReg << "\n";
+    const std::string elemText =
+        stringifyValueOfType(view.elementType, "%" + std::to_string(elemValReg), fctx);
+    appendTextToBuffer(bufferRef, elemText, fctx);
+    const int iForIncReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int iNextReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << doneLabel << ":\n";
+    fctx.currentLabel = doneLabel;
+
+    // Fresh String header, stealing the (possibly still fresh-empty, if the
+    // object was empty) buffer's own length/data field values directly - no
+    // byte copy, same "steal the fields" shape emitBufferFinish already
+    // uses. The buffer itself is discarded here (never reset to a fresh
+    // state the way emitBufferFinish resets its own buffer) since it has no
+    // Axea-level variable anyone could still be holding a reference to.
+    const int finalLenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << finalLenPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 0\n";
+    const int finalLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << finalLenReg << " = load i32, i32* %" << finalLenPtrReg << "\n";
+    const int finalDataPtrPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << finalDataPtrPtrReg
+              << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* " << bufferRef
+              << ", i32 0, i32 2\n";
+    const int finalDataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << finalDataReg << " = load i8*, i8** %" << finalDataPtrPtrReg << "\n";
+
+    const int strSizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << strSizePtrReg << " = getelementptr {i32, i8*}, {i32, i8*}* null, i32 1\n";
+    const int strSizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << strSizeIntReg << " = ptrtoint {i32, i8*}* %" << strSizePtrReg
+              << " to i64\n";
+    const int rawStrHeaderReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawStrHeaderReg << " = call i8* @malloc(i64 %" << strSizeIntReg << ")\n";
+    const int destReg = defineRegister(join.dest, fctx);
+    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawStrHeaderReg << " to {i32, i8*}*\n";
+    const int newLenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newLenPtrReg << " = getelementptr {i32, i8*}, {i32, i8*}* "
+              << ref(join.dest, fctx) << ", i32 0, i32 0\n";
+    *fctx.out << "  store i32 %" << finalLenReg << ", i32* %" << newLenPtrReg << "\n";
+    const int newDataFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newDataFieldPtrReg << " = getelementptr {i32, i8*}, {i32, i8*}* "
+              << ref(join.dest, fctx) << ", i32 0, i32 1\n";
+    *fctx.out << "  store i8* %" << finalDataReg << ", i8** %" << newDataFieldPtrReg << "\n";
 }
 
 void LlvmIrEmitter::ensureBufferCapacity(const std::string& bufferRef,
@@ -5055,6 +6671,130 @@ void LlvmIrEmitter::ensureBufferCapacity(const std::string& bufferRef,
 
     *fctx.out << "  store i32 %" << newCapReg << ", i32* %" << capPtrReg << "\n";
     *fctx.out << "  store i8* %" << newDataReg << ", i8** %" << dataPtrPtrReg << "\n";
+    *fctx.out << "  br label %" << doneLabel << "\n";
+
+    *fctx.out << doneLabel << ":\n";
+    fctx.currentLabel = doneLabel;
+}
+
+void LlvmIrEmitter::ensureListCapacity(const std::string& headerType,
+                                       const std::string& objectType,
+                                       const std::string& listRef,
+                                       const std::string& elementType,
+                                       const std::string& neededRef,
+                                       FunctionContext& fctx)
+{
+    // Capacity is field 2 here - see this function's own header comment for
+    // why that's field 2, not field 1 the way Buffer's identical helper
+    // uses (avoiding a real type collision with Deque<T>'s own header).
+    const int capPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << objectType
+              << " " << listRef << ", i32 0, i32 2\n";
+    const int capReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capReg << " = load i32, i32* %" << capPtrReg << "\n";
+    const int needGrowReg = allocateRegister(fctx);
+    *fctx.out << "  %" << needGrowReg << " = icmp sgt i32 " << neededRef << ", %" << capReg << "\n";
+
+    const int labelId = fctx.nextLabel++;
+    const std::string growLabel = "list.grow" + std::to_string(labelId);
+    const std::string doneLabel = "list.grow.done" + std::to_string(labelId);
+    *fctx.out << "  br i1 %" << needGrowReg << ", label %" << growLabel << ", label %" << doneLabel
+              << "\n";
+
+    *fctx.out << growLabel << ":\n";
+    fctx.currentLabel = growLabel;
+    const int doubledReg = allocateRegister(fctx);
+    *fctx.out << "  %" << doubledReg << " = mul i32 %" << capReg << ", 2\n";
+    const int needsMoreReg = allocateRegister(fctx);
+    *fctx.out << "  %" << needsMoreReg << " = icmp sgt i32 " << neededRef << ", %" << doubledReg
+              << "\n";
+    const int newCapReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newCapReg << " = select i1 %" << needsMoreReg << ", i32 " << neededRef
+              << ", i32 %" << doubledReg << "\n";
+
+    // sizeof(elementType) via the standard null-pointer GEP idiom, same as
+    // emitListPush's own original growth-allocation idiom.
+    const int elemSizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
+              << elementType << "* null, i32 1\n";
+    const int elemSizeReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
+              << " to i64\n";
+    const int newCap64Reg = allocateRegister(fctx);
+    *fctx.out << "  %" << newCap64Reg << " = zext i32 %" << newCapReg << " to i64\n";
+    const int newBytesReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newCap64Reg << ", %" << elemSizeReg
+              << "\n";
+    const int rawNewDataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
+    const int newDataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
+              << "*\n";
+
+    const int lenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
+              << " " << listRef << ", i32 0, i32 0\n";
+    const int lenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lenReg << " = load i32, i32* %" << lenPtrReg << "\n";
+    const int dataPtrPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
+              << " " << listRef << ", i32 0, i32 1\n";
+    const int oldDataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
+              << dataPtrPtrReg << "\n";
+
+    // Copy loop: the list's own existing `length` elements, old data -> new
+    // data - same hand-verified alloca/load/store counter idiom
+    // emitListPush's own original copy loop always used (no phi - see that
+    // history for the full rationale).
+    const std::string headerLabel = "list.grow.copy.header" + std::to_string(labelId);
+    const std::string bodyLabel = "list.grow.copy.body" + std::to_string(labelId);
+    const std::string copyDoneLabel = "list.grow.copy.done" + std::to_string(labelId);
+
+    const int counterSlotReg = allocateRegister(fctx);
+    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << headerLabel << ":\n";
+    fctx.currentLabel = headerLabel;
+    const int iReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int condReg = allocateRegister(fctx);
+    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << lenReg << "\n";
+    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << copyDoneLabel
+              << "\n";
+
+    *fctx.out << bodyLabel << ":\n";
+    fctx.currentLabel = bodyLabel;
+    const int iForSrcReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int srcPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << srcPtrReg << " = getelementptr " << elementType << ", " << elementType
+              << "* %" << oldDataReg << ", i32 %" << iForSrcReg << "\n";
+    const int valReg = allocateRegister(fctx);
+    *fctx.out << "  %" << valReg << " = load " << elementType << ", " << elementType << "* %"
+              << srcPtrReg << "\n";
+    const int iForDstReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int dstPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstPtrReg << " = getelementptr " << elementType << ", " << elementType
+              << "* %" << newDataReg << ", i32 %" << iForDstReg << "\n";
+    *fctx.out << "  store " << elementType << " %" << valReg << ", " << elementType << "* %"
+              << dstPtrReg << "\n";
+    const int iForIncReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int iNextReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << copyDoneLabel << ":\n";
+    fctx.currentLabel = copyDoneLabel;
+
+    *fctx.out << "  store i32 %" << newCapReg << ", i32* %" << capPtrReg << "\n";
+    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
+              << dataPtrPtrReg << "\n";
     *fctx.out << "  br label %" << doneLabel << "\n";
 
     *fctx.out << doneLabel << ":\n";
@@ -5181,6 +6921,11 @@ std::string LlvmIrEmitter::encodeCharUtf8(const std::string& codepointRef, Funct
 
 std::string LlvmIrEmitter::registerParseRuntime(const std::string& targetType)
 {
+    // Returns Optional<T> - {i1, T} - not T directly (see
+    // docs/language/0052-optional.md): invalid input now yields a real
+    // None instead of a silently-returned fallback like 0/0.0/false.
+    const std::string optionalType = registerOptionalInstantiation(targetType);
+
     if (targetType == "i32")
     {
         const std::string fnName = "@axea.parse.i32";
@@ -5192,20 +6937,24 @@ std::string LlvmIrEmitter::registerParseRuntime(const std::string& targetType)
 
         // Hand-rolled digit loop (see docs/language/0046-generic-methods.md)
         // - optional leading '-', then decimal digits until a
-        // non-digit/null terminator. No overflow checking, and invalid
-        // input (no digits at all) parses as 0 - a defined, documented
-        // fallback, matching every other "no bounds checking in compiled
-        // code" simplification in this backend. alloca/load/store for
-        // every loop-carried value (idx/acc/sign), no phi, `select` to
-        // apply the sign at the end - the same idioms
-        // ensureBufferCapacity/encodeCharUtf8 already established.
+        // non-digit/null terminator. No overflow checking. Success
+        // requires both at least one digit consumed (digitCount > 0) and
+        // the *entire* string consumed (the loop stopped at the null
+        // terminator, not some other non-digit byte) - "123abc" is None,
+        // not a truncated Some(123), matching typical `str::parse`
+        // semantics. alloca/load/store for every loop-carried value
+        // (idx/acc/sign/digitCount), no phi, `select` to apply the sign at
+        // the end - the same idioms ensureBufferCapacity/encodeCharUtf8
+        // already established.
         parseRuntimeText_ << R"(
-define i32 @axea.parse.i32(i8* %s) {
+define )" << optionalType << R"( @axea.parse.i32(i8* %s) {
 entry:
   %idxSlot = alloca i32
   %accSlot = alloca i32
   %negSlot = alloca i32
+  %digitCountSlot = alloca i32
   store i32 0, i32* %accSlot
+  store i32 0, i32* %digitCountSlot
   %c0p = getelementptr i8, i8* %s, i32 0
   %c0 = load i8, i8* %c0p
   %isNeg = icmp eq i8 %c0, 45
@@ -5233,6 +6982,9 @@ loopbody:
   %dv32 = zext i8 %dv8 to i32
   %acc2 = add i32 %acc1, %dv32
   store i32 %acc2, i32* %accSlot
+  %dc0 = load i32, i32* %digitCountSlot
+  %dc1 = add i32 %dc0, 1
+  store i32 %dc1, i32* %digitCountSlot
   %idx2 = load i32, i32* %idxSlot
   %idx3 = add i32 %idx2, 1
   store i32 %idx3, i32* %idxSlot
@@ -5243,7 +6995,129 @@ loopdone:
   %isNegBool = icmp ne i32 %negFlag, 0
   %negated = sub i32 0, %finalAcc
   %result = select i1 %isNegBool, i32 %negated, i32 %finalAcc
-  ret i32 %result
+  %digitCount = load i32, i32* %digitCountSlot
+  %hasDigits = icmp sgt i32 %digitCount, 0
+  %stoppedAtNull = icmp eq i8 %c, 0
+  %ok = and i1 %hasDigits, %stoppedAtNull
+  %withOk = insertvalue )" << optionalType
+                          << R"( undef, i1 %ok, 0
+  %withValue = insertvalue )"
+                          << optionalType << R"( %withOk, i32 %result, 1
+  ret )" << optionalType << R"( %withValue
+}
+)";
+        return fnName;
+    }
+
+    if (targetType == "i64")
+    {
+        const std::string fnName = "@axea.parse.i64";
+        if (parseI64Registered_)
+        {
+            return fnName;
+        }
+        parseI64Registered_ = true;
+
+        // The identical hand-rolled digit loop @axea.parse.i32 above uses,
+        // just at 64-bit width throughout (see docs/language/0051-numeric-widening.md)
+        // - same full-string-consumption success rule, no overflow checking.
+        parseRuntimeText_ << R"(
+define )" << optionalType << R"( @axea.parse.i64(i8* %s) {
+entry:
+  %idxSlot = alloca i32
+  %accSlot = alloca i64
+  %negSlot = alloca i32
+  %digitCountSlot = alloca i32
+  store i64 0, i64* %accSlot
+  store i32 0, i32* %digitCountSlot
+  %c0p = getelementptr i8, i8* %s, i32 0
+  %c0 = load i8, i8* %c0p
+  %isNeg = icmp eq i8 %c0, 45
+  br i1 %isNeg, label %neg, label %nonneg
+neg:
+  store i32 1, i32* %idxSlot
+  store i32 1, i32* %negSlot
+  br label %loophdr
+nonneg:
+  store i32 0, i32* %idxSlot
+  store i32 0, i32* %negSlot
+  br label %loophdr
+loophdr:
+  %idx = load i32, i32* %idxSlot
+  %cp = getelementptr i8, i8* %s, i32 %idx
+  %c = load i8, i8* %cp
+  %ge0 = icmp sge i8 %c, 48
+  %le9 = icmp sle i8 %c, 57
+  %isDigit = and i1 %ge0, %le9
+  br i1 %isDigit, label %loopbody, label %loopdone
+loopbody:
+  %acc0 = load i64, i64* %accSlot
+  %acc1 = mul i64 %acc0, 10
+  %dv8 = sub i8 %c, 48
+  %dv64 = zext i8 %dv8 to i64
+  %acc2 = add i64 %acc1, %dv64
+  store i64 %acc2, i64* %accSlot
+  %dc0 = load i32, i32* %digitCountSlot
+  %dc1 = add i32 %dc0, 1
+  store i32 %dc1, i32* %digitCountSlot
+  %idx2 = load i32, i32* %idxSlot
+  %idx3 = add i32 %idx2, 1
+  store i32 %idx3, i32* %idxSlot
+  br label %loophdr
+loopdone:
+  %finalAcc = load i64, i64* %accSlot
+  %negFlag = load i32, i32* %negSlot
+  %isNegBool = icmp ne i32 %negFlag, 0
+  %negated = sub i64 0, %finalAcc
+  %result = select i1 %isNegBool, i64 %negated, i64 %finalAcc
+  %digitCount = load i32, i32* %digitCountSlot
+  %hasDigits = icmp sgt i32 %digitCount, 0
+  %stoppedAtNull = icmp eq i8 %c, 0
+  %ok = and i1 %hasDigits, %stoppedAtNull
+  %withOk = insertvalue )" << optionalType
+                          << R"( undef, i1 %ok, 0
+  %withValue = insertvalue )"
+                          << optionalType << R"( %withOk, i64 %result, 1
+  ret )" << optionalType << R"( %withValue
+}
+)";
+        return fnName;
+    }
+
+    if (targetType == "f64")
+    {
+        const std::string fnName = "@axea.parse.f64";
+        if (parseF64Registered_)
+        {
+            return fnName;
+        }
+        parseF64Registered_ = true;
+
+        // A real libc `strtod` call, not hand-rolled decimal-to-binary
+        // float parsing (see this function's own header comment for why -
+        // mirrors registerI32ToStrRuntime's own identical "reuse libc"
+        // choice, in the opposite direction). `endptr` - previously always
+        // `null` and discarded - is now a real output slot: success
+        // requires both that at least one character was consumed
+        // (endptr != s) and that the *entire* string was consumed (the
+        // byte at endptr is the null terminator) - "3.14abc" is None, not
+        // a truncated Some(3.14), matching parse<i32>'s own full-string-
+        // consumption rule above.
+        parseRuntimeText_ << R"(
+define )" << optionalType << R"( @axea.parse.f64(i8* %s) {
+entry:
+  %endptrSlot = alloca i8*
+  %result = call double @strtod(i8* %s, i8** %endptrSlot)
+  %endptr = load i8*, i8** %endptrSlot
+  %consumedSome = icmp ne i8* %endptr, %s
+  %stopChar = load i8, i8* %endptr
+  %fullyConsumed = icmp eq i8 %stopChar, 0
+  %ok = and i1 %consumedSome, %fullyConsumed
+  %withOk = insertvalue )" << optionalType
+                          << R"( undef, i1 %ok, 0
+  %withValue = insertvalue )"
+                          << optionalType << R"( %withOk, double %result, 1
+  ret )" << optionalType << R"( %withValue
 }
 )";
         return fnName;
@@ -5257,47 +7131,91 @@ loopdone:
     }
     parseBoolRegistered_ = true;
 
-    // Hand-rolled short-circuit byte comparison against the fixed literal
-    // "true" (see docs/language/0046-generic-methods.md) - branches, not
-    // an unrolled straight-line chain, specifically so a short input
-    // (e.g. "t") never reads past its own null terminator: each
-    // subsequent byte is only read after confirming the previous one
+    // Hand-rolled short-circuit byte comparison against the fixed literals
+    // "true"/"false" (see docs/language/0046-generic-methods.md) -
+    // branches, not an unrolled straight-line chain, specifically so a
+    // short input (e.g. "t") never reads past its own null terminator:
+    // each subsequent byte is only read after confirming the previous one
     // matched a non-null expected character, guaranteeing the string
-    // continues at least that far. Anything other than exactly "true"
-    // (including "TRUE", "false", "", "trueish") parses as false - a
-    // defined, lenient fallback, not an error, matching parse<i32>'s own
-    // "invalid input yields a harmless default" choice.
+    // continues at least that far. Exactly "true" or exactly "false" is
+    // Some(true)/Some(false); anything else (including "TRUE", "", or
+    // "trueish") is None - unlike the pre-Optional<T> version, which
+    // treated every non-"true" input as a defined Some(false).
     parseRuntimeText_ << R"(
-define i1 @axea.parse.bool(i8* %s) {
+define )" << optionalType
+                      << R"( @axea.parse.bool(i8* %s) {
 entry:
   %c0p = getelementptr i8, i8* %s, i32 0
   %c0 = load i8, i8* %c0p
-  %e0 = icmp eq i8 %c0, 116
-  br i1 %e0, label %check1, label %isfalse
-check1:
-  %c1p = getelementptr i8, i8* %s, i32 1
-  %c1 = load i8, i8* %c1p
-  %e1 = icmp eq i8 %c1, 114
-  br i1 %e1, label %check2, label %isfalse
-check2:
-  %c2p = getelementptr i8, i8* %s, i32 2
-  %c2 = load i8, i8* %c2p
-  %e2 = icmp eq i8 %c2, 117
-  br i1 %e2, label %check3, label %isfalse
-check3:
-  %c3p = getelementptr i8, i8* %s, i32 3
-  %c3 = load i8, i8* %c3p
-  %e3 = icmp eq i8 %c3, 101
-  br i1 %e3, label %check4, label %isfalse
-check4:
-  %c4p = getelementptr i8, i8* %s, i32 4
-  %c4 = load i8, i8* %c4p
-  %e4 = icmp eq i8 %c4, 0
-  br i1 %e4, label %istrue, label %isfalse
+  %eT = icmp eq i8 %c0, 116
+  br i1 %eT, label %t1, label %checkF0
+t1:
+  %tc1p = getelementptr i8, i8* %s, i32 1
+  %tc1 = load i8, i8* %tc1p
+  %te1 = icmp eq i8 %tc1, 114
+  br i1 %te1, label %t2, label %invalid
+t2:
+  %tc2p = getelementptr i8, i8* %s, i32 2
+  %tc2 = load i8, i8* %tc2p
+  %te2 = icmp eq i8 %tc2, 117
+  br i1 %te2, label %t3, label %invalid
+t3:
+  %tc3p = getelementptr i8, i8* %s, i32 3
+  %tc3 = load i8, i8* %tc3p
+  %te3 = icmp eq i8 %tc3, 101
+  br i1 %te3, label %t4, label %invalid
+t4:
+  %tc4p = getelementptr i8, i8* %s, i32 4
+  %tc4 = load i8, i8* %tc4p
+  %te4 = icmp eq i8 %tc4, 0
+  br i1 %te4, label %istrue, label %invalid
+checkF0:
+  %eF = icmp eq i8 %c0, 102
+  br i1 %eF, label %f1, label %invalid
+f1:
+  %fc1p = getelementptr i8, i8* %s, i32 1
+  %fc1 = load i8, i8* %fc1p
+  %fe1 = icmp eq i8 %fc1, 97
+  br i1 %fe1, label %f2, label %invalid
+f2:
+  %fc2p = getelementptr i8, i8* %s, i32 2
+  %fc2 = load i8, i8* %fc2p
+  %fe2 = icmp eq i8 %fc2, 108
+  br i1 %fe2, label %f3, label %invalid
+f3:
+  %fc3p = getelementptr i8, i8* %s, i32 3
+  %fc3 = load i8, i8* %fc3p
+  %fe3 = icmp eq i8 %fc3, 115
+  br i1 %fe3, label %f4, label %invalid
+f4:
+  %fc4p = getelementptr i8, i8* %s, i32 4
+  %fc4 = load i8, i8* %fc4p
+  %fe4 = icmp eq i8 %fc4, 101
+  br i1 %fe4, label %f5, label %invalid
+f5:
+  %fc5p = getelementptr i8, i8* %s, i32 5
+  %fc5 = load i8, i8* %fc5p
+  %fe5 = icmp eq i8 %fc5, 0
+  br i1 %fe5, label %isfalse, label %invalid
 istrue:
-  ret i1 1
+  %rt0 = insertvalue )"
+                      << optionalType << R"( undef, i1 1, 0
+  %rt1 = insertvalue )"
+                      << optionalType << R"( %rt0, i1 1, 1
+  ret )" << optionalType
+                      << R"( %rt1
 isfalse:
-  ret i1 0
+  %rf0 = insertvalue )"
+                      << optionalType << R"( undef, i1 1, 0
+  %rf1 = insertvalue )"
+                      << optionalType << R"( %rf0, i1 0, 1
+  ret )" << optionalType
+                      << R"( %rf1
+invalid:
+  %ri0 = insertvalue )"
+                      << optionalType << R"( undef, i1 0, 0
+  ret )" << optionalType
+                      << R"( %ri0
 }
 )";
     return fnName;
@@ -5307,10 +7225,150 @@ void LlvmIrEmitter::emitParse(const IrParse& parse, FunctionContext& fctx)
 {
     const std::string objectPtr = resolveStrPtr(parse.object, fctx);
     const std::string fnName = registerParseRuntime(parse.targetType);
-    const std::string retType = parse.targetType == "bool" ? "i1" : "i32";
+    const std::string retType = registerOptionalInstantiation(parse.targetType);
     const int destReg = defineRegister(parse.dest, fctx);
     *fctx.out << "  %" << destReg << " = call " << retType << " " << fnName << "(i8* " << objectPtr
               << ")\n";
+}
+
+void LlvmIrEmitter::emitOptionalNew(const IrOptionalNew& optionalNew, FunctionContext& fctx)
+{
+    // Some(x)/None (see docs/language/0052-optional.md) - builds the
+    // `{i1, T}` literal via two `insertvalue`s, mirroring slice<T>'s own
+    // by-value fat-pointer construction in emitStrSlice/emitStrLiteral
+    // (ptr then length, insertvalue twice) - just `hasValue` then payload
+    // here. The intermediate `withOk` register must be allocated (and its
+    // line emitted) *before* `optionalNew.dest` is defined, not after -
+    // LLVM requires unnamed registers in strictly increasing textual
+    // order (see docs/language/0021-axea-ir.md's own note on this, and
+    // every other insertvalue-chain emitter in this file).
+    const std::string optionalType = typeOf(optionalNew.dest, fctx);
+    const std::string payloadType = optionalPayloadType(optionalType);
+    const std::string hasValueBit = optionalNew.value != -1 ? "1" : "0";
+    const int withOk = allocateRegister(fctx);
+    *fctx.out << "  %" << withOk << " = insertvalue " << optionalType << " undef, i1 "
+              << hasValueBit << ", 0\n";
+    // None's payload field is never read (every consumer checks hasValue
+    // first) - `undef` is the correct, standard LLVM spelling for "this
+    // bit pattern is never observed", not a placeholder for a missing
+    // feature.
+    const std::string payloadRef = optionalNew.value != -1 ? ref(optionalNew.value, fctx) : "undef";
+    const int destReg = defineRegister(optionalNew.dest, fctx);
+    *fctx.out << "  %" << destReg << " = insertvalue " << optionalType << " %" << withOk << ", "
+              << payloadType << " " << payloadRef << ", 1\n";
+}
+
+void LlvmIrEmitter::emitOptionalIsSome(const IrOptionalIsSome& isSome, FunctionContext& fctx)
+{
+    // `.is_some()`/`.is_none()` (see docs/language/0052-optional.md) - a
+    // plain `extractvalue` of field 0, optionally inverted with `xor` for
+    // is_none (negate) - avoids a second near-identical instruction.
+    const std::string optionalType = typeOf(isSome.object, fctx);
+    if (!isSome.negate)
+    {
+        const int destReg = defineRegister(isSome.dest, fctx);
+        *fctx.out << "  %" << destReg << " = extractvalue " << optionalType << " "
+                  << ref(isSome.object, fctx) << ", 0\n";
+        return;
+    }
+    const int rawReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawReg << " = extractvalue " << optionalType << " "
+              << ref(isSome.object, fctx) << ", 0\n";
+    const int destReg = defineRegister(isSome.dest, fctx);
+    *fctx.out << "  %" << destReg << " = xor i1 %" << rawReg << ", true\n";
+}
+
+void LlvmIrEmitter::emitOptionalUnwrap(const IrOptionalUnwrap& unwrap, FunctionContext& fctx)
+{
+    // `?`'s then-branch and `.unwrap_or`'s is-some branch (see
+    // docs/language/0052-optional.md) - a plain `extractvalue` of field 1;
+    // the surrounding IrBranch each is emitted inside already guarantees
+    // hasValue is true whenever this runs, so no check is needed here.
+    const std::string optionalType = typeOf(unwrap.object, fctx);
+    const int destReg = defineRegister(unwrap.dest, fctx);
+    *fctx.out << "  %" << destReg << " = extractvalue " << optionalType << " "
+              << ref(unwrap.object, fctx) << ", 1\n";
+}
+
+void LlvmIrEmitter::emitToCstr(const IrToCstr& toCstr, FunctionContext& fctx)
+{
+    const std::string objectPtr = resolveStrPtr(toCstr.object, fctx);
+    const int destReg = defineRegister(toCstr.dest, fctx);
+    *fctx.out << "  %" << destReg << " = bitcast i8* " << objectPtr << " to i8*\n";
+}
+
+void LlvmIrEmitter::registerPrintRuntime()
+{
+    if (printRuntimeRegistered_)
+    {
+        return;
+    }
+    printRuntimeRegistered_ = true;
+
+    // Three fixed format-string globals (see
+    // docs/language/Axea_Printing_Formatting.md) - declared in this own
+    // self-contained runtime-text block for the same "no dependency on
+    // collectStrings/emitStringGlobals' own timing" reason
+    // registerI32ToStrRuntime's own format-string global is.
+    printRuntimeText_ << R"(
+@axea.fmt.s = private unnamed_addr constant [3 x i8] c"%s\00"
+@axea.fmt.space = private unnamed_addr constant [2 x i8] c" \00"
+@axea.fmt.nl = private unnamed_addr constant [2 x i8] c"\0A\00"
+)";
+}
+
+void LlvmIrEmitter::emitPrint(const IrPrint& print, FunctionContext& fctx)
+{
+    registerPrintRuntime();
+    const std::string sFmt = "getelementptr ([3 x i8], [3 x i8]* @axea.fmt.s, i64 0, i64 0)";
+    const std::string spaceFmt =
+        "getelementptr ([2 x i8], [2 x i8]* @axea.fmt.space, i64 0, i64 0)";
+    const std::string nlFmt = "getelementptr ([2 x i8], [2 x i8]* @axea.fmt.nl, i64 0, i64 0)";
+
+    // Each argument stringified independently (see stringifyValue),
+    // printed via a bare "%s" format, with a literal space between
+    // consecutive arguments (docs/language/Axea_Printing_Formatting.md's
+    // own "multiple arguments are separated by spaces") - a plain
+    // literal-format-string printf call, no varargs needed for the
+    // space/newline themselves.
+    for (std::size_t i = 0; i < print.args.size(); ++i)
+    {
+        if (i > 0)
+        {
+            *fctx.out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                      << spaceFmt << ")\n";
+        }
+        const std::string argType = typeOf(print.args[i], fctx);
+        if (isNamedStructPointerType(argType))
+        {
+            // A struct argument prints directly - reuses the exact
+            // per-struct-type helper the top-level binding printer
+            // already calls (emitStructPrintHelpers), rather than
+            // routing through stringifyValue: structs have no
+            // "stringify to a heap string" sibling (only Optional<T>
+            // does - see docs/language/0052-optional.md's own
+            // @axea.optional.<id>.to_str), but print()/write() never
+            // actually need a string, only to print directly, so this
+            // is real support, not a workaround.
+            const std::string structName = structNameFromPointerType(argType);
+            *fctx.out << "  call void @axea.print." << structName << "(" << argType << " "
+                      << ref(print.args[i], fctx) << ")\n";
+            continue;
+        }
+        const std::string ptr = stringifyValue(print.args[i], fctx);
+        *fctx.out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                  << sFmt << ", i8* " << ptr << ")\n";
+    }
+    if (print.addNewline)
+    {
+        *fctx.out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                  << nlFmt << ")\n";
+    }
+    // IrPrint's own dest is unit-typed - never defined as a real LLVM
+    // register (mirrors IrBufferAppend/IrBufferAppendValue's own
+    // identical choice), since a "void"-typed Axea register is never
+    // read via ref() anywhere in this backend (see
+    // docs/language/0033-lists.md).
 }
 
 std::string LlvmIrEmitter::registerUtf8CountRuntime()
@@ -5358,6 +7416,150 @@ body:
 done:
   %final = load i32, i32* %cntSlot
   ret i32 %final
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerUtf8CharAtRuntime()
+{
+    const std::string fnName = "@axea.utf8.char_at";
+    if (utf8CharAtRegistered_)
+    {
+        return fnName;
+    }
+    utf8CharAtRegistered_ = true;
+
+    // Single-character indexing (`s[i]`) - a real Unicode *codepoint*
+    // index, matching `.length`'s own codepoint-not-byte counting (see
+    // registerUtf8CountRuntime above and docs/language/0047-unicode.md).
+    // Unlike that function's own byte-at-a-time walk (which only ever
+    // needs to *skip* continuation bytes, never decode them), this has to
+    // decode a full multi-byte sequence once the target codepoint is
+    // found - lead-byte-length detection and continuation-byte bit
+    // formulas mirror Parser::decodeCharLiteral's own compile-time-literal
+    // decoder exactly, just as a runtime loop over arbitrary string data
+    // instead. alloca/load/store throughout (posSlot/cntSlot/resultSlot/
+    // lenSlot), no phi - every decode-length branch below stores its own
+    // result/len pair before jumping to the shared afterDecode merge
+    // point, the same "store-then-reload-after-the-branch" technique this
+    // whole backend already uses everywhere else instead of phi. Out-of-
+    // range (including a malformed/too-short string) returns codepoint 0
+    // - the walk never reads past the string's own nul terminator (the
+    // `atEnd` check happens before any read of that iteration's own lead
+    // byte), so this is memory-safe by construction, mirroring
+    // registerUtf8CountRuntime's own identical property - no separate
+    // bounds check needed.
+    utf8CharAtRuntimeText_ << R"(
+define i24 @axea.utf8.char_at(i8* %s, i32 %index) {
+entry:
+  %posSlot = alloca i32
+  %cntSlot = alloca i32
+  %resultSlot = alloca i32
+  %lenSlot = alloca i32
+  store i32 0, i32* %posSlot
+  store i32 0, i32* %cntSlot
+  br label %loophdr
+loophdr:
+  %pos = load i32, i32* %posSlot
+  %leadPtr = getelementptr i8, i8* %s, i32 %pos
+  %lead = load i8, i8* %leadPtr
+  %atEnd = icmp eq i8 %lead, 0
+  br i1 %atEnd, label %notfound, label %check1
+check1:
+  %masked1 = and i8 %lead, 128
+  %is1 = icmp eq i8 %masked1, 0
+  br i1 %is1, label %len1, label %check2
+len1:
+  %cp1 = zext i8 %lead to i32
+  store i32 %cp1, i32* %resultSlot
+  store i32 1, i32* %lenSlot
+  br label %afterDecode
+check2:
+  %masked2 = and i8 %lead, 224
+  %is2 = icmp eq i8 %masked2, 192
+  br i1 %is2, label %len2, label %check3
+len2:
+  %cp0_2 = and i8 %lead, 31
+  %cp0_2i = zext i8 %cp0_2 to i32
+  %pos1_2 = add i32 %pos, 1
+  %c1ptr_2 = getelementptr i8, i8* %s, i32 %pos1_2
+  %c1_2 = load i8, i8* %c1ptr_2
+  %c1m_2 = and i8 %c1_2, 63
+  %c1mi_2 = zext i8 %c1m_2 to i32
+  %sh0_2 = shl i32 %cp0_2i, 6
+  %r_2 = or i32 %sh0_2, %c1mi_2
+  store i32 %r_2, i32* %resultSlot
+  store i32 2, i32* %lenSlot
+  br label %afterDecode
+check3:
+  %masked3 = and i8 %lead, 240
+  %is3 = icmp eq i8 %masked3, 224
+  br i1 %is3, label %len3, label %len4
+len3:
+  %cp0_3 = and i8 %lead, 15
+  %cp0_3i = zext i8 %cp0_3 to i32
+  %pos1_3 = add i32 %pos, 1
+  %c1ptr_3 = getelementptr i8, i8* %s, i32 %pos1_3
+  %c1_3 = load i8, i8* %c1ptr_3
+  %c1m_3 = and i8 %c1_3, 63
+  %c1mi_3 = zext i8 %c1m_3 to i32
+  %pos2_3 = add i32 %pos, 2
+  %c2ptr_3 = getelementptr i8, i8* %s, i32 %pos2_3
+  %c2_3 = load i8, i8* %c2ptr_3
+  %c2m_3 = and i8 %c2_3, 63
+  %c2mi_3 = zext i8 %c2m_3 to i32
+  %sh0_3 = shl i32 %cp0_3i, 12
+  %sh1_3 = shl i32 %c1mi_3, 6
+  %t01_3 = or i32 %sh0_3, %sh1_3
+  %r_3 = or i32 %t01_3, %c2mi_3
+  store i32 %r_3, i32* %resultSlot
+  store i32 3, i32* %lenSlot
+  br label %afterDecode
+len4:
+  %cp0_4 = and i8 %lead, 7
+  %cp0_4i = zext i8 %cp0_4 to i32
+  %pos1_4 = add i32 %pos, 1
+  %c1ptr_4 = getelementptr i8, i8* %s, i32 %pos1_4
+  %c1_4 = load i8, i8* %c1ptr_4
+  %c1m_4 = and i8 %c1_4, 63
+  %c1mi_4 = zext i8 %c1m_4 to i32
+  %pos2_4 = add i32 %pos, 2
+  %c2ptr_4 = getelementptr i8, i8* %s, i32 %pos2_4
+  %c2_4 = load i8, i8* %c2ptr_4
+  %c2m_4 = and i8 %c2_4, 63
+  %c2mi_4 = zext i8 %c2m_4 to i32
+  %pos3_4 = add i32 %pos, 3
+  %c3ptr_4 = getelementptr i8, i8* %s, i32 %pos3_4
+  %c3_4 = load i8, i8* %c3ptr_4
+  %c3m_4 = and i8 %c3_4, 63
+  %c3mi_4 = zext i8 %c3m_4 to i32
+  %sh0_4 = shl i32 %cp0_4i, 18
+  %sh1_4 = shl i32 %c1mi_4, 12
+  %sh2_4 = shl i32 %c2mi_4, 6
+  %t01_4 = or i32 %sh0_4, %sh1_4
+  %t012_4 = or i32 %t01_4, %sh2_4
+  %r_4 = or i32 %t012_4, %c3mi_4
+  store i32 %r_4, i32* %resultSlot
+  store i32 4, i32* %lenSlot
+  br label %afterDecode
+afterDecode:
+  %cnt = load i32, i32* %cntSlot
+  %isMatch = icmp eq i32 %cnt, %index
+  br i1 %isMatch, label %found, label %advance
+found:
+  %finalI32 = load i32, i32* %resultSlot
+  %finalI24 = trunc i32 %finalI32 to i24
+  ret i24 %finalI24
+advance:
+  %len = load i32, i32* %lenSlot
+  %newPos = add i32 %pos, %len
+  store i32 %newPos, i32* %posSlot
+  %newCnt = add i32 %cnt, 1
+  store i32 %newCnt, i32* %cntSlot
+  br label %loophdr
+notfound:
+  ret i24 0
 }
 )";
     return fnName;
@@ -5431,6 +7633,94 @@ void LlvmIrEmitter::emitBufferAppend(const IrBufferAppend& bufferAppend, Functio
     const std::string headerLabel = "buffer.append.copy.header" + std::to_string(labelId);
     const std::string bodyLabel = "buffer.append.copy.body" + std::to_string(labelId);
     const std::string doneLabel = "buffer.append.copy.done" + std::to_string(labelId);
+
+    const int counterSlotReg = allocateRegister(fctx);
+    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
+    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << headerLabel << ":\n";
+    fctx.currentLabel = headerLabel;
+    const int iReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int condReg = allocateRegister(fctx);
+    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << textLenReg << "\n";
+    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
+              << "\n";
+
+    *fctx.out << bodyLabel << ":\n";
+    fctx.currentLabel = bodyLabel;
+    const int iForSrcReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int srcElemPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << srcElemPtrReg << " = getelementptr i8, i8* " << textPtr << ", i32 %"
+              << iForSrcReg << "\n";
+    const int byteValReg = allocateRegister(fctx);
+    *fctx.out << "  %" << byteValReg << " = load i8, i8* %" << srcElemPtrReg << "\n";
+    const int iForDstReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int dstOffReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstOffReg << " = add i32 %" << oldLenReg << ", %" << iForDstReg << "\n";
+    const int dstElemPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dstElemPtrReg << " = getelementptr i8, i8* %" << dataReg << ", i32 %"
+              << dstOffReg << "\n";
+    *fctx.out << "  store i8 %" << byteValReg << ", i8* %" << dstElemPtrReg << "\n";
+    const int iForIncReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
+    const int iNextReg = allocateRegister(fctx);
+    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
+    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
+    *fctx.out << "  br label %" << headerLabel << "\n";
+
+    *fctx.out << doneLabel << ":\n";
+    fctx.currentLabel = doneLabel;
+
+    const int nullPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << nullPtrReg << " = getelementptr i8, i8* %" << dataReg << ", i32 %"
+              << newLenReg << "\n";
+    *fctx.out << "  store i8 0, i8* %" << nullPtrReg << "\n";
+    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitBufferAppendValue(const IrBufferAppendValue& appendValue,
+                                          FunctionContext& fctx)
+{
+    // Structurally identical to emitBufferAppend just above - the only
+    // difference is stringifyValue in place of resolveStrPtr, since
+    // `value` isn't necessarily str-coercible on its own (i32/bool/char
+    // - see docs/language/Axea_Printing_Formatting.md). Not factored
+    // into a shared helper, per this codebase's own "separate over
+    // shared" convention for whole operations.
+    const std::string bufferRef = ref(appendValue.buffer, fctx);
+    const std::string textPtr = stringifyValue(appendValue.value, fctx);
+
+    const int textLen64Reg = allocateRegister(fctx);
+    *fctx.out << "  %" << textLen64Reg << " = call i64 @strlen(i8* " << textPtr << ")\n";
+    const int textLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << textLenReg << " = trunc i64 %" << textLen64Reg << " to i32\n";
+
+    const int lenPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lenPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 0\n";
+    const int oldLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
+    const int newLenReg = allocateRegister(fctx);
+    *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", %" << textLenReg << "\n";
+    const int neededReg = allocateRegister(fctx);
+    *fctx.out << "  %" << neededReg << " = add i32 %" << newLenReg << ", 1\n";
+
+    ensureBufferCapacity(bufferRef, "%" + std::to_string(neededReg), fctx);
+
+    const int dataPtrPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr {i32, i32, i8*}, {i32, i32, i8*}* "
+              << bufferRef << ", i32 0, i32 2\n";
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = load i8*, i8** %" << dataPtrPtrReg << "\n";
+
+    const int labelId = fctx.nextLabel++;
+    const std::string headerLabel = "buffer.appendvalue.copy.header" + std::to_string(labelId);
+    const std::string bodyLabel = "buffer.appendvalue.copy.body" + std::to_string(labelId);
+    const std::string doneLabel = "buffer.appendvalue.copy.done" + std::to_string(labelId);
 
     const int counterSlotReg = allocateRegister(fctx);
     *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
@@ -6422,6 +8712,19 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             *fctx.out << "  %" << destReg << " = add i32 0, " << constInt->value << "\n";
             continue;
         }
+        if (const auto* constInt64 = dynamic_cast<const IrConstInt64*>(inst.get()))
+        {
+            const int destReg = defineRegister(constInt64->dest, fctx);
+            *fctx.out << "  %" << destReg << " = add i64 0, " << constInt64->value << "\n";
+            continue;
+        }
+        if (const auto* constFloat = dynamic_cast<const IrConstFloat*>(inst.get()))
+        {
+            const int destReg = defineRegister(constFloat->dest, fctx);
+            *fctx.out << "  %" << destReg << " = fadd double 0.0, "
+                      << formatDoubleLiteral(constFloat->value) << "\n";
+            continue;
+        }
         if (const auto* constBool = dynamic_cast<const IrConstBool*>(inst.get()))
         {
             const int destReg = defineRegister(constBool->dest, fctx);
@@ -6448,9 +8751,79 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             const std::string lhsType = typeOf(binOp->lhs, fctx);
             const std::string lhsRef = ref(binOp->lhs, fctx);
             const std::string rhsRef = ref(binOp->rhs, fctx);
+
+            // str/String compare by real content (emitStrComparison, via
+            // registerKeyRuntime's own @axea.eq.str / registerOrderRuntime's
+            // own @axea.less.str) rather than pointer identity - String is
+            // first resolved to its own bare i8* data pointer via
+            // resolveStrPtrOfType, the same str-coercion every other
+            // String-accepting operation already shares (see
+            // docs/language/0042-string.md). Ordering (`<`/`<=`/`>`/`>=`)
+            // never reaches here with a String operand -
+            // TypeChecker::isOrderableKind only accepts str, not String.
+            // defineRegister(binOp->dest, ...) is deliberately *not* called
+            // up front here - emitStrComparison calls it itself, as the
+            // last register it allocates (see its own comment).
+            if (lhsType == "i8*" || isStringType(lhsType))
+            {
+                const std::string lhsPtr = resolveStrPtrOfType(lhsType, lhsRef, fctx);
+                const std::string rhsPtr = resolveStrPtrOfType(lhsType, rhsRef, fctx);
+                emitStrComparison(binOp->dest, binOp->op, lhsPtr, rhsPtr, fctx);
+                continue;
+            }
+
+            // f64 gets its own opcode table (fadd/fsub/.../fcmp - see
+            // floatBinOpMnemonic) - i32/i64 share binOpMnemonic's existing
+            // integer opcodes unchanged, since LLVM's int opcodes are
+            // already width-agnostic text (same reasoning icmp/char's own
+            // i24 already established).
+            const std::string mnemonic =
+                lhsType == "double" ? floatBinOpMnemonic(binOp->op) : binOpMnemonic(binOp->op);
             const int destReg = defineRegister(binOp->dest, fctx);
-            *fctx.out << "  %" << destReg << " = " << binOpMnemonic(binOp->op) << " " << lhsType
-                      << " " << lhsRef << ", " << rhsRef << "\n";
+            *fctx.out << "  %" << destReg << " = " << mnemonic << " " << lhsType << " " << lhsRef
+                      << ", " << rhsRef << "\n";
+            continue;
+        }
+        if (const auto* cast = dynamic_cast<const IrCast*>(inst.get()))
+        {
+            // `<operand> as <targetType>` (see docs/language/0005-type-system.md)
+            // - both sides are always i32/i64/f64 (TypeChecker::checkExpr's
+            // own CastExpr case already guarantees this), so exactly the 9
+            // (srcType, dstType) pairs below are ever reached: same-type
+            // (harmless, materialized the same trivial no-op-arithmetic way
+            // every constant here already is - not an identity bitcast,
+            // to sidestep any LLVM-version question about whether that's
+            // still legal IR), i32<->i64 (sext/trunc), and int<->double
+            // (sitofp/fptosi).
+            const std::string srcType = typeOf(cast->operand, fctx);
+            const std::string srcRef = ref(cast->operand, fctx);
+            const std::string dstType = llvmType(cast->targetType);
+            const int destReg = defineRegister(cast->dest, fctx);
+
+            if (srcType == dstType)
+            {
+                const std::string zeroOp = dstType == "double" ? "fadd double 0.0, " + srcRef
+                                                               : "add " + dstType + " 0, " + srcRef;
+                *fctx.out << "  %" << destReg << " = " << zeroOp << "\n";
+            }
+            else if (srcType == "i32" && dstType == "i64")
+            {
+                *fctx.out << "  %" << destReg << " = sext i32 " << srcRef << " to i64\n";
+            }
+            else if (srcType == "i64" && dstType == "i32")
+            {
+                *fctx.out << "  %" << destReg << " = trunc i64 " << srcRef << " to i32\n";
+            }
+            else if (dstType == "double")
+            {
+                *fctx.out << "  %" << destReg << " = sitofp " << srcType << " " << srcRef
+                          << " to double\n";
+            }
+            else
+            {
+                *fctx.out << "  %" << destReg << " = fptosi double " << srcRef << " to " << dstType
+                          << "\n";
+            }
             continue;
         }
         if (const auto* call = dynamic_cast<const IrCall*>(inst.get()))
@@ -6560,9 +8933,44 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitStrSlice(*strSlice, fctx);
             continue;
         }
+        if (const auto* join = dynamic_cast<const IrJoin*>(inst.get()))
+        {
+            emitJoin(*join, fctx);
+            continue;
+        }
         if (const auto* parse = dynamic_cast<const IrParse*>(inst.get()))
         {
             emitParse(*parse, fctx);
+            continue;
+        }
+        if (const auto* optionalNew = dynamic_cast<const IrOptionalNew*>(inst.get()))
+        {
+            emitOptionalNew(*optionalNew, fctx);
+            continue;
+        }
+        if (const auto* isSome = dynamic_cast<const IrOptionalIsSome*>(inst.get()))
+        {
+            emitOptionalIsSome(*isSome, fctx);
+            continue;
+        }
+        if (const auto* unwrap = dynamic_cast<const IrOptionalUnwrap*>(inst.get()))
+        {
+            emitOptionalUnwrap(*unwrap, fctx);
+            continue;
+        }
+        if (const auto* toCstr = dynamic_cast<const IrToCstr*>(inst.get()))
+        {
+            emitToCstr(*toCstr, fctx);
+            continue;
+        }
+        if (const auto* print = dynamic_cast<const IrPrint*>(inst.get()))
+        {
+            emitPrint(*print, fctx);
+            continue;
+        }
+        if (const auto* appendValue = dynamic_cast<const IrBufferAppendValue*>(inst.get()))
+        {
+            emitBufferAppendValue(*appendValue, fctx);
             continue;
         }
         if (const auto* listNew = dynamic_cast<const IrListNew*>(inst.get()))
@@ -6992,6 +9400,21 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
                 out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
                     << ", i8* %" << valReg << ")\n";
             }
+            else if (fieldLlvmType == "i64" || fieldLlvmType == "double")
+            {
+                // Same "%s"-of-a-stringified-value approach as the
+                // top-level print dispatch's own i64/double branch (see
+                // emitMain below) - a 64-bit varargs value needs "%lld",
+                // not bareIntFmt's own "%d", and a double needs a numeric
+                // format entirely - stringifyValueOfType already has both
+                // (@axea.i64.to_str/@axea.f64.to_str).
+                charHelperFctx.nextLlvmRegister = nextReg;
+                const std::string strPtr = stringifyValueOfType(
+                    fieldLlvmType, "%" + std::to_string(valReg), charHelperFctx);
+                nextReg = charHelperFctx.nextLlvmRegister;
+                out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
+                    << ", i8* " << strPtr << ")\n";
+            }
             else if (isCharType(fieldLlvmType))
             {
                 // A char field prints as its own Unicode character, same
@@ -7008,11 +9431,36 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
                 out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
                     << ", i8* " << utf8Ptr << ")\n";
             }
-            else // nested struct pointer
+            else if (isOptionalType(fieldLlvmType))
+            {
+                // Same "%s"-of-a-stringified-value approach as the i64/
+                // double branch above, and the top-level print dispatch's
+                // own Optional branch below (see
+                // docs/language/0052-optional.md) - checked before the
+                // generic "must be a nested struct pointer" fallback,
+                // which would otherwise misparse "%axea.Optional.<id>" as
+                // a struct name and try to print a non-existent struct.
+                charHelperFctx.nextLlvmRegister = nextReg;
+                const std::string strPtr = stringifyValueOfType(
+                    fieldLlvmType, "%" + std::to_string(valReg), charHelperFctx);
+                nextReg = charHelperFctx.nextLlvmRegister;
+                out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
+                    << ", i8* " << strPtr << ")\n";
+            }
+            else if (isNamedStructPointerType(fieldLlvmType)) // nested struct pointer
             {
                 const std::string nestedStructName = structNameFromPointerType(fieldLlvmType);
                 out << "  call void @axea.print." << nestedStructName << "(" << fieldLlvmType
                     << " %" << valReg << ")\n";
+            }
+            else
+            {
+                // A nested collection field, not a struct - see the
+                // top-level dispatch's own identical guard/comment
+                // (docs/language/0053-nested-generics.md).
+                throw std::runtime_error(
+                    "printing a struct field of type " + fieldLlvmType +
+                    " is not supported this phase - a nested collection field");
             }
         }
 
@@ -7080,6 +9528,29 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << strFmt << ", i8* " << namePtr << ", i8* " << utf8Ptr << ")\n";
         }
+        else if (llvmTypeStr == "i64" || llvmTypeStr == "double")
+        {
+            // i64 can't reuse the i32 branch's own bare "%d" printf format
+            // directly (a 64-bit varargs value needs "%lld", and a `double`
+            // needs a numeric format entirely) - stringifyValueOfType
+            // already has both (@axea.i64.to_str/@axea.f64.to_str), so this
+            // takes the same "%s = %s\n" path char/str/String already use
+            // above, rather than adding two more printf format constants.
+            const std::string strPtr = stringifyValueOfType(llvmTypeStr, ref(axeaReg, fctx), fctx);
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << strFmt << ", i8* " << namePtr << ", i8* " << strPtr << ")\n";
+        }
+        else if (isOptionalType(llvmTypeStr))
+        {
+            // "Some(<payload>)"/"None" (see docs/language/0052-optional.md)
+            // - same "%s = %s\n" path i64/double just above use, checked
+            // before the generic "must be a nested struct pointer"
+            // fallback below, which would otherwise misparse
+            // "%axea.Optional.<id>" as a struct name.
+            const std::string strPtr = stringifyValueOfType(llvmTypeStr, ref(axeaReg, fctx), fctx);
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << strFmt << ", i8* " << namePtr << ", i8* " << strPtr << ")\n";
+        }
         else if (llvmTypeStr == "void")
         {
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
@@ -7141,6 +9612,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* %" << elementValReg << ")\n";
                 }
+                else if (elementType == "i64" || elementType == "double")
+                {
+                    // Same "%s"-of-a-stringified-value approach as the
+                    // top-level print dispatch's own i64/double branch
+                    // (see emitMain) - a 64-bit varargs value needs
+                    // "%lld", not bareIntFmt's own "%d", and a double
+                    // needs a numeric format entirely.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
                 else if (isCharType(elementType))
                 {
                     // Checked *before* the generic "must be a nested
@@ -7152,11 +9635,31 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else // nested struct pointer
+                else if (isOptionalType(elementType))
+                {
+                    // "Some(<payload>)"/"None" (see
+                    // docs/language/0052-optional.md) - checked before the
+                    // generic "must be a nested struct pointer" fallback
+                    // below, same reasoning as the char branch above.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
+                else if (isNamedStructPointerType(elementType)) // nested struct pointer
                 {
                     const std::string nestedStructName = structNameFromPointerType(elementType);
                     out << "  call void @axea.print." << nestedStructName << "(" << elementType
                         << " %" << elementValReg << ")\n";
+                }
+                else
+                {
+                    // A nested collection element, not a struct - see the
+                    // top-level dispatch's own identical guard/comment
+                    // (docs/language/0053-nested-generics.md).
+                    throw std::runtime_error(
+                        "printing a collection element of type " + elementType +
+                        " is not supported this phase - a nested collection element");
                 }
             }
 
@@ -7365,6 +9868,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* %" << elementValReg << ")\n";
                 }
+                else if (elementType == "i64" || elementType == "double")
+                {
+                    // Same "%s"-of-a-stringified-value approach as the
+                    // top-level print dispatch's own i64/double branch
+                    // (see emitMain) - a 64-bit varargs value needs
+                    // "%lld", not bareIntFmt's own "%d", and a double
+                    // needs a numeric format entirely.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
                 else if (isCharType(elementType))
                 {
                     // Checked *before* the generic "must be a nested
@@ -7376,11 +9891,31 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else // nested struct pointer
+                else if (isOptionalType(elementType))
+                {
+                    // "Some(<payload>)"/"None" (see
+                    // docs/language/0052-optional.md) - checked before the
+                    // generic "must be a nested struct pointer" fallback
+                    // below, same reasoning as the char branch above.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
+                else if (isNamedStructPointerType(elementType)) // nested struct pointer
                 {
                     const std::string nestedStructName = structNameFromPointerType(elementType);
                     out << "  call void @axea.print." << nestedStructName << "(" << elementType
                         << " %" << elementValReg << ")\n";
+                }
+                else
+                {
+                    // A nested collection element, not a struct - see the
+                    // top-level dispatch's own identical guard/comment
+                    // (docs/language/0053-nested-generics.md).
+                    throw std::runtime_error(
+                        "printing a collection element of type " + elementType +
+                        " is not supported this phase - a nested collection element");
                 }
             }
             out << "  br label %" << skipLabel << "\n";
@@ -7434,6 +9969,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* %" << elementValReg << ")\n";
             }
+            else if (elementType == "i64" || elementType == "double")
+            {
+                // Same "%s"-of-a-stringified-value approach as the
+                // top-level print dispatch's own i64/double branch (see
+                // emitMain) - a 64-bit varargs value needs "%lld", not
+                // bareIntFmt's own "%d", and a double needs a numeric
+                // format entirely.
+                const std::string strPtr =
+                    stringifyValueOfType(elementType, "%" + std::to_string(elementValReg), fctx);
+                out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                    << bareStrFmt << ", i8* " << strPtr << ")\n";
+            }
             else if (isCharType(elementType))
             {
                 // Checked *before* the generic "must be a nested struct
@@ -7445,11 +9992,31 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
             }
-            else // nested struct pointer
+            else if (isOptionalType(elementType))
+            {
+                // "Some(<payload>)"/"None" (see
+                // docs/language/0052-optional.md) - checked before the
+                // generic "must be a nested struct pointer" fallback
+                // below, same reasoning as the char branch above.
+                const std::string strPtr =
+                    stringifyValueOfType(elementType, "%" + std::to_string(elementValReg), fctx);
+                out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                    << bareStrFmt << ", i8* " << strPtr << ")\n";
+            }
+            else if (isNamedStructPointerType(elementType)) // nested struct pointer
             {
                 const std::string nestedStructName = structNameFromPointerType(elementType);
                 out << "  call void @axea.print." << nestedStructName << "(" << elementType << " %"
                     << elementValReg << ")\n";
+            }
+            else
+            {
+                // A nested collection element, not a struct - see the
+                // top-level dispatch's own identical guard/comment above
+                // (docs/language/0053-nested-generics.md).
+                throw std::runtime_error(
+                    "printing a collection element of type " + elementType +
+                    " is not supported this phase - a nested collection element");
             }
             const int iForIncReg = allocateRegister(fctx);
             out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
@@ -7564,6 +10131,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* %" << elementValReg << ")\n";
                 }
+                else if (elementType == "i64" || elementType == "double")
+                {
+                    // Same "%s"-of-a-stringified-value approach as the
+                    // top-level print dispatch's own i64/double branch
+                    // (see emitMain) - a 64-bit varargs value needs
+                    // "%lld", not bareIntFmt's own "%d", and a double
+                    // needs a numeric format entirely.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
                 else if (isCharType(elementType))
                 {
                     // Checked *before* the generic "must be a nested
@@ -7575,11 +10154,31 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else // nested struct pointer
+                else if (isOptionalType(elementType))
+                {
+                    // "Some(<payload>)"/"None" (see
+                    // docs/language/0052-optional.md) - checked before the
+                    // generic "must be a nested struct pointer" fallback
+                    // below, same reasoning as the char branch above.
+                    const std::string strPtr = stringifyValueOfType(
+                        elementType, "%" + std::to_string(elementValReg), fctx);
+                    out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                        << bareStrFmt << ", i8* " << strPtr << ")\n";
+                }
+                else if (isNamedStructPointerType(elementType)) // nested struct pointer
                 {
                     const std::string nestedStructName = structNameFromPointerType(elementType);
                     out << "  call void @axea.print." << nestedStructName << "(" << elementType
                         << " %" << elementValReg << ")\n";
+                }
+                else
+                {
+                    // A nested collection element, not a struct - see the
+                    // top-level dispatch's own identical guard/comment
+                    // (docs/language/0053-nested-generics.md).
+                    throw std::runtime_error(
+                        "printing a collection element of type " + elementType +
+                        " is not supported this phase - a nested collection element");
                 }
             }
             out << "  br label %" << skipLabel << "\n";
@@ -7630,6 +10229,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* %" << elementValReg << ")\n";
             }
+            else if (elementType == "i64" || elementType == "double")
+            {
+                // Same "%s"-of-a-stringified-value approach as the
+                // top-level print dispatch's own i64/double branch (see
+                // emitMain) - a 64-bit varargs value needs "%lld", not
+                // bareIntFmt's own "%d", and a double needs a numeric
+                // format entirely.
+                const std::string strPtr =
+                    stringifyValueOfType(elementType, "%" + std::to_string(elementValReg), fctx);
+                out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                    << bareStrFmt << ", i8* " << strPtr << ")\n";
+            }
             else if (isCharType(elementType))
             {
                 // Checked *before* the generic "must be a nested struct
@@ -7641,11 +10252,31 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
             }
-            else // nested struct pointer
+            else if (isOptionalType(elementType))
+            {
+                // "Some(<payload>)"/"None" (see
+                // docs/language/0052-optional.md) - checked before the
+                // generic "must be a nested struct pointer" fallback
+                // below, same reasoning as the char branch above.
+                const std::string strPtr =
+                    stringifyValueOfType(elementType, "%" + std::to_string(elementValReg), fctx);
+                out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                    << bareStrFmt << ", i8* " << strPtr << ")\n";
+            }
+            else if (isNamedStructPointerType(elementType)) // nested struct pointer
             {
                 const std::string nestedStructName = structNameFromPointerType(elementType);
                 out << "  call void @axea.print." << nestedStructName << "(" << elementType << " %"
                     << elementValReg << ")\n";
+            }
+            else
+            {
+                // A nested collection element, not a struct - see the
+                // top-level dispatch's own identical guard/comment above
+                // (docs/language/0053-nested-generics.md).
+                throw std::runtime_error(
+                    "printing a collection element of type " + elementType +
+                    " is not supported this phase - a nested collection element");
             }
             const int iForIncReg = allocateRegister(fctx);
             out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
@@ -7661,7 +10292,7 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << newline << ")\n";
         }
-        else // struct pointer
+        else if (isNamedStructPointerType(llvmTypeStr)) // struct pointer
         {
             const std::string structName = structNameFromPointerType(llvmTypeStr);
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
@@ -7670,6 +10301,25 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 << ref(axeaReg, fctx) << ")\n";
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << newline << ")\n";
+        }
+        else
+        {
+            // Anything else pointer-shaped here is a nested collection
+            // (List<T>/Map<K,V>/Set<T>/.../Optional<T> whose own T is
+            // itself one of these) - genuinely constructible now (see
+            // docs/language/0053-nested-generics.md) but not yet
+            // printable at the top level: doing so would need real
+            // recursive print codegen (a collection-of-collections'
+            // element loop would itself need to emit another whole
+            // bracket-wrapped print loop), not built out this phase.
+            // Thrown here instead of silently calling
+            // structNameFromPointerType on non-struct-shaped text, which
+            // would corrupt into a bogus @axea.print.<garbage> call.
+            throw std::runtime_error(
+                "printing a top-level binding of type " + llvmTypeStr +
+                " directly is not supported this phase - a collection whose own element type "
+                "is itself a collection can be constructed and used, just not printed as a "
+                "whole nested structure yet");
         }
     }
 
@@ -7685,6 +10335,16 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
         functionReturnTypes_[function.name] = function.returnType;
         functionParamTypes_[function.name] = function.paramTypes;
     }
+    // extern c declarations (see docs/language/0048-ffi.md) register into
+    // these exact same maps - a call site's own argument-coercion logic
+    // (e.g. the "String lends str" resolution below) doesn't need to
+    // know or care whether the callee is a real Axea function or an
+    // externally-linked one.
+    for (const auto& externDecl : program.externs)
+    {
+        functionReturnTypes_[externDecl.name] = externDecl.returnType;
+        functionParamTypes_[externDecl.name] = externDecl.paramTypes;
+    }
 
     for (const auto& function : program.functions)
     {
@@ -7697,21 +10357,113 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // stringGlobals_ before the globals block below is emitted - LLVM
     // doesn't require forward-reference ordering for globals or calls, this
     // just keeps every string constant declared in one place for readability.
+    // Optional<T>'s own named type (see docs/language/0052-optional.md and
+    // registerOptionalInstantiation) is, unlike every other named type in
+    // this backend (Map/Set/LinkedList/SortedMap/SortedSet's own entry/node
+    // types), used *by value* - a function signature or extractvalue/
+    // insertvalue referencing it needs its body already known, not merely
+    // forward-declared (hand-verified against clang: `insertvalue %foo
+    // undef, ...` fails with "invalid indices" if `%foo = type {...}`
+    // appears later in the same file, even though the identical pattern
+    // with `%foo*` - always how every *other* named type here is used -
+    // is fine either order). So every user function's own Optional<T>
+    // registrations must happen *before* `out` starts being built below
+    // (emitMain, just after this, already registers program.topLevel's
+    // own Optional<T> usages the same way for the same reason) - a
+    // throwaway discovery pass, safe to repeat: registerOptionalInstantiation
+    // is memoized, so emitFunction's own later, real inferTypes call for
+    // each function just resolves the identical, already-registered names.
+    for (const auto& function : program.functions)
+    {
+        FunctionContext discoveryFctx;
+        std::ostringstream discardedOut;
+        discoveryFctx.out = &discardedOut;
+        inferTypes(function, discoveryFctx);
+    }
+
+    // Built into their own buffers first so any synthetic strings they need
+    // (format strings, punctuation, binding/field names) get hoisted into
+    // stringGlobals_ before the globals block below is emitted - LLVM
+    // doesn't require forward-reference ordering for globals or calls, this
+    // just keeps every string constant declared in one place for readability.
     std::ostringstream helpers;
     emitStructPrintHelpers(program, helpers);
+    // Every struct's own @axea.tostring.<Name> (see
+    // docs/language/0054-collection-printing.md), unconditionally -
+    // mirrors emitStructPrintHelpers' own "build every shape regardless
+    // of use" choice just above, and needs to run before `out` starts
+    // being built for the same reason the Optional<T> discovery pass
+    // does (writes into toStrRuntimeText_ directly, snapshotted only at
+    // the very end - see that stream's own final emission point below -
+    // so the *timing* doesn't actually matter here, only that it's not
+    // forgotten).
+    emitStructToStringHelpers(program);
     std::ostringstream mainOut;
     emitMain(program, mainOut);
 
     std::ostringstream out;
 
     emitStructTypeDecls(out);
+    // Optional<T>'s named type must appear before any by-value use of it
+    // (see the discovery-pass comment above, near this function's own
+    // start, for why) - every user function and program.topLevel has
+    // already been through inferTypes by this point (the discovery pass
+    // above, plus emitMain/emitStructPrintHelpers just above), so
+    // optionalTypeDeclsText_ is fully populated here, unlike every other
+    // instantiation-keyed *TypeDeclsText_ in this file (Map/Set/
+    // LinkedList/SortedMap/SortedSet), which are all safe to emit much
+    // later precisely because they're never used by value.
+    out << optionalTypeDeclsText_.str();
     out << "\ndeclare i8* @malloc(i64)\n";
     out << "declare i32 @printf(i8*, ...)\n";
     // String<>'s own construction/append need a runtime str length (see
     // docs/language/0042-string.md) - str (i8*) has no length field of its
     // own, unlike every other collection here, so this is the one place a
     // third libc function beyond malloc/printf gets declared.
-    out << "declare i64 @strlen(i8*)\n\n";
+    out << "declare i64 @strlen(i8*)\n";
+    // i32-to-string conversion for `print`/`write`/interpolation (see
+    // docs/language/Axea_Printing_Formatting.md and
+    // registerI32ToStrRuntime) - a fourth libc function, reusing libc's
+    // own well-tested integer formatting rather than hand-rolling itoa.
+    out << "declare i32 @sprintf(i8*, i8*, ...)\n";
+    // `.parse<f64>()`'s own string-to-double conversion (see
+    // registerParseRuntime and docs/language/0046-generic-methods.md) - a
+    // fifth libc function, reusing libc's own well-tested decimal-to-
+    // binary float parsing rather than risking a hand-rolled bug (the
+    // exact same "reuse libc" reasoning @sprintf's own use just above
+    // already established, in the opposite direction). The second
+    // argument (`endptr`) is always passed `null` - `.parse<T>()`'s own
+    // "invalid input yields a harmless default" contract (see
+    // registerParseRuntime) means the exact stopping point is never
+    // consulted.
+    out << "declare double @strtod(i8*, i8**)\n\n";
+
+    // extern c declarations (see docs/language/0048-ffi.md) - a real LLVM
+    // `declare`, one per extern, exactly like the fixed malloc/printf/
+    // strlen externs just above but user-specified rather than hardcoded.
+    // Emitted unmangled (`@<name>`, no prefix), same as every ordinary
+    // Axea function - `TypeChecker::registerSignatures` already prevents
+    // an extern name from colliding with a real Axea function's own name
+    // (both live in the same `functions_`/`externs_` lookup space at the
+    // call site).
+    for (const auto& externDecl : program.externs)
+    {
+        out << "declare " << llvmReturnType(externDecl.returnType) << " @" << externDecl.name
+            << "(";
+        for (std::size_t i = 0; i < externDecl.paramTypes.size(); ++i)
+        {
+            if (i > 0)
+            {
+                out << ", ";
+            }
+            out << llvmType(externDecl.paramTypes[i]);
+        }
+        out << ")\n";
+    }
+    if (!program.externs.empty())
+    {
+        out << "\n";
+    }
 
     emitStringGlobals(out);
     if (!stringGlobals_.empty())
@@ -7762,6 +10514,16 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // is driven by emitFieldGet itself, same lazy-during-emission timing
     // as registerParseRuntime above.
     out << utf8CountRuntimeText_.str();
+    // Same reasoning again, for single-character indexing's own
+    // codepoint-decoding runtime (see docs/language/0047-unicode.md) -
+    // registerUtf8CharAtRuntime is driven by emitIndexGet itself, same
+    // lazy-during-emission timing as registerUtf8CountRuntime above.
+    out << utf8CharAtRuntimeText_.str();
+    // Same reasoning again, for `print`/`write`/interpolation's own
+    // stringification runtime (see
+    // docs/language/Axea_Printing_Formatting.md).
+    out << toStrRuntimeText_.str();
+    out << printRuntimeText_.str();
     out << helpers.str();
     out << mainOut.str();
 

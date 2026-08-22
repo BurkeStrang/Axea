@@ -126,7 +126,7 @@ Function(drain)
 
 # `LlvmIrEmitter`: Structurally Identical to `List<T>`'s Own, Plus One New Operation
 
-`emitStackNew`/`emitStackPush`/`emitStackPop` are structurally identical to `emitListNew`/`emitListPush`/`emitListPop` — same malloc+null-GEP-sizeof idiom, same hand-rolled grow-and-copy loop for `push` using the established `alloca`/`load`/`store`-not-`phi` convention, same no-bounds-check `pop`. Kept as separate C++ functions rather than shared with `List`'s own, matching this codebase's consistent "separate over shared" preference (already applied to `Map` vs `Set`'s own near-identical resize logic) — and they're dispatched via distinct IR instruction types either way, so there's nowhere to actually share code from without adding an indirection that buys nothing.
+`emitStackNew`/`emitStackPush`/`emitStackPop` are structurally identical to `emitListNew`/`emitListPush`/`emitListPop` — same malloc+null-GEP-sizeof idiom, same no-bounds-check `pop`. Kept as separate C++ functions rather than shared with `List`'s own, matching this codebase's consistent "separate over shared" preference (already applied to `Map` vs `Set`'s own near-identical resize logic) — and they're dispatched via distinct IR instruction types either way, so there's nowhere to actually share code from without adding an indirection that buys nothing. `push`'s own *growth* logic is the one deliberate exception: it calls the same shared `ensureListCapacity` helper `List<T>.push` uses (doubling capacity, not reallocating to exactly `length + 1` - see `docs/language/0033-lists.md`), since that logic is genuinely identical regardless of which collection is growing (it only ever touches the header's own length/capacity/data fields, never anything LIFO/heap-order-specific) - the "separate over shared" preference above is about each collection's own *distinct* operations, not an absolute rule against ever sharing a sub-computation (`ensureBufferCapacity`, `resolveStrPtr` are earlier precedent for exactly this kind of shared helper).
 
 **`emitStackPeek` is the one genuinely new codegen path this whole feature needed**: GEP+load the element at `length - 1`, *without* the decrement-and-store-back `pop` does.
 
@@ -222,7 +222,6 @@ Byte-for-byte identical (also re-verified at `-O0`). `top = 30` confirms `peek` 
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No amortized growth**, same as `List<T>`'s own identical limitation — every `push` reallocates and copies the entire backing buffer.
 - **`pop()`/`peek()` throw on an empty stack rather than returning an `Optional`.** Matches `List<T>.pop()`'s own exact precedent; `Optional`/`T?` has no support anywhere in this codebase yet.
 - **`push`/`pop`/`peek` are compiler intrinsics, not real methods** — there's no user-definable method/`impl` system in this language.
 - **`Stack<T>` cannot be a struct field type.** The one scope restriction that exists, mirroring `List<T>`'s own identical restriction.

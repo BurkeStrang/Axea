@@ -597,6 +597,43 @@ TEST("TypeChecker rejects a non-i32 element type on a PriorityQueue<T> parameter
     EXPECT_THROWS(check("f(q: PriorityQueue<bool>) {}"));
 }
 
+TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<char> - char is orderable "
+     "by codepoint, same as i32 (see docs/language/0044-char.md)")
+{
+    check("f() -> char { "
+          "  q = PriorityQueue<char>() "
+          "  q.push('B') "
+          "  q.push('A') "
+          "  n = q.length "
+          "  x = q.peek() "
+          "  y = q.pop() "
+          "  return y "
+          "} "
+          "z = f()");
+}
+
+TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<str> - str has a real "
+     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+{
+    check("f() -> str { "
+          "  q = PriorityQueue<str>() "
+          "  q.push(\"banana\") "
+          "  q.push(\"apple\") "
+          "  n = q.length "
+          "  x = q.peek() "
+          "  y = q.pop() "
+          "  return y "
+          "} "
+          "z = f()");
+}
+
+TEST("TypeChecker rejects the owned String type as a PriorityQueue<T> element - orderability, "
+     "like Set<T>/Map<K,V>'s own hashability, only ever considers the bare str value type, not "
+     "the owned String type it's otherwise str-coercible to")
+{
+    EXPECT_THROWS(check("q = PriorityQueue<String>()"));
+}
+
 TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
 {
     check("f() -> i32 { "
@@ -743,11 +780,40 @@ TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<i32,i32
           "x = f()");
 }
 
-TEST("TypeChecker rejects a non-i32 key type on SortedMap<K,V> - no other type is comparable "
-     "yet (see docs/language/0040-sorted-maps.md)")
+TEST("TypeChecker rejects a non-orderable key type on SortedMap<K,V> - bool has no total order, "
+     "and the owned String type isn't orderable even though it's str-coercible everywhere else "
+     "(see docs/language/0040-sorted-maps.md)")
 {
     EXPECT_THROWS(check("m = SortedMap<bool,i32>()"));
-    EXPECT_THROWS(check("m = SortedMap<str,i32>()"));
+    EXPECT_THROWS(check("m = SortedMap<String,i32>()"));
+}
+
+TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<char,i32> - char is "
+     "orderable by codepoint, same as i32 (see docs/language/0044-char.md)")
+{
+    check("f() -> i32 { "
+          "  m = SortedMap<char,i32>() "
+          "  m.set('A', 1) "
+          "  hit: bool = m.contains('A') "
+          "  v = m.get('A') "
+          "  m.remove('A') "
+          "  return v + m.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<str,i32> - str has a "
+     "real lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+{
+    check("f() -> i32 { "
+          "  m = SortedMap<str,i32>() "
+          "  m.set(\"a\", 1) "
+          "  hit: bool = m.contains(\"a\") "
+          "  v = m.get(\"a\") "
+          "  m.remove(\"a\") "
+          "  return v + m.length "
+          "} "
+          "x = f()");
 }
 
 TEST("TypeChecker accepts arbitrary V (struct, array, List) on a SortedMap<i32,V> - only K is "
@@ -818,11 +884,40 @@ TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<i32>")
           "x = f()");
 }
 
-TEST("TypeChecker rejects a non-i32 element type on SortedSet<T> - no other type is comparable "
-     "yet (see docs/language/0041-sorted-sets.md)")
+TEST("TypeChecker rejects a non-orderable element type on SortedSet<T> - bool has no total "
+     "order, and the owned String type isn't orderable even though it's str-coercible "
+     "everywhere else (see docs/language/0041-sorted-sets.md)")
 {
     EXPECT_THROWS(check("s = SortedSet<bool>()"));
-    EXPECT_THROWS(check("s = SortedSet<str>()"));
+    EXPECT_THROWS(check("s = SortedSet<String>()"));
+}
+
+TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<str> - str has a real "
+     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+{
+    check("f() -> i32 { "
+          "  s = SortedSet<str>() "
+          "  s.add(\"a\") "
+          "  s.add(\"b\") "
+          "  before = s.contains(\"b\") "
+          "  s.remove(\"b\") "
+          "  return s.length "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<char> - char is orderable "
+     "by codepoint, same as i32 (see docs/language/0044-char.md)")
+{
+    check("f() -> i32 { "
+          "  s = SortedSet<char>() "
+          "  s.add('A') "
+          "  s.add('B') "
+          "  before = s.contains('B') "
+          "  s.remove('B') "
+          "  return s.length "
+          "} "
+          "x = f()");
 }
 
 TEST("TypeChecker rejects an unknown method on a SortedSet<T>")
@@ -1027,6 +1122,109 @@ TEST("TypeChecker accepts char ordering comparisons")
           "x = f()");
 }
 
+TEST("TypeChecker accepts str ordering comparisons")
+{
+    check("f() -> bool { "
+          "  a = \"apple\" "
+          "  b = \"banana\" "
+          "  lt = a < b "
+          "  le = a <= b "
+          "  gt = a > b "
+          "  ge = a >= b "
+          "  return lt "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects ordering comparisons on the owned String type - orderability only "
+     "ever considers the bare str value type, even though String is str-coercible everywhere "
+     "else in this language (see docs/language/0042-string.md)")
+{
+    EXPECT_THROWS(check("f() { a = String(\"a\")  b = String(\"b\")  x = a < b }"));
+}
+
+TEST("TypeChecker accepts i64 arithmetic and comparisons, typing the result i64/bool "
+     "respectively (see docs/language/0005-type-system.md)")
+{
+    check("f() -> i64 { "
+          "  a = 100i64 "
+          "  b = 25i64 "
+          "  sum = a + b "
+          "  diff = a - b "
+          "  prod = a * b "
+          "  quot = a / b "
+          "  lt = a < b "
+          "  return sum + diff + prod + quot "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker accepts f64 arithmetic and comparisons, typing the result f64/bool "
+     "respectively")
+{
+    check("f() -> f64 { "
+          "  a = 1.5 "
+          "  b = 2.5 "
+          "  sum = a + b "
+          "  quot = a / b "
+          "  lt = a < b "
+          "  return sum + quot "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects mixing i32/i64/f64 in one arithmetic or comparison expression - no "
+     "implicit widening, matching every other mixed-type binary op in this checker")
+{
+    EXPECT_THROWS(check("x = 1 + 100i64"));
+    EXPECT_THROWS(check("x = 100i64 + 1.5"));
+    EXPECT_THROWS(check("x = 1 < 1.5"));
+}
+
+TEST("TypeChecker accepts an 'as' cast between any two of i32/i64/f64, including a same-kind "
+     "cast, typing the result as targetType")
+{
+    check("f() -> i64 { "
+          "  a = 5 "
+          "  b = a as i64 "
+          "  c = b as f64 "
+          "  d = c as i32 "
+          "  e = a as i32 "
+          "  return b "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects an 'as' cast to/from a non-numeric type")
+{
+    EXPECT_THROWS(check("x = true as i64"));
+    EXPECT_THROWS(check("x = 5 as bool"));
+    EXPECT_THROWS(check("x = \"a\" as i32"));
+    EXPECT_THROWS(check("x = 5 as str"));
+}
+
+TEST("TypeChecker accepts i64/f64 as print/write/interpolation arguments")
+{
+    check("a = 100i64 "
+          "b = 1.5 "
+          "p1 = print(a) "
+          "p2 = print(b) "
+          "s = \"n={a} f={b}\"");
+}
+
+TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<i64> and PriorityQueue<f64> "
+     "- both are orderable, same as i32/char/str (see docs/language/0039-priority-queues.md)")
+{
+    check("f() { "
+          "  qi = PriorityQueue<i64>() "
+          "  qi.push(100i64) "
+          "  y = qi.pop() "
+          "  qf = PriorityQueue<f64>() "
+          "  qf.push(1.5) "
+          "  z = qf.pop() "
+          "}");
+}
+
 TEST("TypeChecker rejects char arithmetic")
 {
     EXPECT_THROWS(check("x = 'A' + 'B'"));
@@ -1076,9 +1274,11 @@ TEST("TypeChecker requires i32 slice bounds")
     EXPECT_THROWS(check("date = \"2026-08-18\"  x = date[0..true]"));
 }
 
-TEST("TypeChecker rejects slicing a non-str-coercible type")
+TEST("TypeChecker rejects slicing a non-sliceable type")
 {
-    EXPECT_THROWS(check("x = [1, 2, 3][..2]"));
+    // Array/List slicing of i32/bool/char/str/String elements is now
+    // supported (see docs/language/0050-collection-join-and-slicing.md) -
+    // a bare i32 is still not sliceable at all.
     EXPECT_THROWS(check("x = 5[..2]"));
 }
 
@@ -1089,11 +1289,40 @@ TEST("TypeChecker types a str slice expression as str, not String")
           "x = greet(date[..4])");
 }
 
-TEST("TypeChecker accepts parse<i32>() and parse<bool>(), typing the result as i32/bool "
-     "respectively")
+TEST("TypeChecker accepts single-character indexing on str and the owned String type, "
+     "typing the result char (see docs/language/0047-unicode.md)")
 {
-    check("n: i32 = \"42\".parse<i32>() "
-          "b: bool = \"true\".parse<bool>()");
+    check("s = \"hello\" "
+          "c: char = s[0]");
+    check("s = String(\"hello\") "
+          "c: char = s[0]");
+}
+
+TEST("TypeChecker rejects a non-i32 index into a str/String")
+{
+    EXPECT_THROWS(check("s = \"hello\"  x = s[true]"));
+    EXPECT_THROWS(check("s = \"hello\"  x = s['a']"));
+}
+
+TEST("TypeChecker still rejects indexed assignment into a str - single-character indexing is "
+     "read-only, str stays immutable (isIndexable itself is untouched)")
+{
+    EXPECT_THROWS(check("f() { s = \"hello\"  s[0] = 'x' }"));
+}
+
+TEST("TypeChecker accepts parse<i32>() and parse<bool>(), typing the result as "
+     "Optional<i32>/Optional<bool> respectively (see docs/language/0052-optional.md)")
+{
+    check("n: Optional<i32> = \"42\".parse<i32>() "
+          "b: Optional<bool> = \"true\".parse<bool>()");
+}
+
+TEST("TypeChecker accepts parse<i64>() and parse<f64>(), typing the result as "
+     "Optional<i64>/Optional<f64> respectively (see docs/language/0051-numeric-widening.md "
+     "and docs/language/0052-optional.md)")
+{
+    check("n: Optional<i64> = \"123456789012\".parse<i64>() "
+          "f: Optional<f64> = \"3.14\".parse<f64>()");
 }
 
 TEST("TypeChecker accepts parse<T>() on a String, str-coerced the same way .append's own "
@@ -1165,4 +1394,222 @@ TEST("TypeChecker accepts .length, .bytes, and .capacity on Buffer")
 TEST("TypeChecker rejects an unknown field on str, suggesting length/bytes")
 {
     EXPECT_THROWS(check("x = \"hi\".foo"));
+}
+
+TEST("TypeChecker accepts an extern c declaration and a call to it")
+{
+    check("extern c puts(text: cstr) "
+          "s = \"hi\" "
+          "c = s.to_cstr() "
+          "called = puts(c)");
+}
+
+TEST("TypeChecker types .to_cstr() as cstr, distinct from str - no implicit coercion either way")
+{
+    EXPECT_THROWS(check("extern c puts(text: cstr) "
+                        "s = \"hi\" "
+                        "called = puts(s)")); // str, not cstr - rejected
+}
+
+TEST("TypeChecker accepts .to_cstr() on a String, str-coerced the same way .append's own "
+     "argument is")
+{
+    check("s = String(\"hi\") "
+          "x = s.to_cstr()");
+}
+
+TEST("TypeChecker rejects .to_cstr() on a non-str-coercible type")
+{
+    EXPECT_THROWS(check("x = 5.to_cstr()"));
+}
+
+TEST("TypeChecker rejects an extern parameter type that isn't FFI-safe")
+{
+    EXPECT_THROWS(check("extern c foo(x: char)"));
+    EXPECT_THROWS(check("extern c foo(x: String)"));
+    EXPECT_THROWS(check("extern c foo(x: List<i32>)"));
+}
+
+TEST("TypeChecker rejects an extern return type that isn't FFI-safe")
+{
+    EXPECT_THROWS(check("extern c foo() -> String"));
+    EXPECT_THROWS(check("extern c foo() -> char"));
+}
+
+TEST("TypeChecker accepts every FFI-safe extern parameter/return type: i32, bool, str, cstr")
+{
+    check("extern c f1(x: i32) -> i32 "
+          "extern c f2(x: bool) -> bool "
+          "extern c f3(x: str) -> str "
+          "extern c f4(x: cstr) -> cstr "
+          "extern c f5(x: i32)"); // omitted return type => unit
+}
+
+TEST("TypeChecker rejects an extern function that has the same name as a real Axea function")
+{
+    EXPECT_THROWS(check("extern c foo(x: i32) "
+                        "foo(x: i32) -> i32 { return x } "
+                        "y = foo(1)"));
+    EXPECT_THROWS(check("foo(x: i32) -> i32 { return x } "
+                        "extern c foo(x: i32) "
+                        "y = foo(1)"));
+}
+
+TEST("TypeChecker rejects an unsupported extern calling convention")
+{
+    EXPECT_THROWS(check("extern rust foo(x: i32)"));
+}
+
+TEST("TypeChecker rejects calling an undefined function/extern")
+{
+    EXPECT_THROWS(check("x = undefinedThing(1)"));
+}
+
+TEST("TypeChecker accepts print/write with i32, bool, char, str, and String arguments")
+{
+    check("run() -> i32 { print(\"hello\", 1, true, 'c') return 0 } r = run()");
+    check("run() -> i32 { s = String(\"hi\") write(s) return 0 } r = run()");
+    check("run() -> i32 { print() return 0 } r = run()");
+}
+
+TEST("TypeChecker accepts an Array/List argument to print(...)/write(...) - stringified via "
+     "registerCollectionToStrRuntime (see docs/language/0054-collection-printing.md); "
+     "slice<T> remains the one unsupported type")
+{
+    check("run() -> i32 { arr = [1, 2, 3] print(arr) return 0 } r = run()");
+}
+
+TEST("TypeChecker rejects print/write with a slice<T> argument - the one type "
+     "isTextRepresentable still excludes")
+{
+    EXPECT_THROWS(check("f(s: slice<i32>) -> i32 { print(s) return 0 } "
+                        "arr = [1, 2, 3] r = f(arr)"));
+}
+
+TEST("TypeChecker rejects redefining 'print' or 'write' as a real function")
+{
+    EXPECT_THROWS(check("print(x: i32) -> i32 { return x }"));
+    EXPECT_THROWS(check("extern c print(x: i32)"));
+}
+
+TEST("TypeChecker accepts a struct argument to print(...)/write(...) - it prints directly via "
+     "the existing per-struct-type helper, no stringification needed (see "
+     "docs/language/0049-printing-formatting.md's own follow-up)")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "p = Point { x: 1, y: 2 } "
+          "print(\"point:\", p) "
+          "write(p)");
+}
+
+TEST("TypeChecker accepts every collection kind as a print(...)/write(...) argument")
+{
+    check("m: Map<i32,i32> = Map<i32,i32>() print(m)");
+    check("s: Set<i32> = Set<i32>() print(s)");
+    check("dq: Deque<i32> = Deque<i32>() print(dq)");
+    check("pq: PriorityQueue<i32> = PriorityQueue<i32>() print(pq)");
+}
+
+TEST("TypeChecker checks a bare top-level print(...)/write(...) call via the new ExprStmt "
+     "case in TypeChecker::check's own top-level item loop (see "
+     "docs/language/0049-printing-formatting.md's own Parsing follow-up)")
+{
+    check("print(\"hello\", 1, true)");
+    check("write(\"loading\")");
+}
+
+TEST("TypeChecker types an interpolated string literal as String, matching the InterpolatedString"
+     "Expr's own always-owned design")
+{
+    check("run() -> i32 { name = \"Ada\" s = \"hi {name}\" t = s.length return 0 } r = run()");
+}
+
+TEST("TypeChecker accepts an Array/List value inside an interpolation span (see "
+     "docs/language/0054-collection-printing.md); rejects a slice<T> one")
+{
+    check("run() -> i32 { arr = [1, 2, 3] s = \"arr is {arr}\" return 0 } r = run()");
+    EXPECT_THROWS(check("f(sl: slice<i32>) -> i32 { s = \"sl is {sl}\" return 0 } "
+                        "arr = [1, 2, 3] r = f(arr)"));
+}
+
+TEST("TypeChecker accepts i32/bool/char/str/String interpolation spans")
+{
+    check("run() -> i32 { "
+          "n = 1 b = true c = 'x' s = \"hi\" "
+          "out = \"{n} {b} {c} {s}\" "
+          "return 0 } r = run()");
+}
+
+TEST("TypeChecker accepts slicing a fixed-size array of i32 into a List<i32> - the result "
+     "supports indexing and .length like any other List")
+{
+    check("run() -> i32 { "
+          "numbers = [1, 2, 3, 4] "
+          "sliced = numbers[..2] "
+          "first = sliced[0] "
+          "len = sliced.length "
+          "return first + len } r = run()");
+}
+
+TEST("TypeChecker accepts slicing a List<T> into another List<T>")
+{
+    check("run() -> i32 { "
+          "numbers = List<i32>() "
+          "pushed = numbers.push(1) "
+          "sliced = numbers[..] "
+          "first = sliced[0] "
+          "return first } r = run()");
+}
+
+TEST("TypeChecker accepts slicing an Array/List of struct elements - slicing itself is a "
+     "generic value copy, unrelated to text-representability (docs/language/0050-collection-"
+     "join-and-slicing.md's own arrslice.copy loop shape); print(...)'s own wider allowlist "
+     "(docs/language/0054-collection-printing.md) unblocked this as a side effect")
+{
+    check("struct Point { x: i32 } "
+          "run() -> i32 { pts = [Point{x:1}] sliced = pts[..1] return 0 } "
+          "r = run()");
+}
+
+TEST("TypeChecker accepts .join(separator) on an Array of i32, returning a String")
+{
+    check("run() -> i32 { "
+          "numbers = [1, 2, 3] "
+          "joined = numbers.join(\",\") "
+          "len = joined.length "
+          "return len } r = run()");
+}
+
+TEST("TypeChecker accepts .join(separator) on a List<str>")
+{
+    check("run() -> i32 { "
+          "names = List<str>() "
+          "pushed = names.push(\"ada\") "
+          "joined = names.join(\", \") "
+          "return joined.length } r = run()");
+}
+
+TEST("TypeChecker rejects .join on a non-Array/List type")
+{
+    EXPECT_THROWS(check("run() -> i32 { joined = (5).join(\",\") return 0 } r = run()"));
+}
+
+TEST("TypeChecker accepts .join on struct elements - each stringified via "
+     "@axea.tostring.<Name> (see docs/language/0054-collection-printing.md)")
+{
+    check("struct Point { x: i32 } "
+          "run() -> i32 { pts = [Point{x:1}] j = pts.join(\",\") return 0 } "
+          "r = run()");
+}
+
+TEST("TypeChecker rejects .join with a non-str separator")
+{
+    EXPECT_THROWS(
+        check("run() -> i32 { numbers = [1, 2, 3] joined = numbers.join(5) return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects .join with the wrong argument count")
+{
+    EXPECT_THROWS(
+        check("run() -> i32 { numbers = [1, 2, 3] joined = numbers.join() return 0 } r = run()"));
 }

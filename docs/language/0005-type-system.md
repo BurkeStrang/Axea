@@ -3,6 +3,16 @@
 **Status:** Draft  
 **Document:** `0005-type-system.md`
 
+**Implementation note:** this document is a design vision, well ahead of
+what's actually built - most of it (hex/binary/octal literals, numeric
+separators, contextual/suffix-less literal typing, overflow
+traps/wrapping, `u8`...`u128`, `f32`, `i8`/`i16`/`i128`) remains
+unimplemented. `i32` has real arithmetic/comparison; `i64`/`f64` joined it
+(explicit-suffix literals only, plus a minimal `as` cast with no
+wrapping/checked/saturating variants) in `docs/language/0051-numeric-widening.md`
+- that document, not this one, describes what's actually implemented for
+numeric types today.
+
 ---
 
 # Motivation

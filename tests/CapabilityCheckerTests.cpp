@@ -551,8 +551,9 @@ TEST("CapabilityChecker infers read for a str parameter that is only sliced, nev
 TEST("CapabilityChecker infers read for a str parameter that is only parsed, never mutated - "
      "parse<T>() is read-only, same as every other read-only operation")
 {
-    const auto capabilities = capabilitiesOf("toInt(d: str) -> i32 { return d.parse<i32>() } "
-                                             "x = toInt(\"42\")");
+    const auto capabilities =
+        capabilitiesOf("toInt(d: str) -> Optional<i32> { return d.parse<i32>() } "
+                       "x = toInt(\"42\")");
     EXPECT_TRUE(capabilities.at("toInt")[0] == Capability::Read);
 }
 
@@ -562,4 +563,49 @@ TEST("CapabilityChecker infers read for a str parameter whose .length/.bytes are
     const auto capabilities = capabilitiesOf("count(d: str) -> i32 { return d.length + d.bytes } "
                                              "x = count(\"hello\")");
     EXPECT_TRUE(capabilities.at("count")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for a str parameter passed through .to_cstr() to an extern "
+     "call - extern calls never raise write, no capability inference needed for FFI-safe types")
+{
+    const auto capabilities =
+        capabilitiesOf("extern c puts(text: cstr) "
+                       "greet(name: str) -> i32 { called = puts(name.to_cstr())  return 1 } "
+                       "x = greet(\"hi\")");
+    EXPECT_TRUE(capabilities.at("greet")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for a str parameter only passed to print/write - the "
+     "builtin call arguments are read-only, same as every other read-only operation")
+{
+    const auto capabilities =
+        capabilitiesOf("greet(name: str) -> i32 { print(name) return 1 } x = greet(\"hi\")");
+    EXPECT_TRUE(capabilities.at("greet")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for a str parameter only used inside an interpolation span - "
+     "interpolation pieces are read-only, same as any other expression use")
+{
+    const auto capabilities =
+        capabilitiesOf("greet(name: str) -> String { return \"hi {name}\" } x = greet(\"a\")");
+    EXPECT_TRUE(capabilities.at("greet")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for an Array parameter that is only sliced - slicing never "
+     "mutates its object, same as every other read-only operation (see "
+     "docs/language/0050-collection-join-and-slicing.md)")
+{
+    const auto capabilities =
+        capabilitiesOf("firstTwo(nums: [i32; 4]) -> List<i32> { return nums[..2] } "
+                       "x = firstTwo([1, 2, 3, 4])");
+    EXPECT_TRUE(capabilities.at("firstTwo")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers read for an Array parameter that is only joined - .join() never "
+     "mutates its object")
+{
+    const auto capabilities =
+        capabilitiesOf("describe(nums: [i32; 4]) -> String { return nums.join(\",\") } "
+                       "x = describe([1, 2, 3, 4])");
+    EXPECT_TRUE(capabilities.at("describe")[0] == Capability::Read);
 }

@@ -10,18 +10,21 @@
 
 // Matches docs/language/0005-type-system.md's "Initial Type Checker
 // Representation" and 0002-grammar.md's primitive_type list. Only Bool, I32,
-// String, Unit, Struct, Array (docs/language/0031-arrays.md), Slice
-// (docs/language/0032-slices.md), List (docs/language/0033-lists.md),
-// Map/Set (docs/language/0034-maps-and-sets.md), Stack
-// (docs/language/0035-stacks.md), LinkedList
+// I64/F64 (docs/language/0051-numeric-widening.md), Char
+// (docs/language/0044-char.md), String, Unit, Struct, Array
+// (docs/language/0031-arrays.md), Slice (docs/language/0032-slices.md), List
+// (docs/language/0033-lists.md), Map/Set (docs/language/0034-maps-and-sets.md),
+// Stack (docs/language/0035-stacks.md), LinkedList
 // (docs/language/0036-linked-lists.md), Deque
-// (docs/language/0037-deques.md), Queue (docs/language/0038-queues.md), and
-// PriorityQueue (docs/language/0039-priority-queues.md, i32 elements only),
-// and OwnedString (docs/language/0042-string.md - Axea's own `String`,
-// distinct from this same enum's `String` case which is `str`) have
-// checking logic wired up this phase; the rest are declared for
-// architectural fidelity and reachable only as an "unsupported type" error
-// via resolveType.
+// (docs/language/0037-deques.md), Queue (docs/language/0038-queues.md),
+// PriorityQueue/SortedMap/SortedSet (docs/language/0039-priority-queues.md,
+// 0040-sorted-maps.md, 0041-sorted-sets.md - element/key type restricted to
+// isOrderableKind: I32/I64/F64/Char/String), and OwnedString
+// (docs/language/0042-string.md - Axea's own `String`, distinct from this
+// same enum's `String` case which is `str`) have checking logic wired up
+// this phase; the rest (I8/I16/I128, every unsigned width, F32) are
+// declared for architectural fidelity and reachable only as an "unsupported
+// type" error via resolveType.
 enum class TypeKind
 {
     Bool,
@@ -68,7 +71,15 @@ enum class TypeKind
     SortedMap,
     SortedSet,
     OwnedString,
-    Buffer
+    Buffer,
+    // `cstr` (see docs/language/0048-ffi.md) - representationally
+    // identical to `str` (both a bare, null-terminated i8*), but kept a
+    // genuinely distinct TypeKind rather than an alias for `String`
+    // (str's own kind): `docs/std/strings/0007-ffi.md`'s own design
+    // requires an explicit `.to_cstr()` conversion rather than silent
+    // interchangeability, mirroring the deliberate one-way "String lends
+    // a str" coercion rule rather than treating the two as equal.
+    CStr
 };
 
 struct Type
@@ -76,25 +87,29 @@ struct Type
     TypeKind kind;
     std::string structName; // populated only when kind == TypeKind::Struct
 
-    // Populated only when kind == TypeKind::Array (see docs/language/0031-arrays.md).
-    // Flat, not recursive - no nested array types in this phase. Deliberately
-    // not a std::shared_ptr<Type> element: that would make the defaulted
-    // operator== below compare pointer identity instead of structural
-    // equality, silently breaking every array-type comparison.
-    TypeKind elementKind{};
-    std::string elementStructName{};
+    // Populated only when kind == TypeKind::Array (see docs/language/0031-arrays.md)
+    // - a compile-time-known element count, genuinely distinct from any
+    // type parameter, so it stays its own field even though Array now
+    // shares elementTypeName below with every other single-type-parameter
+    // kind.
     int arraySize{};
 
-    // Map<K,V>/Set<T> only (see docs/language/0034-maps-and-sets.md's
-    // generic rewrite). Unlike Array's flat elementKind tag above, K/V can
-    // themselves be arbitrarily nested (List<i32>, a struct, another
-    // Map<...>) - a single TypeKind can't carry that, so these store the
-    // canonical resolveType-able string instead, re-resolved on demand via
-    // resolveType(...) wherever the full nested Type is actually needed
-    // (mirrors MapNewExpr/SetNewExpr's own "store the string, re-resolve
-    // later" pattern at the AST layer). elementTypeName doubles as Set's own
-    // element type; valueTypeName is Map-only (empty for Set). Always stored
-    // in canonical form so the defaulted operator== below still works.
+    // The single type parameter for every kind that has exactly one -
+    // Array/Slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue/Optional/
+    // Set, plus Map/SortedMap's own key (see docs/language/0034-maps-and-sets.md's
+    // generic rewrite). Genuinely arbitrarily nested (List<Optional<List<i32>>>,
+    // a struct, another Map<...>, ...) - a single TypeKind can't carry that
+    // (this field used to be a flat elementKind/elementStructName pair,
+    // exactly that limitation, until docs/language/0052-optional.md's own
+    // follow-up found it silently corrupting List<Optional<i32>>), so this
+    // stores the canonical resolveType-able string instead, re-resolved on
+    // demand via resolveType(...) wherever the full nested Type is
+    // actually needed (mirrors MapNewExpr/SetNewExpr's own "store the
+    // string, re-resolve later" pattern at the AST layer). valueTypeName is
+    // Map/SortedMap's own value type (empty for every single-parameter
+    // kind, including Set). Always stored in canonical form (typeName(...)
+    // of the resolved element, not raw source text) so the defaulted
+    // operator== below still works structurally.
     std::string elementTypeName;
     std::string valueTypeName;
 
@@ -166,4 +181,10 @@ private:
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;
+    // extern c function declarations (see docs/language/0048-ffi.md) - a
+    // parallel map to functions_ above rather than folded into it: an
+    // ExternDecl is a genuinely different AST node (no body), even though
+    // its own params/returnType shape happens to match FunctionDecl's.
+    // CallExpr's own type-checking consults both.
+    std::unordered_map<std::string, const ExternDecl*> externs_;
 };

@@ -1272,3 +1272,304 @@ TEST("Parser builds a zero-argument method-call expression usable as a value")
     EXPECT_EQ(methodCall->method, "pop");
     EXPECT_TRUE(methodCall->arguments.empty());
 }
+
+TEST("Parser builds an extern c declaration with parameters and a return type")
+{
+    auto program = parseOne("extern c abs(x: i32) -> i32");
+
+    auto* externDecl = dynamic_cast<ExternDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(externDecl != nullptr);
+    EXPECT_EQ(externDecl->name, "abs");
+    EXPECT_EQ(externDecl->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(externDecl->params[0].name, "x");
+    EXPECT_EQ(externDecl->params[0].type, "i32");
+    EXPECT_TRUE(!externDecl->params[0].declaredCapability);
+    EXPECT_TRUE(externDecl->returnType.has_value());
+    EXPECT_EQ(*externDecl->returnType, "i32");
+}
+
+TEST("Parser builds an extern c declaration with no return type (unit) and a cstr parameter")
+{
+    auto program = parseOne("extern c puts(text: cstr)");
+
+    auto* externDecl = dynamic_cast<ExternDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(externDecl != nullptr);
+    EXPECT_EQ(externDecl->name, "puts");
+    EXPECT_EQ(externDecl->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(externDecl->params[0].type, "cstr");
+    EXPECT_TRUE(!externDecl->returnType.has_value());
+}
+
+TEST("Parser rejects an extern calling convention other than 'c'")
+{
+    EXPECT_THROWS(parseOne("extern rust foo(x: i32)"));
+}
+
+TEST("Parser builds a .to_cstr() method-call expression")
+{
+    auto program = parseOne("x = \"hi\".to_cstr()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->method, "to_cstr");
+    EXPECT_TRUE(call->typeArgument.empty());
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(0));
+}
+
+TEST("Parser builds a print(...) call expression like any other bare-identifier call")
+{
+    auto program = parseOne("x = print(\"hello\", 1)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<CallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "print");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(2));
+}
+
+TEST("Parser builds a write(...) call expression despite 'write' also being the capability-"
+     "prefix keyword (see docs/language/Axea_Printing_Formatting.md)")
+{
+    auto program = parseOne("x = write(\"hello\")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<CallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "write");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser still parses 'write' as a parameter capability prefix, unaffected by the new "
+     "write(...) call special-case")
+{
+    auto program = parseOne("bump(write u: i32) { }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params.size(), static_cast<std::size_t>(1));
+    EXPECT_TRUE(function->params[0].declaredCapability.has_value());
+    EXPECT_TRUE(*function->params[0].declaredCapability == Capability::Write);
+}
+
+TEST("Parser parses a bare top-level print(...) call with no assignment as an ExprStmt, not "
+     "an attempted function declaration (see docs/language/0049-printing-formatting.md's own "
+     "Parsing follow-up)")
+{
+    auto program = parseOne("print(\"hello\")");
+
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program.items.at(0).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "print");
+}
+
+TEST("Parser parses a bare top-level write(...) call the same way, despite 'write' being the "
+     "capability-prefix keyword rather than an Identifier")
+{
+    auto program = parseOne("write(\"hello\")");
+
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program.items.at(0).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "write");
+}
+
+TEST("Parser still parses a real function declaration with zero parameters, disambiguated "
+     "from a bare zero-arg call by looking past the empty parens for '->'/'{'/'=>'")
+{
+    auto program = parseOne("foo() -> i32 { return 1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->name, "foo");
+    EXPECT_EQ(function->params.size(), static_cast<std::size_t>(0));
+}
+
+TEST("Parser parses a bare zero-arg top-level call (no '->'/'{'/'=>' after the empty parens) "
+     "as an ExprStmt, not a function declaration attempt")
+{
+    auto program = parseOne("foo()");
+
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program.items.at(0).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "foo");
+}
+
+TEST("Parser still parses a real function declaration whose first parameter is a bare name "
+     "(no capability prefix), disambiguated from a call by the 'Identifier :' shape only a "
+     "Param can start with")
+{
+    auto program = parseOne("foo(x: i32) -> i32 { return x }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(function->params[0].name, "x");
+}
+
+TEST("Parser parses a bare top-level call whose first argument is just a bare name (no ':' "
+     "following it) as an ExprStmt, not a function declaration attempt")
+{
+    auto program = parseOne("y = 1 "
+                            "foo(y)");
+
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program.items.at(1).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "foo");
+}
+
+TEST("Parser builds a plain string literal with no interpolation spans as StringExpr, "
+     "not InterpolatedStringExpr")
+{
+    auto program = parseOne("x = \"hello world\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, "hello world");
+}
+
+TEST("Parser splits an interpolated string literal into alternating literal/expr pieces")
+{
+    auto program = parseOne("x = \"Hello {name}, you are {age} years old\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(5));
+
+    EXPECT_TRUE(interpolated->pieces[0].expr == nullptr);
+    EXPECT_EQ(interpolated->pieces[0].literalText, "Hello ");
+
+    EXPECT_TRUE(interpolated->pieces[1].expr != nullptr);
+    auto* nameExpr = dynamic_cast<NameExpr*>(interpolated->pieces[1].expr.get());
+    EXPECT_TRUE(nameExpr != nullptr);
+    EXPECT_EQ(nameExpr->name, "name");
+
+    EXPECT_TRUE(interpolated->pieces[2].expr == nullptr);
+    EXPECT_EQ(interpolated->pieces[2].literalText, ", you are ");
+
+    EXPECT_TRUE(interpolated->pieces[3].expr != nullptr);
+    auto* ageExpr = dynamic_cast<NameExpr*>(interpolated->pieces[3].expr.get());
+    EXPECT_TRUE(ageExpr != nullptr);
+    EXPECT_EQ(ageExpr->name, "age");
+
+    EXPECT_TRUE(interpolated->pieces[4].expr == nullptr);
+    EXPECT_EQ(interpolated->pieces[4].literalText, " years old");
+}
+
+TEST("Parser parses an arbitrary expression inside an interpolation span")
+{
+    auto program = parseOne("x = \"next year: {age + 1}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(2));
+
+    auto* add = dynamic_cast<BinaryExpr*>(interpolated->pieces[1].expr.get());
+    EXPECT_TRUE(add != nullptr);
+    EXPECT_EQ(add->op, TokenKind::Plus);
+}
+
+TEST("Parser treats '{{' and '}}' as escaped literal braces, not interpolation")
+{
+    auto program = parseOne("x = \"{{literal}} and {age}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(2));
+    EXPECT_TRUE(interpolated->pieces[0].expr == nullptr);
+    EXPECT_EQ(interpolated->pieces[0].literalText, "{literal} and ");
+}
+
+TEST("Parser rejects an empty interpolation expression '{}'")
+{
+    EXPECT_THROWS(parseOne("x = \"{}\""));
+}
+
+TEST("Parser rejects an unterminated interpolation expression")
+{
+    EXPECT_THROWS(parseOne("x = \"hello {name\""));
+}
+
+TEST("Parser rejects an unmatched '}' in a string literal")
+{
+    EXPECT_THROWS(parseOne("x = \"hello }\""));
+}
+
+TEST("Parser builds an array-literal slice expression into the same StrSliceExpr node str "
+     "slicing already uses (see docs/language/0050-collection-join-and-slicing.md)")
+{
+    auto program = parseOne("x = [1, 2, 3][..2]");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* slice = dynamic_cast<StrSliceExpr*>(assignment->value.get());
+    EXPECT_TRUE(slice != nullptr);
+    EXPECT_TRUE(slice->start == nullptr);
+    EXPECT_TRUE(slice->end != nullptr);
+    EXPECT_TRUE(dynamic_cast<ArrayLiteralExpr*>(slice->object.get()) != nullptr);
+}
+
+TEST("Parser builds a .join(separator) method-call expression")
+{
+    auto program = parseOne("x = numbers.join(\",\")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->method, "join");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds an Int64Expr from an i64-suffixed literal, with the suffix stripped from "
+     "the parsed value (see docs/language/0005-type-system.md)")
+{
+    auto program = parseOne("x = 100i64");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* int64Expr = dynamic_cast<Int64Expr*>(assignment->value.get());
+    EXPECT_TRUE(int64Expr != nullptr);
+    EXPECT_EQ(int64Expr->value, static_cast<std::int64_t>(100));
+}
+
+TEST("Parser builds a FloatExpr from a bare decimal literal and from an f64-suffixed one, both "
+     "with the suffix (if any) stripped")
+{
+    auto program = parseOne("x = 1.5 y = 100f64");
+
+    auto* xAssignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* xFloat = dynamic_cast<FloatExpr*>(xAssignment->value.get());
+    EXPECT_TRUE(xFloat != nullptr);
+    EXPECT_EQ(xFloat->value, 1.5);
+
+    auto* yAssignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* yFloat = dynamic_cast<FloatExpr*>(yAssignment->value.get());
+    EXPECT_TRUE(yFloat != nullptr);
+    EXPECT_EQ(yFloat->value, 100.0);
+}
+
+TEST("Parser builds a CastExpr for '<expr> as <targetType>', binding tighter than the "
+     "surrounding binary operator (`x as i64 + 1` is `(x as i64) + 1`, see "
+     "docs/language/0005-type-system.md)")
+{
+    auto program = parseOne("y = x as i64 + 1");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* add = dynamic_cast<BinaryExpr*>(assignment->value.get());
+    EXPECT_TRUE(add != nullptr);
+    EXPECT_EQ(add->op, TokenKind::Plus);
+
+    auto* cast = dynamic_cast<CastExpr*>(add->left.get());
+    EXPECT_TRUE(cast != nullptr);
+    EXPECT_EQ(cast->targetType, "i64");
+    EXPECT_TRUE(dynamic_cast<NameExpr*>(cast->operand.get()) != nullptr);
+}

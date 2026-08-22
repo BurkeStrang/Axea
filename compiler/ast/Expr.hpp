@@ -23,6 +23,33 @@ struct IntegerExpr final : Expr
     std::int64_t value;
 };
 
+// An `i64`-suffixed integer literal ("100i64" - see
+// docs/language/0005-type-system.md) - a genuinely distinct AST node from
+// IntegerExpr (i32), not a shared node with a width flag, matching how
+// CharExpr below is its own node rather than an IntegerExpr variant.
+struct Int64Expr final : Expr
+{
+    explicit Int64Expr(std::int64_t value)
+        : value(value)
+    {
+    }
+
+    std::int64_t value;
+};
+
+// A float literal - always `f64`, the only float type this phase (a
+// decimal point, an "f64" suffix, or both - see
+// docs/language/0005-type-system.md).
+struct FloatExpr final : Expr
+{
+    explicit FloatExpr(double value)
+        : value(value)
+    {
+    }
+
+    double value;
+};
+
 struct NameExpr final : Expr
 {
     explicit NameExpr(std::string name)
@@ -47,6 +74,66 @@ struct BinaryExpr final : Expr
     std::unique_ptr<Expr> right;
 };
 
+// `<expr> as <targetType>` - a numeric conversion between i32/i64/f64 only
+// this phase (see docs/language/0005-type-system.md) - no wrapping/
+// checked/saturating variants, just a direct value conversion (sign-
+// extend/truncate between i32/i64, convert between int and f64). `as`
+// binds tighter than every binary operator except unary (see
+// Parser::parseUnary/parseCast) - `-x as i64` is `(-x) as i64`, `x as i64
+// + 1` is `(x as i64) + 1`, matching the common convention this
+// language's own precedent (Rust) already established for `as`.
+struct CastExpr final : Expr
+{
+    CastExpr(std::unique_ptr<Expr> operand, std::string targetType)
+        : operand(std::move(operand)),
+          targetType(std::move(targetType))
+    {
+    }
+
+    std::unique_ptr<Expr> operand;
+    std::string targetType;
+};
+
+// `Some(value)` (see docs/language/0052-optional.md) - wraps `value` into a
+// present `Optional<T>`; T is synthesized bottom-up from `value`'s own
+// checked type (unlike NoneExpr below, never needs surrounding context).
+// Parsed identically to StringNewExpr's own "identifier + one parenthesized
+// argument" shape.
+struct SomeExpr final : Expr
+{
+    explicit SomeExpr(std::unique_ptr<Expr> value)
+        : value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> value;
+};
+
+// `None` - an absent `Optional<T>`. Unlike SomeExpr, carries no expression
+// to synthesize T from, so TypeChecker can only resolve a bare `None` in a
+// context that already supplies an expected Optional<T> (a declared-type
+// assignment or the enclosing function's own Optional<U> return type) -
+// see TypeChecker::checkStmt's AssignmentStmt/ReturnStmt cases. Fielded as
+// an empty struct, same convention as BufferNewExpr's own no-argument
+// constructor.
+struct NoneExpr final : Expr
+{
+};
+
+// `<expr>?` (see docs/language/0052-optional.md) - postfix, valid only
+// inside a function whose own declared return type is Optional<U> for some
+// U. On Some(v), evaluates to v; on None, immediately returns None from the
+// enclosing function - the language's only expression-context early return.
+struct TryExpr final : Expr
+{
+    explicit TryExpr(std::unique_ptr<Expr> operand)
+        : operand(std::move(operand))
+    {
+    }
+
+    std::unique_ptr<Expr> operand;
+};
+
 struct BoolExpr final : Expr
 {
     explicit BoolExpr(bool value)
@@ -65,6 +152,32 @@ struct StringExpr final : Expr
     }
 
     std::string value;
+};
+
+// `"Hello {name}, you are {age}."` (see docs/language/Axea_Printing_Formatting.md)
+// - built by the parser only when a string literal's own raw content
+// contains at least one unescaped `{...}` span; a literal with none stays
+// a plain StringExpr (see Parser::parsePrimary), so every pre-existing
+// string literal in this codebase is unaffected. Each Piece is either a
+// literal span (`expr == nullptr`, `literalText` used) or a parsed
+// sub-expression (`expr` set, `literalText` unused) - alternating in
+// source order. No format specifiers (`:05`, `:.2`, `:<20`, ...) or
+// debug (`{x=}`) forms this phase - see that same doc's own Known
+// Imprecision section once written.
+struct InterpolatedStringExpr final : Expr
+{
+    struct Piece
+    {
+        std::string literalText;    // used when expr == nullptr
+        std::unique_ptr<Expr> expr; // used when non-null; literalText then unused
+    };
+
+    explicit InterpolatedStringExpr(std::vector<Piece> pieces)
+        : pieces(std::move(pieces))
+    {
+    }
+
+    std::vector<Piece> pieces;
 };
 
 // A single Unicode scalar value ('A', 'é', '🚀' - see

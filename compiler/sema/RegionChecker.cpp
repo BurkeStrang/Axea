@@ -399,7 +399,8 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
                                        const FunctionDecl& function,
                                        std::vector<RegionInfo>* currentLoopBreakRegions)
 {
-    if (dynamic_cast<const IntegerExpr*>(&expr) || dynamic_cast<const BoolExpr*>(&expr) ||
+    if (dynamic_cast<const IntegerExpr*>(&expr) || dynamic_cast<const Int64Expr*>(&expr) ||
+        dynamic_cast<const FloatExpr*>(&expr) || dynamic_cast<const BoolExpr*>(&expr) ||
         dynamic_cast<const StringExpr*>(&expr) || dynamic_cast<const CharExpr*>(&expr))
     {
         return RegionInfo{Region::Owned, "", ""};
@@ -607,6 +608,22 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        // Same reasoning as StringNewExpr/StrSliceExpr above - building a
+        // String from interpolation pieces always allocates a fresh
+        // buffer (see docs/language/Axea_Printing_Formatting.md), never
+        // aliasing any piece's own region.
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                regionOfExpr(*piece.expr, env, function, currentLoopBreakRegions);
+            }
+        }
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
         for (const auto& argument : call->arguments)
@@ -664,6 +681,38 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         regionOfExpr(*binary->left, env, function, currentLoopBreakRegions);
         regionOfExpr(*binary->right, env, function, currentLoopBreakRegions);
         return RegionInfo{Region::Owned, "", ""}; // arithmetic/comparison always yields a primitive
+    }
+
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        regionOfExpr(*cast->operand, env, function, currentLoopBreakRegions);
+        return RegionInfo{Region::Owned, "", ""}; // a numeric cast always yields a primitive
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        // Still walked (not skipped) for the same recursive-region-tracking
+        // reason CastExpr's own operand above is - a borrowed value wrapped
+        // in Some(...) could otherwise silently escape undetected (see
+        // docs/language/0052-optional.md). MVP payloads are always scalar
+        // (from `.parse<T>()`), so this always yields Owned regardless of
+        // the wrapped value's own region, same as CastExpr.
+        regionOfExpr(*someExpr->value, env, function, currentLoopBreakRegions);
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (dynamic_cast<const NoneExpr*>(&expr))
+    {
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        // `expr?` unwraps Optional<T>'s payload - propagates the operand's
+        // own region exactly like IndexExpr's element-read does, rather
+        // than defaulting to Owned, so a borrowed struct payload extracted
+        // through `?` is still tracked correctly.
+        return regionOfExpr(*tryExpr->operand, env, function, currentLoopBreakRegions);
     }
 
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))

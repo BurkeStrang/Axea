@@ -4,6 +4,8 @@
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 
+#include <sstream>
+
 namespace
 {
     Program parse(const std::string& source)
@@ -808,6 +810,28 @@ TEST("Interpreter PriorityQueue pop always drains in ascending order regardless 
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 10030050);
 }
 
+TEST("Interpreter PriorityQueue<char> pop drains in ascending codepoint order, mirroring "
+     "PriorityQueue<i32>'s own ordering (see docs/language/0044-char.md)")
+{
+    auto vars = runProgram("q = PriorityQueue<char>() "
+                           "a = q.push('C') b = q.push('A') c = q.push('B') "
+                           "x = q.pop() y = q.pop() z = q.pop()");
+    EXPECT_EQ(toString(vars.at("x")), "A");
+    EXPECT_EQ(toString(vars.at("y")), "B");
+    EXPECT_EQ(toString(vars.at("z")), "C");
+}
+
+TEST("Interpreter PriorityQueue<str> pop drains in ascending lexicographic order, mirroring "
+     "PriorityQueue<i32>/PriorityQueue<char>'s own ordering (see docs/language/0042-string.md)")
+{
+    auto vars = runProgram("q = PriorityQueue<str>() "
+                           "a = q.push(\"cherry\") b = q.push(\"apple\") c = q.push(\"banana\") "
+                           "x = q.pop() y = q.pop() z = q.pop()");
+    EXPECT_EQ(toString(vars.at("x")), "apple");
+    EXPECT_EQ(toString(vars.at("y")), "banana");
+    EXPECT_EQ(toString(vars.at("z")), "cherry");
+}
+
 TEST("Interpreter throws on pop from an empty PriorityQueue")
 {
     EXPECT_THROWS(runProgram("x = PriorityQueue<i32>().pop()"));
@@ -1057,6 +1081,35 @@ TEST("Interpreter SortedMap keeps keys correctly ordered under insertion and rem
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1570657);
 }
 
+TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<char,i32> - char is "
+     "orderable by codepoint, same as i32 (see docs/language/0044-char.md)")
+{
+    const std::string source = "f() -> i32 { "
+                               "  m = SortedMap<char,i32>() "
+                               "  m.set('B', 2)  m.set('A', 1)  m.set('C', 3) "
+                               "  hit = if m.contains('A') { 1 } else { 0 } "
+                               "  m.remove('B') "
+                               "  return m.get('A') + m.get('C') + hit * 1000 + m.length * 100000 "
+                               "} "
+                               "x = f()"; // 1 + 3 + 1000 + 200000 = 201004
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 201004);
+}
+
+TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<str,i32> - str has a real "
+     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+{
+    const std::string source =
+        "f() -> i32 { "
+        "  m = SortedMap<str,i32>() "
+        "  m.set(\"b\", 2)  m.set(\"a\", 1)  m.set(\"c\", 3) "
+        "  hit = if m.contains(\"a\") { 1 } else { 0 } "
+        "  m.remove(\"b\") "
+        "  return m.get(\"a\") + m.get(\"c\") + hit * 1000 + m.length * 100000 "
+        "} "
+        "x = f()"; // 1 + 3 + 1000 + 200000 = 201004
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 201004);
+}
+
 TEST("Interpreter add/contains/remove round-trip on a SortedSet<i32>")
 {
     const std::string source = "f() -> i32 { "
@@ -1070,6 +1123,36 @@ TEST("Interpreter add/contains/remove round-trip on a SortedSet<i32>")
                                "  removedDelta = if before { 10 } else { 0 } "
                                "  keptDelta = if after { 1 } else { 0 } "
                                "  return s.length * 1000 + removedDelta + keptDelta "
+                               "} "
+                               "x = f()"; // 1000 + 10 + 0 = 1010
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 1010);
+}
+
+TEST("Interpreter add/contains/remove round-trip on a SortedSet<char> - char is orderable by "
+     "codepoint, same as i32 (see docs/language/0044-char.md)")
+{
+    const std::string source = "f() -> i32 { "
+                               "  s = SortedSet<char>() "
+                               "  s.add('A')  s.add('B')  s.add('A') " // duplicate add is a no-op
+                               "  before = if s.contains('B') { 1 } else { 0 } "
+                               "  s.remove('B') "
+                               "  after = if s.contains('B') { 1 } else { 0 } "
+                               "  return s.length * 1000 + before * 10 + after "
+                               "} "
+                               "x = f()"; // 1000 + 10 + 0 = 1010
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 1010);
+}
+
+TEST("Interpreter add/contains/remove round-trip on a SortedSet<str> - str has a real "
+     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+{
+    const std::string source = "f() -> i32 { "
+                               "  s = SortedSet<str>() "
+                               "  s.add(\"a\")  s.add(\"b\")  s.add(\"a\") " // dup add is a no-op
+                               "  before = if s.contains(\"b\") { 1 } else { 0 } "
+                               "  s.remove(\"b\") "
+                               "  after = if s.contains(\"b\") { 1 } else { 0 } "
+                               "  return s.length * 1000 + before * 10 + after "
                                "} "
                                "x = f()"; // 1000 + 10 + 0 = 1010
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1010);
@@ -1271,6 +1354,40 @@ TEST("Interpreter Buffer.reserve grows .capacity without changing .length or con
     EXPECT_TRUE(std::get<std::int64_t>(run(capSource)) >= 64);
 }
 
+TEST("Interpreter Buffer.capacity tracks the compiled backend's own explicit doubling-growth "
+     "algorithm exactly (growBufferCapacity/ensureBufferCapacity) - not std::string::capacity(), "
+     "which reports an unrelated, implementation-defined SSO/growth threshold (a real bug found "
+     "via a byte-for-byte comparison against the compiled backend, not a hypothetical one)")
+{
+    // Starts at 1; appending "ab" (needed = 0 + 2 + 1 = 3) needs to grow -
+    // doubled (1*2=2) is still short of needed (3), so capacity becomes
+    // needed itself: 3.
+    EXPECT_EQ(std::get<std::int64_t>(run("b = Buffer()  a = b.append(\"ab\")  x = b.capacity")), 3);
+    // Appending "cdefgh" next (needed = 2 + 6 + 1 = 9) - doubled (3*2=6)
+    // is still short, so capacity becomes needed: 9.
+    EXPECT_EQ(std::get<std::int64_t>(run("b = Buffer() "
+                                         "a = b.append(\"ab\") "
+                                         "c = b.append(\"cdefgh\") "
+                                         "x = b.capacity")),
+              9);
+    // reserve(100) - unlike append, no +1 for a null terminator; needed
+    // (100) exceeds doubled (1*2=2), so capacity becomes needed: 100.
+    EXPECT_EQ(std::get<std::int64_t>(run("b = Buffer()  r = b.reserve(100)  x = b.capacity")), 100);
+    // clear() leaves capacity untouched - only length resets.
+    EXPECT_EQ(std::get<std::int64_t>(run("b = Buffer() "
+                                         "r = b.reserve(100) "
+                                         "c = b.clear() "
+                                         "x = b.capacity")),
+              100);
+    // finish() resets capacity back to 1, the same fresh state a brand
+    // new Buffer() starts at.
+    EXPECT_EQ(std::get<std::int64_t>(run("b = Buffer() "
+                                         "r = b.reserve(100) "
+                                         "t = b.finish() "
+                                         "x = b.capacity")),
+              1);
+}
+
 TEST("Interpreter Buffer.finish transfers content into a fresh String and resets the buffer to "
      "a fresh, empty, reusable state - not left dangling")
 {
@@ -1368,6 +1485,89 @@ TEST("Interpreter compares char values by codepoint ordering")
     EXPECT_EQ(std::get<bool>(run("x = 'A' >= 'A'")), true);
 }
 
+TEST("Interpreter evaluates i64 arithmetic and comparisons (see "
+     "docs/language/0005-type-system.md)")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 100i64 + 25i64")), 125);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 100i64 - 25i64")), 75);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 100i64 * 2i64")), 200);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 100i64 / 4i64")), 25);
+    EXPECT_EQ(std::get<bool>(run("x = 10i64 < 20i64")), true);
+    EXPECT_EQ(std::get<bool>(run("x = 10i64 == 10i64")), true);
+}
+
+TEST("Interpreter evaluates f64 arithmetic and comparisons with real floating-point semantics, "
+     "not truncating integer division")
+{
+    EXPECT_EQ(std::get<double>(run("x = 1.5 + 2.5")), 4.0);
+    EXPECT_EQ(std::get<double>(run("x = 5.0 - 1.5")), 3.5);
+    EXPECT_EQ(std::get<double>(run("x = 1.0 / 4.0")), 0.25);
+    EXPECT_EQ(std::get<bool>(run("x = 1.5 < 2.5")), true);
+}
+
+TEST("Interpreter's 'as' cast converts between i32/i64/f64 with real value semantics - "
+     "sign-extend/truncate between i32/i64 (a no-op at this interpreter's own Value level, "
+     "since both share the std::int64_t alternative), truncate-toward-zero from f64 to an "
+     "integer, and an exact int-to-float conversion")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 5 as i64")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(run("y = 100i64 x = y as i32")), 100);
+    EXPECT_EQ(std::get<double>(run("x = 5 as f64")), 5.0);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 9.7 as i32")), 9);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = 9.7 as i64")), 9);
+}
+
+TEST("Interpreter prints i64/f64 top-level bindings and print() arguments via a real \"%g\" "
+     "format for f64, matching LlvmIrEmitter's own @axea.f64.to_str exactly")
+{
+    EXPECT_EQ(toString(run("x = 100i64")), "100");
+    EXPECT_EQ(toString(run("x = 1.5")), "1.5");
+    EXPECT_EQ(toString(run("x = 4.0")), "4"); // %g trims a trailing ".0"
+}
+
+TEST("Interpreter PriorityQueue<f64>/PriorityQueue<i64> pop in ascending numeric order, "
+     "mirroring PriorityQueue<i32>'s own ordering")
+{
+    auto vars = runProgram("q = PriorityQueue<f64>() "
+                           "a = q.push(3.5) b = q.push(1.5) c = q.push(2.5) "
+                           "x = q.pop()");
+    EXPECT_EQ(std::get<double>(vars.at("x")), 1.5);
+}
+
+TEST("Interpreter compares str values by real lexicographic ordering (see "
+     "docs/language/0042-string.md)")
+{
+    EXPECT_EQ(std::get<bool>(run("x = \"apple\" < \"banana\"")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"banana\" < \"apple\"")), false);
+    EXPECT_EQ(std::get<bool>(run("x = \"apple\" <= \"apple\"")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"banana\" > \"apple\"")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"apple\" >= \"apple\"")), true);
+    // Shorter-is-less-when-a-strict-prefix, matching a textbook strcmp.
+    EXPECT_EQ(std::get<bool>(run("x = \"app\" < \"apple\"")), true);
+}
+
+TEST("Interpreter compares str/String values by real content, not identity, even for two "
+     "genuinely separately constructed values with equal content - fixes a pointer/shared_ptr-"
+     "identity bug this content check previously had (see docs/language/0042-string.md)")
+{
+    // A str slice result is a fresh, independently allocated buffer (see
+    // docs/language/0050-collection-join-and-slicing.md) - definitely not
+    // the same object as the "hello" literal below.
+    EXPECT_EQ(std::get<bool>(run("source = \"xxhelloxx\"  sliced = source[2..7]  "
+                                 "x = sliced == \"hello\"")),
+              true);
+    EXPECT_EQ(std::get<bool>(run("source = \"xxhelloxx\"  sliced = source[2..7]  "
+                                 "x = sliced != \"world\"")),
+              true);
+    // Two separately-constructed String() instances with equal content -
+    // previously compared unequal (shared_ptr identity), the same class of
+    // bug the str/i8* case above had at the LLVM-backend level.
+    EXPECT_EQ(std::get<bool>(run("a = String(\"hello\")  b = String(\"hello\")  x = a == b")),
+              true);
+    EXPECT_EQ(std::get<bool>(run("a = String(\"hello\")  b = String(\"world\")  x = a != b")),
+              true);
+}
+
 TEST("Interpreter passes a char through a function parameter and return value unchanged")
 {
     const std::string source = "identity(c: char) -> char { return c } "
@@ -1399,6 +1599,25 @@ TEST("Interpreter slices a str with a bounded, open-start, open-end, and fully-o
     EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[5..7]")), "08");
     EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[8..]")), "18");
     EXPECT_EQ(toString(run("date = \"2026-08-18\"  x = date[..]")), "2026-08-18");
+}
+
+TEST("Interpreter indexes a str/String by real Unicode codepoint, not byte offset - a "
+     "multi-byte character correctly counts as one index step (see "
+     "docs/language/0047-unicode.md)")
+{
+    EXPECT_EQ(toString(run("s = \"hello\"  x = s[0]")), "h");
+    EXPECT_EQ(toString(run("s = \"hello\"  x = s[4]")), "o");
+    // "aébc" - 'é' is a 2-byte UTF-8 sequence but a single codepoint, so
+    // index 2 ('c') must land right after it, not one byte short.
+    EXPECT_EQ(toString(run("s = \"aébc\"  x = s[1]")), "é");
+    EXPECT_EQ(toString(run("s = \"aébc\"  x = s[2]")), "b");
+    EXPECT_EQ(toString(run("s = String(\"world\")  x = s[0]")), "w");
+}
+
+TEST("Interpreter throws on an out-of-range str/String index")
+{
+    EXPECT_THROWS(run("s = \"hi\"  x = s[10]"));
+    EXPECT_THROWS(run("s = \"hi\"  x = s[0 - 1]"));
 }
 
 TEST("Interpreter slices a String, str-coerced the same way .append's own argument is")
@@ -1444,40 +1663,65 @@ TEST("Interpreter slices using runtime-computed bounds, not just integer literal
     EXPECT_EQ(toString(run(source)), "2026");
 }
 
-TEST("Interpreter parses str to i32, including a negative sign")
+TEST("Interpreter parses str to i32, including a negative sign - unwrap_or reads Optional<i32>'s "
+     "payload out (see docs/language/0052-optional.md)")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("x = \"42\".parse<i32>()")), 42);
-    EXPECT_EQ(std::get<std::int64_t>(run("x = \"-17\".parse<i32>()")), -17);
-    EXPECT_EQ(std::get<std::int64_t>(run("x = \"0\".parse<i32>()")), 0);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"42\".parse<i32>().unwrap_or(0)")), 42);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"-17\".parse<i32>().unwrap_or(0)")), -17);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"0\".parse<i32>().unwrap_or(1)")), 0);
 }
 
-TEST("Interpreter's parse<i32> yields 0 for invalid input - a defined fallback, not an error, "
-     "matching the compiled backend's own identical choice")
+TEST("Interpreter's parse<i32> yields None for invalid input - a real failure, not a silently "
+     "returned fallback, matching the compiled backend's own identical choice")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("x = \"abc\".parse<i32>()")), 0);
-    EXPECT_EQ(std::get<std::int64_t>(run("x = \"\".parse<i32>()")), 0);
+    EXPECT_EQ(std::get<bool>(run("x = \"abc\".parse<i32>().is_none()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"\".parse<i32>().is_none()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"12abc\".parse<i32>().is_none()")), true);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"abc\".parse<i32>().unwrap_or(99)")), 99);
 }
 
-TEST("Interpreter parses str to bool, requiring an exact 'true' match")
+TEST("Interpreter parses str to i64, including a value that genuinely exceeds i32's own "
+     "range (see docs/language/0051-numeric-widening.md)")
 {
-    EXPECT_EQ(std::get<bool>(run("x = \"true\".parse<bool>()")), true);
-    EXPECT_EQ(std::get<bool>(run("x = \"false\".parse<bool>()")), false);
-    EXPECT_EQ(std::get<bool>(run("x = \"TRUE\".parse<bool>()")), false);
-    EXPECT_EQ(std::get<bool>(run("x = \"trueX\".parse<bool>()")), false);
-    EXPECT_EQ(std::get<bool>(run("x = \"\".parse<bool>()")), false);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"123456789012\".parse<i64>().unwrap_or(0)")),
+              123456789012);
+    EXPECT_EQ(std::get<std::int64_t>(run("x = \"-999\".parse<i64>().unwrap_or(0)")), -999);
+}
+
+TEST("Interpreter parses str to f64 via a real strtod call, matching LlvmIrEmitter's own "
+     "@axea.parse.f64 exactly")
+{
+    EXPECT_EQ(std::get<double>(run("x = \"3.14159\".parse<f64>().unwrap_or(0.0)")), 3.14159);
+    EXPECT_EQ(std::get<double>(run("x = \"-2.5\".parse<f64>().unwrap_or(0.0)")), -2.5);
+}
+
+TEST("Interpreter's parse<f64> yields None for invalid input - the same real-failure contract "
+     "parse<i32>/parse<bool> already established")
+{
+    EXPECT_EQ(std::get<bool>(run("x = \"not_a_number\".parse<f64>().is_none()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"3.14abc\".parse<f64>().is_none()")), true);
+}
+
+TEST("Interpreter parses str to bool, requiring an exact 'true'/'false' match, else None")
+{
+    EXPECT_EQ(std::get<bool>(run("x = \"true\".parse<bool>().unwrap_or(false)")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"false\".parse<bool>().unwrap_or(true)")), false);
+    EXPECT_EQ(std::get<bool>(run("x = \"TRUE\".parse<bool>().is_none()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"trueX\".parse<bool>().is_none()")), true);
+    EXPECT_EQ(std::get<bool>(run("x = \"\".parse<bool>().is_none()")), true);
 }
 
 TEST("Interpreter parses a str slice result directly - date[..4].parse<i32>()")
 {
     const std::string source = "date = \"2026-08-18\" "
-                               "x = date[..4].parse<i32>()";
+                               "x = date[..4].parse<i32>().unwrap_or(0)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2026);
 }
 
 TEST("Interpreter parses a String, str-coerced the same way .append's own argument is")
 {
     const std::string source = "s = String(\"123\") "
-                               "x = s.parse<i32>()";
+                               "x = s.parse<i32>().unwrap_or(0)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 123);
 }
 
@@ -1526,4 +1770,254 @@ TEST("Interpreter counts multi-byte (4-byte) codepoints correctly - three rocket
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("len")), 3);
     EXPECT_EQ(std::get<std::int64_t>(results.at("x")), 12);
+}
+
+TEST("Interpreter's hand-implemented extern 'puts' writes its argument plus a trailing newline "
+     "to stdout, matching real libc puts() - the one extern name the interpreter can actually "
+     "execute (see docs/language/0048-ffi.md)")
+{
+    const std::string source = "extern c puts(text: cstr) "
+                               "s = \"hello\" "
+                               "called = puts(s.to_cstr())";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "hello\n");
+}
+
+TEST("Interpreter's .to_cstr() is a pure identity - cstr and str share the same underlying "
+     "representation")
+{
+    EXPECT_EQ(toString(run("x = \"hello\".to_cstr()")), "hello");
+}
+
+TEST("Interpreter's .to_cstr() on a String returns its current content, str-coerced the same "
+     "way .append's own argument is")
+{
+    const std::string source = "s = String(\"hello\") "
+                               "x = s.to_cstr()";
+    EXPECT_EQ(toString(run(source)), "hello");
+}
+
+TEST("Interpreter throws a clear error for an extern function with no hand-implemented "
+     "behavior, unlike the compiled backend which can link against any correctly-declared "
+     "extern c symbol")
+{
+    EXPECT_THROWS(run("extern c getpid() -> i32  x = getpid()"));
+}
+
+TEST("Interpreter's hand-implemented extern 'abs' matches real libc abs()")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("extern c abs(x: i32) -> i32  x = abs(0 - 42)")), 42);
+    EXPECT_EQ(std::get<std::int64_t>(run("extern c abs(x: i32) -> i32  x = abs(7)")), 7);
+}
+
+TEST("Interpreter's print() writes space-separated arguments plus a trailing newline "
+     "(see docs/language/Axea_Printing_Formatting.md)")
+{
+    const std::string source = "run() -> i32 { print(\"hello\", 1, true) return 0 } r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "hello 1 true\n");
+}
+
+TEST("Interpreter's write() writes space-separated arguments with no trailing newline")
+{
+    const std::string source = "run() -> i32 { write(\"a\") write(\"b\") return 0 } r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "ab");
+}
+
+TEST("Interpreter's print() with zero arguments writes just a newline")
+{
+    const std::string source = "run() -> i32 { print() return 0 } r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "\n");
+}
+
+TEST("Interpreter actually executes a bare top-level print(...)/write(...) call - not just "
+     "parses it - via the new ExprStmt case in Interpreter::run's own top-level item loop "
+     "(see docs/language/0049-printing-formatting.md's own Parsing follow-up)")
+{
+    const std::string source = "write(\"a\") print(\"b\")";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "ab\n");
+}
+
+TEST("Interpreter's print(...)/write(...) and interpolation now accept an Array/List/struct "
+     "argument, via the TypeChecker's own widened isTextRepresentable (see "
+     "docs/language/0054-collection-printing.md) - toString() itself needed no changes, "
+     "already fully general")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "run() -> i32 { "
+                               "  arr = [1, 2, 3] "
+                               "  p = Point { x: 5 } "
+                               "  print(arr, p) "
+                               "  s = \"arr={arr} p={p}\" "
+                               "  print(s) "
+                               "  return 0 "
+                               "} "
+                               "r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "[1, 2, 3] Point { x: 5 }\narr=[1, 2, 3] p=Point { x: 5 }\n");
+}
+
+TEST("Interpreter evaluates a string interpolation expression by concatenating each piece's "
+     "toString(), reusing the same generic stringifier every other printable type already has")
+{
+    const std::string source = "name = \"Ada\" age = 30 "
+                               "x = \"{name} is {age} years old\"";
+    EXPECT_EQ(toString(run(source)), "Ada is 30 years old");
+}
+
+TEST("Interpreter evaluates an arithmetic expression inside an interpolation span")
+{
+    EXPECT_EQ(toString(run("age = 30 x = \"next year: {age + 1}\"")), "next year: 31");
+}
+
+TEST("Interpreter evaluates a string interpolation span containing its own nested string "
+     "literal (e.g. `.join(\",\")`'s own separator argument) - see "
+     "docs/language/0049-printing-formatting.md's own follow-up")
+{
+    const std::string source = "numbers: List<i32> = List<i32>() "
+                               "a = numbers.push(1) "
+                               "b = numbers.push(2) "
+                               "x = \"nums: {numbers.join(\",\")}\"";
+    EXPECT_EQ(toString(run(source)), "nums: 1,2");
+}
+
+TEST("Interpreter treats '{{' and '}}' as literal escaped braces in an interpolated string")
+{
+    EXPECT_EQ(toString(run("age = 30 x = \"{{escaped}} and {age}\"")), "{escaped} and 30");
+}
+
+TEST("Interpreter interpolates bool and char values via the same UTF-8-aware toString() every "
+     "other printable type uses")
+{
+    EXPECT_EQ(toString(run("ok = true x = \"bool: {ok}\"")), "bool: true");
+    EXPECT_EQ(toString(run("c = 'z' x = \"char: {c}\"")), "char: z");
+}
+
+TEST("Interpreter's print()/write() and interpolation both stringify a plain str literal with no "
+     "quotes added")
+{
+    const std::string source = "run() -> i32 { print(\"plain\") return 0 } r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "plain\n");
+}
+
+TEST("Interpreter slices a fixed-size array into a fresh List<T> - indexing and .length both "
+     "work on the result, same as any other List (see "
+     "docs/language/0050-collection-join-and-slicing.md)")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = [10, 20, 30, 40] "
+                               "  sliced = numbers[1..3] "
+                               "  return sliced[0] + sliced[1] + sliced.length "
+                               "} "
+                               "x = f()"; // 20 + 30 + 2 = 52
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 52);
+}
+
+TEST("Interpreter slices a List<T> into another fresh List<T>, unaffected by later mutation of "
+     "the source")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = List<i32>() "
+                               "  numbers.push(1) "
+                               "  numbers.push(2) "
+                               "  numbers.push(3) "
+                               "  sliced = numbers[..] "
+                               "  numbers.push(4) "
+                               "  return sliced.length "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
+}
+
+TEST("Interpreter defaults a missing slice start to 0 and a missing end to the collection's own "
+     "length, matching str slicing's own precedent")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = [1, 2, 3] "
+                               "  whole = numbers[..] "
+                               "  return whole.length "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
+}
+
+TEST("Interpreter throws on an out-of-bounds Array/List slice range, matching str slicing's own "
+     "runtime bounds check")
+{
+    EXPECT_THROWS(runProgram("f() -> i32 { numbers = [1, 2, 3] bad = numbers[1..10] return "
+                             "bad.length } x = f()"));
+}
+
+TEST("Interpreter's .join(separator) stringifies each element via the same generic toString() "
+     "print()/interpolation already use, joined with separator")
+{
+    const std::string source = "f() -> String { "
+                               "  numbers = [1, 2, 3] "
+                               "  return numbers.join(\",\") "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(toString(run(source)), "1,2,3");
+}
+
+TEST("Interpreter's .join() on an empty Array/List returns an empty String")
+{
+    const std::string source = "f() -> i32 { "
+                               "  numbers = [1, 2, 3] "
+                               "  empty = numbers[2..2] "
+                               "  joined = empty.join(\",\") "
+                               "  return joined.length "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
+}
+
+TEST("Interpreter's .join() works on a List<str>, joining each string with the separator")
+{
+    const std::string source = "f() -> String { "
+                               "  names = List<str>() "
+                               "  names.push(\"ada\") "
+                               "  names.push(\"grace\") "
+                               "  return names.join(\", \") "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(toString(run(source)), "ada, grace");
 }

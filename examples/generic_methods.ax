@@ -1,10 +1,10 @@
-extractYear(date: str) -> i32
+extractYear(date: str) -> Optional<i32>
 {
     return date[..4].parse<i32>()
 }
 
 date = "2026-08-18"
-year = extractYear(date)
+year = extractYear(date).unwrap_or(0)
 
 count = "42".parse<i32>()
 negative = "-17".parse<i32>()
@@ -15,3 +15,7 @@ disabled = "false".parse<bool>()
 
 s = String("123")
 fromString = s.parse<i32>()
+
+bigCount = "123456789012".parse<i64>()
+pi = "3.14159".parse<f64>()
+invalidFloat = "abc".parse<f64>()

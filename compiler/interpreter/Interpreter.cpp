@@ -1,25 +1,14 @@
 #include "interpreter/Interpreter.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <stdexcept>
 
 namespace
 {
-    // Ascending min-heap comparator for PriorityQueueInstance (see
-    // docs/language/0039-priority-queues.md) - T is i32 only this phase, so
-    // this compares the std::int64_t payload directly rather than needing a
-    // generic Value comparator. std::push_heap/std::pop_heap are max-heaps
-    // by their own default (comparator returns true when the *first*
-    // argument is lower priority); reversing the comparison (">" instead of
-    // "<") makes the smallest element the one that keeps rising to the
-    // front, exactly the "ascending, smallest-first" choice this phase
-    // makes at the LLVM-backend level too.
-    bool priorityQueueLess(const Value& a, const Value& b)
-    {
-        return std::get<std::int64_t>(a) > std::get<std::int64_t>(b);
-    }
-
     // Also accepts char32_t (returning its own codepoint numerically) -
     // used both for real i32 arithmetic and for char's own ordering
     // comparisons (see docs/language/0044-char.md), which share this same
@@ -40,6 +29,22 @@ namespace
         throw std::runtime_error("expected an integer operand");
     }
 
+    // Ascending min-heap comparator for PriorityQueueInstance (see
+    // docs/language/0039-priority-queues.md) - reuses ValueLess (declared
+    // in Interpreter.hpp, defined further down this file), the same
+    // TypeChecker::isOrderableKind-scoped comparator SortedMap<K,V>/
+    // SortedSet<T> use, so str elements order correctly here too, not just
+    // i32/char. std::push_heap/std::pop_heap are max-heaps by their own
+    // default (comparator returns true when the *first* argument is lower
+    // priority); reversing the comparison (`b < a` instead of `a < b`)
+    // makes the smallest element the one that keeps rising to the front,
+    // exactly the "ascending, smallest-first" choice this phase makes at
+    // the LLVM-backend level too.
+    bool priorityQueueLess(const Value& a, const Value& b)
+    {
+        return ValueLess{}(b, a);
+    }
+
     // Resolves a str-coercible Value (a bare str, or a String - see
     // TypeChecker::isStrCoercible's identical rule at the type-checking
     // layer, docs/language/0042-string.md) down to its raw content. Always
@@ -56,6 +61,20 @@ namespace
             return (*string)->data;
         }
         throw std::runtime_error("expected a str or String operand");
+    }
+
+    // True for exactly the two Value alternatives asStrContent above
+    // accepts - used by BinaryExpr's own EqualEqual/BangEqual case to
+    // route str/String through real content equality (asStrContent),
+    // instead of std::variant's own defaulted `==`, which would compare a
+    // String's `shared_ptr<StringInstance>` by pointer identity rather
+    // than the bytes it owns (a bare `str`'s own `std::string` alternative
+    // already compares by value, so this only actually changes String's
+    // behavior - see docs/language/0042-string.md).
+    bool isStrCoercibleValue(const Value& value)
+    {
+        return std::holds_alternative<std::string>(value) ||
+               std::holds_alternative<std::shared_ptr<StringInstance>>(value);
     }
 
     // A pointer into an ArrayInstance's, SliceInstance's, or ListInstance's
@@ -100,6 +119,21 @@ namespace
             return *boolean;
         }
         throw std::runtime_error("expected a boolean condition");
+    }
+
+    // Mirrors ensureBufferCapacity's own exact doubling-growth rule bit
+    // for bit (see docs/language/0043-buffer.md), so `Buffer.capacity`
+    // agrees between the interpreter and the compiled backend - not
+    // `std::string::capacity()`, which reports libstdc++'s own
+    // implementation-defined growth/SSO threshold, a genuinely different
+    // (and, until this fix, silently wrong) quantity.
+    void growBufferCapacity(BufferInstance& buffer, std::int64_t needed)
+    {
+        if (needed > buffer.capacity)
+        {
+            const std::int64_t doubled = buffer.capacity * 2;
+            buffer.capacity = needed > doubled ? needed : doubled;
+        }
     }
 
     // Thrown by `return` and caught at the function-call boundary; deliberately
@@ -179,6 +213,69 @@ namespace
         }
         return count;
     }
+
+    // Decodes the codepoint at Unicode codepoint index `index` in a UTF-8
+    // byte sequence (`s[i]` - see docs/language/0047-unicode.md) - walks
+    // byte-by-byte, skipping continuation bytes the same way
+    // countCodepoints does above, but stops at the target codepoint and
+    // decodes it using the identical bit formulas
+    // Parser::decodeCharLiteral uses for a char literal (same lead-byte-
+    // length detection, same continuation-byte accumulation via `(cp << 6)
+    // | (byte & 0x3F)`) - just over runtime string data instead of a
+    // compile-time literal, and with no overlong/surrogate/range
+    // validation (that's a literal-only concern; real string data is
+    // presumed already-valid UTF-8). Throws if `index` is out of range,
+    // matching every other collection's own "interpreter checks, compiled
+    // code doesn't" precedent (see docs/language/0031-arrays.md).
+    char32_t codepointAt(const std::string& text, std::int64_t index)
+    {
+        if (index < 0)
+        {
+            throw std::runtime_error("string index out of range");
+        }
+        std::size_t bytePos = 0;
+        std::int64_t codepointIndex = 0;
+        while (bytePos < text.size())
+        {
+            const unsigned char lead = static_cast<unsigned char>(text[bytePos]);
+            std::size_t length = 0;
+            std::uint32_t codepoint = 0;
+            if ((lead & 0x80) == 0x00)
+            {
+                length = 1;
+                codepoint = lead;
+            }
+            else if ((lead & 0xE0) == 0xC0)
+            {
+                length = 2;
+                codepoint = lead & 0x1F;
+            }
+            else if ((lead & 0xF0) == 0xE0)
+            {
+                length = 3;
+                codepoint = lead & 0x0F;
+            }
+            else
+            {
+                length = 4;
+                codepoint = lead & 0x07;
+            }
+
+            if (codepointIndex == index)
+            {
+                for (std::size_t i = 1; i < length; ++i)
+                {
+                    const unsigned char cont = static_cast<unsigned char>(text[bytePos + i]);
+                    codepoint = (codepoint << 6) | (cont & 0x3F);
+                }
+                return static_cast<char32_t>(codepoint);
+            }
+
+            bytePos += length;
+            ++codepointIndex;
+        }
+        throw std::runtime_error("string index out of range");
+    }
 } // namespace
 
 std::string toString(const Value& value)
@@ -186,6 +283,16 @@ std::string toString(const Value& value)
     if (const auto* integer = std::get_if<std::int64_t>(&value))
     {
         return std::to_string(*integer);
+    }
+    if (const auto* floating = std::get_if<double>(&value))
+    {
+        // "%g" (not "%f") - matches LlvmIrEmitter's own @axea.f64.to_str,
+        // which also formats via a real sprintf("%g", ...) call, so
+        // interpreted and compiled output stay character-for-character
+        // identical (see docs/language/0005-type-system.md).
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%g", *floating);
+        return buf;
     }
     if (const auto* boolean = std::get_if<bool>(&value))
     {
@@ -210,6 +317,16 @@ std::string toString(const Value& value)
     {
         // Bare content, same as String above (see docs/language/0043-buffer.md).
         return (*buffer)->data;
+    }
+    if (const auto* optional = std::get_if<std::shared_ptr<OptionalInstance>>(&value))
+    {
+        // "Some(<payload>)"/"None" (see docs/language/0052-optional.md) -
+        // matches LlvmIrEmitter's own @axea.optional.<id>.to_str exactly
+        // (same text, verified via the usual diff-against-compiled-output
+        // discipline), so top-level printing of a raw Optional<T> binding
+        // agrees byte-for-byte between the interpreter and the compiled
+        // backend.
+        return (*optional)->hasValue ? "Some(" + toString((*optional)->value) + ")" : "None";
     }
     if (const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&value))
     {
@@ -529,6 +646,28 @@ bool ValueEq::operator()(const Value& a, const Value& b) const
     return false; // SliceInstance/MapInstance/SetInstance/monostate: never valid keys
 }
 
+bool ValueLess::operator()(const Value& a, const Value& b) const
+{
+    // str compares by its own real std::string `<` (lexicographic byte
+    // order); f64 by its own real `double` `<` (IEEE 754 ordered compare -
+    // see docs/language/0005-type-system.md); i32/i64/char all reduce to
+    // `asInt` - the same numeric unification `asInt` already provides for
+    // arithmetic/equality elsewhere in this file (see
+    // docs/language/0044-char.md). Checking only `a`'s own alternative is
+    // safe: TypeChecker::isOrderableKind already guarantees both sides are
+    // the same orderable kind before a well-typed program's Value ever
+    // reaches here.
+    if (const auto* str = std::get_if<std::string>(&a))
+    {
+        return *str < std::get<std::string>(b);
+    }
+    if (const auto* f = std::get_if<double>(&a))
+    {
+        return *f < std::get<double>(b);
+    }
+    return asInt(a) < asInt(b);
+}
+
 Environment::Environment(Environment* parent)
     : parent_(parent)
 {
@@ -600,6 +739,13 @@ void Interpreter::run(const Program& program)
         if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             execute(*assignment, globalEnv_);
+        }
+        else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
+        {
+            // A bare top-level call kept for its side effect
+            // (`print("hi")`, `write("...")`) - see
+            // Parser::looksLikeFunctionDecl's own doc comment.
+            execute(*exprStmt, globalEnv_);
         }
     }
 }
@@ -766,6 +912,19 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return integer->value;
     }
 
+    // i32 and i64 share the same std::int64_t Value alternative (see
+    // Interpreter.hpp) - this interpreter never distinguishes their width
+    // at runtime, only TypeChecker does.
+    if (const auto* int64Expr = dynamic_cast<const Int64Expr*>(&expr))
+    {
+        return int64Expr->value;
+    }
+
+    if (const auto* floatExpr = dynamic_cast<const FloatExpr*>(&expr))
+    {
+        return floatExpr->value;
+    }
+
     if (const auto* boolean = dynamic_cast<const BoolExpr*>(&expr))
     {
         return boolean->value;
@@ -779,6 +938,24 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     if (const auto* character = dynamic_cast<const CharExpr*>(&expr))
     {
         return static_cast<char32_t>(character->codepoint);
+    }
+
+    // `"Hello {name}"` (see docs/language/Axea_Printing_Formatting.md) -
+    // unlike the LLVM backend (which desugars into real Buffer IR
+    // instructions to stay consistent with how the compiled backend
+    // would want to implement it efficiently), the interpreter just
+    // concatenates directly: each piece's own content, via the exact
+    // same `toString` free function every other print path here already
+    // shares, into one std::string, wrapped in a fresh StringInstance -
+    // matching TypeChecker's own "the result is an owned String" rule.
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        std::string content;
+        for (const auto& piece : interpolated->pieces)
+        {
+            content += piece.expr ? toString(evaluate(*piece.expr, env)) : piece.literalText;
+        }
+        return std::make_shared<StringInstance>(StringInstance{std::move(content)});
     }
 
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
@@ -843,10 +1020,52 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
+        // `print`/`write` (see docs/language/Axea_Printing_Formatting.md)
+        // - compiler builtins, checked before the ordinary functions_
+        // lookup below (TypeChecker::registerSignatures already
+        // guarantees no user declaration can shadow either name). Each
+        // argument stringified via the exact same `toString` free
+        // function every other print path in this interpreter already
+        // uses (top-level bindings, struct/array/List element printing),
+        // so this needed no new stringification logic at all - unlike
+        // the LLVM backend, which needed dedicated i32/bool-to-string
+        // runtime routines since it has no equivalent of a single
+        // generic toString to fall back on.
+        if (call->callee == "print" || call->callee == "write")
+        {
+            for (std::size_t i = 0; i < call->arguments.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    std::cout << ' ';
+                }
+                std::cout << toString(evaluate(*call->arguments[i], env));
+            }
+            if (call->callee == "print")
+            {
+                std::cout << '\n';
+            }
+            return Value{std::monostate{}};
+        }
+
         const auto it = functions_.find(call->callee);
         if (it == functions_.end())
         {
-            throw std::runtime_error("undefined function: " + call->callee);
+            // extern c functions (see docs/language/0048-ffi.md) - the
+            // interpreter can't dynamically link against arbitrary C
+            // symbols, so only a small, explicit allowlist of well-known
+            // libc functions is hand-implemented (callExtern below),
+            // matching their real observable behavior exactly - verified
+            // directly against the compiled backend, which links against
+            // the genuine libc symbol. Any other extern name is a clear,
+            // honest runtime error rather than silently doing nothing.
+            std::vector<Value> externArgs;
+            externArgs.reserve(call->arguments.size());
+            for (const auto& argument : call->arguments)
+            {
+                externArgs.push_back(evaluate(*argument, env));
+            }
+            return callExtern(call->callee, externArgs);
         }
 
         std::vector<Value> args;
@@ -899,21 +1118,28 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     {
         auto objectValue = evaluate(*methodCall->object, env);
 
-        // `.parse<T>()` (see docs/language/0046-generic-methods.md) - the
-        // first generic method call in this codebase, checked before the
-        // object-type-keyed dispatch chain below for the same reason
-        // TypeChecker checks it first. Mirrors LlvmIrEmitter's own
-        // @axea.parse.i32/@axea.parse.bool hand-rolled logic exactly (same
-        // leading-'-' handling, same digit loop, same "invalid input
-        // yields a harmless default" fallback; same "must be exactly
-        // 'true'" bool rule) so the interpreter and the compiled backend
-        // agree byte-for-byte, verified directly via the usual
-        // diff-against-compiled-output discipline.
+        // `.parse<T>()` (see docs/language/0046-generic-methods.md and
+        // docs/language/0052-optional.md) - the first generic method call
+        // in this codebase, checked before the object-type-keyed dispatch
+        // chain below for the same reason TypeChecker checks it first.
+        // Returns Optional<T>, not T directly, with real success/failure
+        // detection (invalid input is a genuine None now, not a silently-
+        // returned fallback) - mirrors LlvmIrEmitter's own
+        // @axea.parse.i32/@axea.parse.bool logic exactly (same leading-'-'
+        // handling, same digit loop, same full-string-consumption success
+        // rule, same "must be exactly 'true'/'false'" bool rule) so the
+        // interpreter and the compiled backend agree byte-for-byte,
+        // verified directly via the usual diff-against-compiled-output
+        // discipline.
         if (methodCall->method == "parse")
         {
             const std::string content = asStrContent(objectValue);
-            if (methodCall->typeArgument == "i32")
+            if (methodCall->typeArgument == "i32" || methodCall->typeArgument == "i64")
             {
+                // Both share the interpreter's own std::int64_t Value
+                // alternative (see docs/language/0051-numeric-widening.md)
+                // - the identical hand-rolled digit loop parses either;
+                // only TypeChecker distinguishes their width.
                 std::size_t idx = 0;
                 bool negative = false;
                 if (!content.empty() && content[0] == '-')
@@ -921,19 +1147,102 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                     negative = true;
                     idx = 1;
                 }
+                std::size_t digitStart = idx;
                 std::int64_t acc = 0;
                 while (idx < content.size() && content[idx] >= '0' && content[idx] <= '9')
                 {
                     acc = acc * 10 + (content[idx] - '0');
                     ++idx;
                 }
-                return negative ? -acc : acc;
+                const bool ok = idx > digitStart && idx == content.size();
+                const Value result = negative ? -acc : acc;
+                return std::make_shared<OptionalInstance>(
+                    OptionalInstance{ok, ok ? result : Value{std::monostate{}}});
+            }
+            if (methodCall->typeArgument == "f64")
+            {
+                // A real strtod call, mirroring LlvmIrEmitter's own
+                // @axea.parse.f64 exactly (real libc decimal-to-binary
+                // parsing, not a hand-rolled algorithm - see
+                // registerParseRuntime's own comment for why) - both
+                // backends agree byte-for-byte since both ultimately call
+                // the identical underlying libc routine. `endptr` (unused
+                // before Optional<T> existed) now drives real success
+                // detection: ok iff something was consumed *and* the
+                // entire string was consumed, matching @axea.parse.f64's
+                // own identical rule.
+                char* endptr = nullptr;
+                const double result = std::strtod(content.c_str(), &endptr);
+                const bool ok =
+                    endptr != content.c_str() && endptr == content.c_str() + content.size();
+                return std::make_shared<OptionalInstance>(
+                    OptionalInstance{ok, ok ? Value{result} : Value{std::monostate{}}});
             }
             if (methodCall->typeArgument == "bool")
             {
-                return content == "true";
+                if (content == "true")
+                {
+                    return std::make_shared<OptionalInstance>(OptionalInstance{true, Value{true}});
+                }
+                if (content == "false")
+                {
+                    return std::make_shared<OptionalInstance>(OptionalInstance{true, Value{false}});
+                }
+                return std::make_shared<OptionalInstance>(
+                    OptionalInstance{false, Value{std::monostate{}}});
             }
             throw std::runtime_error("parse<" + methodCall->typeArgument + "> is not supported");
+        }
+
+        // `.to_cstr()` (see docs/language/0048-ffi.md) - a pure identity:
+        // cstr and str share the exact same interpreter representation
+        // (a bare std::string), so this is just asStrContent's own
+        // existing str-coercion, with no further transformation needed.
+        if (methodCall->method == "to_cstr")
+        {
+            return asStrContent(objectValue);
+        }
+
+        // `.unwrap_or(default)`/`.is_some()`/`.is_none()` (see
+        // docs/language/0052-optional.md) - the non-propagating half of
+        // Optional<T>'s API, checked here for the same reason "parse"/
+        // "to_cstr" above are (TypeChecker checks them before the
+        // per-kind dispatch chain too).
+        if (methodCall->method == "unwrap_or")
+        {
+            const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(objectValue);
+            return optional->hasValue ? optional->value
+                                      : evaluate(*methodCall->arguments.front(), env);
+        }
+        if (methodCall->method == "is_some" || methodCall->method == "is_none")
+        {
+            const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(objectValue);
+            return methodCall->method == "is_some" ? optional->hasValue : !optional->hasValue;
+        }
+
+        // `.join(separator)` (see
+        // docs/language/0050-collection-join-and-slicing.md) - applies
+        // across both Array and List (asIndexable, checked before the
+        // per-kind dispatch chain below, same placement reasoning as
+        // "parse"/"to_cstr" above). Reuses the interpreter's own generic
+        // toString(), exactly like print()/interpolation already do -
+        // TypeChecker::isTextRepresentable already guarantees every
+        // element here is one toString() already handles.
+        if (methodCall->method == "join")
+        {
+            auto indexable = asIndexable(objectValue);
+            const std::string separator =
+                asStrContent(evaluate(*methodCall->arguments.front(), env));
+            std::string result;
+            for (std::size_t i = 0; i < indexable->length; ++i)
+            {
+                if (i > 0)
+                {
+                    result += separator;
+                }
+                result += toString((*indexable->elements)[i]);
+            }
+            return std::make_shared<StringInstance>(StringInstance{std::move(result)});
         }
 
         if (const auto* list = std::get_if<std::shared_ptr<ListInstance>>(&objectValue))
@@ -1224,14 +1533,14 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         {
             if (methodCall->method == "set")
             {
-                const std::int64_t key = asInt(evaluate(*methodCall->arguments[0], env));
+                Value key = evaluate(*methodCall->arguments[0], env);
                 Value value = evaluate(*methodCall->arguments[1], env);
-                (*sortedMap)->entries[key] = std::move(value);
+                (*sortedMap)->entries[std::move(key)] = std::move(value);
                 return Value{std::monostate{}};
             }
             if (methodCall->method == "get")
             {
-                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                const Value key = evaluate(*methodCall->arguments.front(), env);
                 const auto it = (*sortedMap)->entries.find(key);
                 if (it == (*sortedMap)->entries.end())
                 {
@@ -1241,12 +1550,12 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             }
             if (methodCall->method == "contains")
             {
-                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                const Value key = evaluate(*methodCall->arguments.front(), env);
                 return (*sortedMap)->entries.contains(key);
             }
             if (methodCall->method == "remove")
             {
-                const std::int64_t key = asInt(evaluate(*methodCall->arguments.front(), env));
+                const Value key = evaluate(*methodCall->arguments.front(), env);
                 (*sortedMap)->entries.erase(key);
                 return Value{std::monostate{}};
             }
@@ -1261,18 +1570,18 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         {
             if (methodCall->method == "add")
             {
-                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
-                (*sortedSet)->elements.insert(value);
+                Value value = evaluate(*methodCall->arguments.front(), env);
+                (*sortedSet)->elements.insert(std::move(value));
                 return Value{std::monostate{}};
             }
             if (methodCall->method == "contains")
             {
-                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
+                const Value value = evaluate(*methodCall->arguments.front(), env);
                 return (*sortedSet)->elements.contains(value);
             }
             if (methodCall->method == "remove")
             {
-                const std::int64_t value = asInt(evaluate(*methodCall->arguments.front(), env));
+                const Value value = evaluate(*methodCall->arguments.front(), env);
                 (*sortedSet)->elements.erase(value);
                 return Value{std::monostate{}};
             }
@@ -1295,34 +1604,55 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         }
 
         // Buffer (see docs/language/0043-buffer.md) - a mutable,
-        // amortized-growth text-construction type. std::string already
-        // does its own amortized growth internally, so
-        // append/append_line/clear/reserve/finish all just ride its
-        // existing `+=`/`clear`/`reserve` machinery directly - the real
-        // conditional-growth branch the LLVM backend hand-emits
-        // (emitBufferAppend/ensureBufferCapacity) has no interpreter-side
-        // equivalent to write, since std::string already provides it.
+        // amortized-growth text-construction type. `data` itself just
+        // rides std::string's own `+=`/`clear` machinery (content is
+        // content, regardless of which growth algorithm produced the
+        // storage behind it) - but `capacity` is tracked explicitly,
+        // via growBufferCapacity, mirroring ensureBufferCapacity's own
+        // doubling rule bit for bit rather than reading
+        // `data.capacity()` (previously the case, and wrong - see
+        // BufferInstance::capacity's own comment for why).
         if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&objectValue))
         {
             if (methodCall->method == "append")
             {
-                (*buffer)->data += asStrContent(evaluate(*methodCall->arguments.front(), env));
+                const std::string text =
+                    asStrContent(evaluate(*methodCall->arguments.front(), env));
+                growBufferCapacity(
+                    **buffer, static_cast<std::int64_t>((*buffer)->data.size() + text.size() + 1));
+                (*buffer)->data += text;
                 return Value{std::monostate{}};
             }
             if (methodCall->method == "append_line")
             {
-                (*buffer)->data += asStrContent(evaluate(*methodCall->arguments.front(), env));
+                const std::string text =
+                    asStrContent(evaluate(*methodCall->arguments.front(), env));
+                // +1 for the appended '\n', +1 for the null terminator -
+                // matches emitBufferAppendLine's own single combined
+                // growth check exactly (not two separate ones).
+                growBufferCapacity(
+                    **buffer, static_cast<std::int64_t>((*buffer)->data.size() + text.size() + 2));
+                (*buffer)->data += text;
                 (*buffer)->data += '\n';
                 return Value{std::monostate{}};
             }
             if (methodCall->method == "clear")
             {
+                // Length only - capacity is deliberately untouched,
+                // mirroring emitBufferClear's own identical choice (the
+                // underlying storage isn't shrunk/reallocated, just
+                // logically emptied).
                 (*buffer)->data.clear();
                 return Value{std::monostate{}};
             }
             if (methodCall->method == "reserve")
             {
+                // No +1 here - emitBufferReserve passes its own argument
+                // straight through to ensureBufferCapacity unmodified,
+                // unlike append/append_line's own null-terminator-
+                // inclusive `needed`.
                 const std::int64_t capacity = asInt(evaluate(*methodCall->arguments.front(), env));
+                growBufferCapacity(**buffer, capacity);
                 (*buffer)->data.reserve(static_cast<std::size_t>(capacity));
                 return Value{std::monostate{}};
             }
@@ -1334,10 +1664,12 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                 // standard; immediately reset to "" below so the buffer
                 // stays in the exact same fresh, empty state
                 // BufferNewExpr's own construction produces, never left
-                // in a merely "unspecified" state).
+                // in a merely "unspecified" state). Capacity resets to 1
+                // too, matching emitBufferFinish's own identical reset.
                 auto result =
                     std::make_shared<StringInstance>(StringInstance{std::move((*buffer)->data)});
                 (*buffer)->data = std::string();
+                (*buffer)->capacity = 1;
                 return Value{result};
             }
             throw std::runtime_error("no such method: " + methodCall->method);
@@ -1465,7 +1797,10 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             }
             if (field->field == "capacity")
             {
-                return static_cast<std::int64_t>((*buffer)->data.capacity());
+                // (*buffer)->capacity, not (*buffer)->data.capacity() -
+                // see BufferInstance::capacity's own comment for why
+                // those are genuinely different quantities.
+                return (*buffer)->capacity;
             }
             throw std::runtime_error("no such field: " + field->field);
         }
@@ -1610,6 +1945,19 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
     {
         auto objectValue = evaluate(*index->object, env);
+
+        // Single-character indexing (`s[i]`) on a str-coercible value - a
+        // real Unicode codepoint index (codepointAt), not a byte offset
+        // (see docs/language/0047-unicode.md). Checked before
+        // asIndexable, since str/String aren't Indexable in that sense (a
+        // raw std::string/shared_ptr<StringInstance>, not a
+        // std::vector<Value>).
+        if (isStrCoercibleValue(objectValue))
+        {
+            const std::int64_t indexValue = asInt(evaluate(*index->index, env));
+            return codepointAt(asStrContent(objectValue), indexValue);
+        }
+
         auto indexable = asIndexable(objectValue);
         if (!indexable)
         {
@@ -1627,13 +1975,35 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
     if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
     {
-        // A real substring copy, not a zero-copy view - see
+        // A real substring/sublist copy, not a zero-copy view - see
         // docs/language/0045-str-slicing.md. Unlike the LLVM backend
         // (which never bounds-checks - matches every other out-of-bounds
         // case there), this validates the range at runtime, the same
         // "interpreter checks, compiled code does not" split every other
-        // indexing operation here already follows.
-        const std::string content = asStrContent(evaluate(*strSlice->object, env));
+        // indexing operation here already follows. Widened in
+        // docs/language/0050-collection-join-and-slicing.md: an Array/List
+        // `object` (checked first via asIndexable, since asStrContent
+        // would otherwise throw on a non-str value) slices into a fresh
+        // List instead of a fresh str.
+        Value objectValue = evaluate(*strSlice->object, env);
+        if (auto indexable = asIndexable(objectValue))
+        {
+            const auto length = static_cast<std::int64_t>(indexable->length);
+            const std::int64_t start = strSlice->start ? asInt(evaluate(*strSlice->start, env)) : 0;
+            const std::int64_t end = strSlice->end ? asInt(evaluate(*strSlice->end, env)) : length;
+            if (start < 0 || end > length || start > end)
+            {
+                throw std::runtime_error("invalid slice range [" + std::to_string(start) + ".." +
+                                         std::to_string(end) + "] for a collection of length " +
+                                         std::to_string(length));
+            }
+            auto sliced = std::make_shared<ListInstance>();
+            sliced->elements.assign(indexable->elements->begin() + static_cast<std::size_t>(start),
+                                    indexable->elements->begin() + static_cast<std::size_t>(end));
+            return sliced;
+        }
+
+        const std::string content = asStrContent(objectValue);
         const auto length = static_cast<std::int64_t>(content.size());
         const std::int64_t start = strSlice->start ? asInt(evaluate(*strSlice->start, env)) : 0;
         const std::int64_t end = strSlice->end ? asInt(evaluate(*strSlice->end, env)) : length;
@@ -1686,23 +2056,128 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
         switch (binary->op)
         {
-            case TokenKind::Plus: return asInt(left) + asInt(right);
-            case TokenKind::Minus: return asInt(left) - asInt(right);
-            case TokenKind::Star: return asInt(left) * asInt(right);
+            // f64 (a `double` Value) gets real floating-point arithmetic;
+            // i32/i64 (both the std::int64_t alternative - see
+            // Interpreter.hpp) share the existing asInt-based integer path,
+            // exactly as before this phase. TypeChecker::requireInt already
+            // guarantees both operands are the same numeric kind, so
+            // checking only `left` is enough (mirrors ValueLess's own
+            // "check one side" reasoning below).
+            case TokenKind::Plus:
+                if (const auto* lf = std::get_if<double>(&left))
+                {
+                    return *lf + std::get<double>(right);
+                }
+                return asInt(left) + asInt(right);
+            case TokenKind::Minus:
+                if (const auto* lf = std::get_if<double>(&left))
+                {
+                    return *lf - std::get<double>(right);
+                }
+                return asInt(left) - asInt(right);
+            case TokenKind::Star:
+                if (const auto* lf = std::get_if<double>(&left))
+                {
+                    return *lf * std::get<double>(right);
+                }
+                return asInt(left) * asInt(right);
             case TokenKind::Slash:
+                // Real IEEE 754 division for f64 - unlike integer division,
+                // a zero divisor is not an error (yields +-inf/NaN), so no
+                // zero-check here, unlike the integer path just below.
+                if (const auto* lf = std::get_if<double>(&left))
+                {
+                    return *lf / std::get<double>(right);
+                }
                 if (asInt(right) == 0)
                 {
                     throw std::runtime_error("division by zero");
                 }
                 return asInt(left) / asInt(right);
-            case TokenKind::EqualEqual: return left == right;
-            case TokenKind::BangEqual: return !(left == right);
-            case TokenKind::Less: return asInt(left) < asInt(right);
-            case TokenKind::LessEqual: return asInt(left) <= asInt(right);
-            case TokenKind::Greater: return asInt(left) > asInt(right);
-            case TokenKind::GreaterEqual: return asInt(left) >= asInt(right);
+            case TokenKind::EqualEqual:
+                if (isStrCoercibleValue(left))
+                {
+                    return asStrContent(left) == asStrContent(right);
+                }
+                return left == right;
+            case TokenKind::BangEqual:
+                if (isStrCoercibleValue(left))
+                {
+                    return asStrContent(left) != asStrContent(right);
+                }
+                return !(left == right);
+            // Derived from a single ValueLess "less-than" the same way
+            // LessEqual/Greater/GreaterEqual are standard textbook
+            // derivatives of `<` for any total order.
+            case TokenKind::Less: return ValueLess{}(left, right);
+            case TokenKind::LessEqual: return !ValueLess{}(right, left);
+            case TokenKind::Greater: return ValueLess{}(right, left);
+            case TokenKind::GreaterEqual: return !ValueLess{}(left, right);
             default: throw std::runtime_error("unsupported operator");
         }
+    }
+
+    // `<expr> as <targetType>` (see docs/language/0005-type-system.md) -
+    // TypeChecker::checkExpr's own CastExpr case already guarantees both
+    // the operand's type and targetType are i32/i64/f64, so only three
+    // shapes reach here: int-to-int (i32<->i64, both the same
+    // std::int64_t Value alternative - a real no-op at this level, unlike
+    // the LLVM backend's own sext/trunc), int-to-float, and
+    // float-to-int (truncating toward zero, matching C++'s own
+    // double-to-integral conversion semantics).
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        const Value operand = evaluate(*cast->operand, env);
+        if (cast->targetType == "f64")
+        {
+            if (const auto* f = std::get_if<double>(&operand))
+            {
+                return *f;
+            }
+            return static_cast<double>(asInt(operand));
+        }
+        // i32 or i64 target.
+        if (const auto* f = std::get_if<double>(&operand))
+        {
+            return static_cast<std::int64_t>(*f);
+        }
+        return asInt(operand);
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        return std::make_shared<OptionalInstance>(
+            OptionalInstance{true, evaluate(*someExpr->value, env)});
+    }
+
+    if (dynamic_cast<const NoneExpr*>(&expr))
+    {
+        // Unlike the LLVM backend, the interpreter's Value is dynamically
+        // typed - None needs no payload-type context to construct (see
+        // docs/language/0052-optional.md and IrGenerator's own
+        // optionalPayloadTypeName helper, which exists purely because the
+        // LLVM backend's {i1, T} struct literal needs a concrete T even
+        // when hasValue is false).
+        return std::make_shared<OptionalInstance>(OptionalInstance{false, Value{std::monostate{}}});
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        const Value optionalValue = evaluate(*tryExpr->operand, env);
+        const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(optionalValue);
+        if (optional->hasValue)
+        {
+            return optional->value;
+        }
+        // Propagates None out of the enclosing function - the language's
+        // only expression-context early return (see
+        // docs/language/0052-optional.md). Reuses the exact same
+        // ReturnSignal `return` itself throws; TypeChecker already
+        // guarantees `?` only appears inside a function whose own return
+        // type is Optional<U>, so this is always caught at that function's
+        // own call boundary, never escaping to top-level code.
+        throw ReturnSignal{Value{
+            std::make_shared<OptionalInstance>(OptionalInstance{false, Value{std::monostate{}}})}};
     }
 
     throw std::runtime_error("unsupported expression");
@@ -1744,6 +2219,46 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
         return std::move(signal.value);
     }
     return Value{std::monostate{}};
+}
+
+Value Interpreter::callExtern(const std::string& name, const std::vector<Value>& args)
+{
+    // "puts" (see docs/language/0048-ffi.md) - real libc puts() writes its
+    // argument followed by a trailing newline and returns a non-negative
+    // int on success; the Axea-level declaration in every example this
+    // phase omits a return type (unit/void), so this mirrors only the
+    // *observable* behavior (the write), matching what the compiled
+    // backend's own `declare void @puts(i8*)` + `call` produces (the real
+    // symbol's own int return value is simply never read at that call
+    // site either - confirmed directly: declaring an extern void-returning
+    // wrapper around a real int-returning libc function links and runs
+    // correctly, the caller's own choice not to read a return register is
+    // always safe).
+    if (name == "puts")
+    {
+        if (args.size() != 1)
+        {
+            throw std::runtime_error("extern 'puts' expects 1 argument");
+        }
+        std::cout << asStrContent(args.front()) << "\n";
+        return Value{std::monostate{}};
+    }
+    // "abs" - real libc abs() returns the absolute value of a real i32.
+    // A second allowlist entry (alongside "puts") specifically to
+    // demonstrate that more than one extern can be hand-implemented, and
+    // that both backends agree on it exactly (see examples/ffi.ax).
+    if (name == "abs")
+    {
+        if (args.size() != 1)
+        {
+            throw std::runtime_error("extern 'abs' expects 1 argument");
+        }
+        const std::int64_t value = asInt(args.front());
+        return value < 0 ? -value : value;
+    }
+    throw std::runtime_error("extern function '" + name +
+                             "' has no interpreter implementation - only a small allowlist of "
+                             "well-known libc functions is hand-implemented this phase");
 }
 
 const std::unordered_map<std::string, Value>& Interpreter::variables() const

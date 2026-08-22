@@ -6,6 +6,8 @@ enum class TokenKind
 {
     Identifier,
     Integer,
+    Int64,
+    Float,
     String,
     Char,
 
@@ -55,6 +57,9 @@ enum class TokenKind
     Continue,
     For,
     In,
+    Extern,
+    As,
+    Question,
 
     EndOfFile,
     Invalid
@@ -66,6 +71,8 @@ constexpr std::string_view tokenKindName(TokenKind kind)
     {
         case TokenKind::Identifier: return "Identifier";
         case TokenKind::Integer: return "Integer";
+        case TokenKind::Int64: return "Int64";
+        case TokenKind::Float: return "Float";
         case TokenKind::String: return "String";
         case TokenKind::Char: return "Char";
         case TokenKind::Plus: return "Plus";
@@ -110,6 +117,9 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Continue: return "Continue";
         case TokenKind::For: return "For";
         case TokenKind::In: return "In";
+        case TokenKind::Extern: return "Extern";
+        case TokenKind::As: return "As";
+        case TokenKind::Question: return "Question";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

@@ -1,0 +1,18 @@
+greet(name: str, age: i32) -> i32
+{
+    print("Hello", name)
+    write("Loading...")
+    print()
+    print("{name} is {age} years old")
+    print("next year: {age + 1}")
+    print("literal braces: {{1, 2, 3}}")
+    return 1
+}
+
+called = greet("Burke", 35)
+
+name = "Burke"
+age = 35
+print("Hello {name}, you are {age}.")
+write("Loading...")
+print()

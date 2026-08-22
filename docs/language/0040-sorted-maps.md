@@ -28,15 +28,23 @@ has = scores.contains(93)    // true
 scores.remove(93)
 ```
 
-**Scope restriction, and why: `K` is `i32` only this phase.** Exactly the
-restriction `PriorityQueue<T>` already established for its own element type
+**Scope restriction, and why: `K` is `i32`, `i64`, `f64`, `char`, or `str`
+only this phase.** Exactly the restriction `PriorityQueue<T>` already
+established for its own element type
 (`docs/language/0039-priority-queues.md`) - `<`/`<=`/`>`/`>=`
-(`TypeChecker::requireInt`) only ever typecheck for `i32` operands, so `i32`
-is the only type a tree can meaningfully *order* today. `V` has no such
-restriction - never compared, only stored, exactly like `Map<K,V>`'s own
-`V` - so `SortedMap<i32,Point>`, `SortedMap<i32,List<i32>>`, even
-`SortedMap<i32,Map<i32,i32>>` all work, mirroring `Map<K,V>`'s own
-already-generic `V`.
+(`TypeChecker::requireOrdered`, backed by `isOrderableKind`) only ever
+typecheck for those five kinds, so they're the only types a tree can
+meaningfully *order* today - `str` compares via a real lexicographic
+byte-walk (`registerOrderRuntime`/`@axea.less.str`, see
+docs/language/0042-string.md), not a bare pointer comparison; `i64`/`f64`
+are `docs/language/0051-numeric-widening.md`'s own addition. The *owned*
+`String` type stays excluded
+even though it's str-coercible everywhere else - ordering, like
+`Set<T>`/`Map<K,V>`'s own hashability, only ever considers the bare value
+type. `V` has no such restriction - never compared, only stored, exactly
+like `Map<K,V>`'s own `V` - so `SortedMap<i32,Point>`,
+`SortedMap<i32,List<i32>>`, even `SortedMap<i32,Map<i32,i32>>` all work,
+mirroring `Map<K,V>`'s own already-generic `V`.
 
 **Algorithm choice: AVL, not red-black.** Both are legitimate "real balanced
 search tree" answers to `0029`'s own spec. AVL's rebalancing decision is
@@ -162,16 +170,24 @@ Function(build)
 `valueTypeName` string-storage fields (K/V can each be arbitrarily nested,
 so - like `Map`/`Set` - a single flat `elementKind` tag isn't enough).
 `resolveType`'s `"SortedMap<key,value>"` branch reuses `Map<K,V>`'s own
-bracket-depth-aware comma split, but requires `keyType.kind == TypeKind::I32`
-directly rather than calling `isHashable` - the real constraint here is
-orderability, not hashability, and (exactly like `PriorityQueue<T>`'s own
-i32-only check) that single condition already excludes every non-`i32` type
-there is:
+bracket-depth-aware comma split, but requires
+`isOrderableKind(keyType.kind)` directly rather than calling `isHashable` -
+the real constraint here is orderability, not hashability, and (exactly
+like `PriorityQueue<T>`'s own check) that single condition already
+excludes every non-orderable type there is. `isOrderableKind` accepts
+`i32`/`i64` (numeric order), `f64` (numeric order via `fcmp`'s *ordered*
+predicates - see docs/language/0051-numeric-widening.md), `char`
+(codepoint order - see docs/language/0044-char.md), and `str` (real
+lexicographic byte order via `registerOrderRuntime`/`@axea.less.str` - see
+docs/language/0042-string.md); the *owned* `String` type is deliberately
+excluded even though it's str-coercible everywhere else, since ordering
+only ever considers the bare value type:
 
 ```text
 $ ax capabilities bad.ax   # m = SortedMap<bool,i32>()
-error: SortedMap<K,V> requires an orderable key type (i32 only in this
-phase - no other type is comparable yet), found SortedMap<bool,i32>
+error: SortedMap<K,V> requires an orderable key type (i32, i64, f64, char,
+or str only in this phase - no other type is comparable yet), found
+SortedMap<bool,i32>
 ```
 
 `SortedMapNewExpr`'s own `checkExpr` case delegates straight to

@@ -69,6 +69,26 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        inferExpr(*cast->operand, function, changed);
+        return;
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        inferExpr(*someExpr->value, function, changed);
+        return;
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        inferExpr(*tryExpr->operand, function, changed);
+        return;
+    }
+
+    // NoneExpr: no sub-expressions, no capability effect.
+
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
     {
         inferExpr(*ifExpr->condition, function, changed);
@@ -142,6 +162,22 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         if (strSlice->end)
         {
             inferExpr(*strSlice->end, function, changed);
+        }
+        return;
+    }
+
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        // Read-only, same reasoning as StrSliceExpr above - building a
+        // fresh String never mutates any of its own pieces' expressions
+        // (see docs/language/Axea_Printing_Formatting.md). Recurses
+        // purely for the same nested-mutation-detection reason.
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                inferExpr(*piece.expr, function, changed);
+            }
         }
         return;
     }
@@ -319,6 +355,24 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         return;
     }
 
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        checkMovesInExpr(*cast->operand, function, moved);
+        return;
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        checkMovesInExpr(*someExpr->value, function, moved);
+        return;
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        checkMovesInExpr(*tryExpr->operand, function, moved);
+        return;
+    }
+
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
         checkMovesInExpr(*field->object, function, moved);
@@ -347,6 +401,18 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
     {
         checkMovesInExpr(*index->object, function, moved);
         checkMovesInExpr(*index->index, function, moved);
+        return;
+    }
+
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                checkMovesInExpr(*piece.expr, function, moved);
+            }
+        }
         return;
     }
 

@@ -29,25 +29,37 @@ first = q.pop()      // 10 - removes, always the smallest element present
 count = q.length
 ```
 
-**Scope restriction, and why: `T` is `i32` only this phase.** `0029`'s own
-sketch shows `PriorityQueue<Job>(by: .priority)` - a property-selector
-closure choosing what to compare - and a separate `order: asc`/`desc`
-argument. Neither exists anywhere in this codebase: there is no closure/
-property-selector syntax, no named/keyword call arguments, and - the more
-fundamental gap - `<`/`<=`/`>`/`>=` (`TypeChecker::requireInt`) only ever
-typecheck for `i32` operands; no other type in this language is comparable at
-all yet (not even `f32`/`f64`/`str`, despite being declared `TypeKind`
-values - see `docs/language/0005-type-system.md`). A heap has no
-correctness story without a total order on its elements, so rather than
-accept an uncomparable `T` and produce nonsense, `PriorityQueue<T>` requires
-`elementType.kind == TypeKind::I32`, enforced in `resolveType` exactly the
-way `Set<T>`/`Map<K,V>` already enforce hashability there (not a nested-type
-structural rejection like `List`/`Stack`/`Deque`/`Queue`'s own copy-pasted
-block - this is a real semantic constraint, so it gets the same treatment
-`isHashable` already established for "some types don't qualify, and the
-reason is domain-specific, not just nesting depth"). No `by:`/`order:`
-constructor arguments this phase - `PriorityQueue<i32>()` takes no
-arguments, exactly like every other collection's constructor here.
+**Scope restriction, and why: `T` is `i32`, `i64`, `f64`, `char`, or `str`
+only this phase.** `0029`'s own sketch shows `PriorityQueue<Job>(by:
+.priority)` - a property-selector closure choosing what to compare - and a
+separate `order: asc`/`desc` argument. Neither exists anywhere in this
+codebase: there is no closure/property-selector syntax, no named/keyword
+call arguments, and - the more fundamental gap - `<`/`<=`/`>`/`>=`
+(`TypeChecker::requireOrdered`, backed by `isOrderableKind`) only ever
+typecheck for those five kinds (`char`'s own natural order is by Unicode
+codepoint - see `docs/language/0044-char.md`; `str`'s own is real
+lexicographic byte order via LlvmIrEmitter's `registerOrderRuntime`/
+`@axea.less.str`, a hand-rolled byte-walk compare - not a bare pointer
+comparison; `i64`/`f64` are `docs/language/0051-numeric-widening.md`'s own
+addition, `f64` via `fcmp`'s *ordered* predicates). No other declared
+numeric width is comparable at all yet (`i8`/`i16`/`i128`, every unsigned
+width, `f32` - see `docs/language/0005-type-system.md`) - and the *owned*
+`String` type is deliberately excluded too, even though it's str-coercible
+everywhere else in this language: ordering, like `Set<T>`/`Map<K,V>`'s own
+hashability, only ever considers the bare value type (`isOrderableKind`
+checks `TypeKind::String`, i.e. `str`, not `TypeKind::OwnedString`). A heap
+has no correctness story without a total order on its elements, so rather
+than accept an uncomparable `T` and produce nonsense, `PriorityQueue<T>`
+requires
+`isOrderableKind(elementType.kind)`, enforced in `resolveType` exactly the
+way `Set<T>`/`Map<K,V>` already enforce hashability there (not a
+nested-type structural rejection like `List`/`Stack`/`Deque`/`Queue`'s own
+copy-pasted block - this is a real semantic constraint, so it gets the same
+treatment `isHashable` already established for "some types don't qualify,
+and the reason is domain-specific, not just nesting depth"). No
+`by:`/`order:` constructor arguments this phase - `PriorityQueue<i32>()`
+takes no arguments, exactly like every other collection's constructor
+here.
 
 **Ordering, and why: an ascending min-heap - `pop()` always returns the
 smallest element present.** `0029` doesn't pin down a default (it only shows
@@ -100,11 +112,12 @@ not a bug.
 
 **What's genuinely new**: `push`/`pop` can't be copied from
 `emitListPush`/`emitListPop` the way `emitStackPush`/`emitStackPop` were.
-`push` still does `List<T>.push`'s own "no amortized growth - reallocate to
-`length+1`, copy the old elements across, append the new one" sequence
-first (byte-for-byte identical to `emitStackPush`'s own copy loop), but then
-must **sift the newly appended element up** toward the root until the heap
-property (`parent <= child`) holds again:
+`push` still calls the same shared `ensureListCapacity` helper
+`List<T>.push`/`Stack<T>.push` use first (doubling capacity, not
+reallocating to exactly `length+1` - see `docs/language/0033-lists.md`),
+appends the new element, but then must **sift the newly appended element
+up** toward the root until the heap property (`parent <= child`) holds
+again:
 
 ```text
 idx := length - 1        // the just-appended element's index
@@ -182,16 +195,26 @@ already do (a single type parameter needs no `Map`/`Set`-style
 `elementTypeName` string). Unlike those four, though, `resolveType`'s
 `"PriorityQueue<elem>"` branch does **not** copy their nested-array/slice/
 List/Stack/... rejection block - it instead requires
-`elementType.kind == TypeKind::I32` directly (mirroring how `Set<T>`/
+`isOrderableKind(elementType.kind)` directly (mirroring how `Set<T>`/
 `Map<K,V>`'s own branches call `isHashable` rather than a structural
 nesting check), since that single condition already excludes every
-non-`i32` type there is, nested or not - a *stronger*, more precise
-restriction than the copy-pasted block would have given for free:
+non-orderable type there is, nested or not - a *stronger*, more precise
+restriction than the copy-pasted block would have given for free.
+`isOrderableKind` accepts `i32`/`i64` (numeric order), `f64` (numeric
+order via `fcmp`'s *ordered* predicates - see
+docs/language/0051-numeric-widening.md), `char` (codepoint order - see
+docs/language/0044-char.md), and `str` (real lexicographic byte order via
+`registerOrderRuntime`/`@axea.less.str` - see docs/language/0042-string.md);
+the *owned* `String` type is deliberately excluded even though it's
+str-coercible everywhere else, since ordering only ever considers the bare
+value type (same reasoning `isHashable` already established for
+`Set<T>`/`Map<K,V>`'s own key):
 
 ```text
 $ ax capabilities bad.ax   # f() { q = PriorityQueue<bool>() }
-error: PriorityQueue<T> requires an orderable element type (i32 only in this
-phase - no other type is comparable yet), found PriorityQueue<bool>
+error: PriorityQueue<T> requires an orderable element type (i32, i64, f64,
+char, or str only in this phase - no other type is comparable yet), found
+PriorityQueue<bool>
 ```
 
 `PriorityQueueNewExpr`'s own `checkExpr` case delegates straight to
@@ -400,13 +423,15 @@ identical final-state printing; the heap-order-not-sorted-order distinction
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **`T` is `i32` only.** No `by:`/`order:` selector, no `Ordered` trait -
-  neither closures/property-selectors nor comparability for any type other
-  than `i32` exist anywhere in this codebase yet (see Motivation above).
-- **`push` is not actually `O(log n)`** for the same reason `List<T>.push`/
-  `Stack<T>.push` aren't `O(1)`: no amortized growth, every push reallocates
-  the entire backing buffer (`O(n)`) before the `O(log n)` sift-up even
-  starts.
+- **`T` is `i32`, `i64`, `f64`, `char`, or `str` only.** No `by:`/`order:`
+  selector, no `Ordered` trait - neither closures/property-selectors nor
+  comparability for any other type exist anywhere in this codebase yet
+  (see Motivation above and `docs/language/0051-numeric-widening.md`).
+- **`push` is `O(log n)` amortized**, not worst-case: the sift-up itself is
+  always `O(log n)`, and `push` now shares `List<T>`/`Stack<T>`'s own
+  amortized-doubling growth (`ensureListCapacity` - see
+  `docs/language/0033-lists.md`) rather than reallocating on every call, so
+  the growth step is `O(1)` amortized too.
 - **No `Optional`-based safe pop/peek.** `pop()`/`peek()` throw on empty in
   the interpreter, no bounds check in compiled code - `Optional`/`T?` still
   has no support anywhere in this codebase (same precedent every other

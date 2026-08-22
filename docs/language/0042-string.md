@@ -133,6 +133,48 @@ even if it worked, since the buffer is already null-terminated.
 
 ---
 
+# Equality and Ordering: Real Content, Not a Bare-Pointer Compare
+
+`str`/`String` both lower to a bare-or-headered *pointer* in the LLVM
+backend (`i8*`, `{i32,i8*}*`) - so a plain `icmp eq`/`icmp slt` directly on
+either, the way every scalar type's `==`/`<` already lowers generically
+(`IrBinOp`'s own type-agnostic emission), would compare *address*, not
+content. This was a real, verified bug for `==`/`!=` before this phase (two
+separately-`malloc`'d `String`s with identical text compared unequal both
+in the interpreter, which defaulted to `std::shared_ptr` identity for
+`String`'s own `Value` alternative, and in the LLVM backend, which emitted
+a raw pointer `icmp`) - and would have been the identical bug for `<` had
+ordering been added the same naive way.
+
+The fix, on both backends: `str` content is now compared for real.
+LlvmIrEmitter's `emitStrComparison` special-cases `==`/`!=`/`<`/`<=`/`>`/`>=`
+whenever an operand is `str` or `String` - `String` is first resolved to
+its own bare `i8*` data pointer (`resolveStrPtrOfType`, the same
+str-coercion `.append()`/`.to_cstr()`/`.parse<T>()` already share), then
+`==`/`!=` reuse `registerKeyRuntime("str")`'s own `@axea.eq.str` (already
+built for `Map<K,V>`/`Set<T>` key comparisons, just not previously wired to
+the operators themselves), and `<`/`<=`/`>`/`>=` go through a new
+`registerOrderRuntime("str")`/`@axea.less.str` - a hand-rolled byte-walk
+lexicographic compare (unsigned byte comparison, matching a textbook
+`strcmp`), from which `<=`/`>`/`>=` are derived via the standard "a<=b iff
+not(b<a)" identities, since only a strict less-than primitive exists. The
+interpreter mirrors this with `asStrContent`/`ValueLess` (a bare `str`'s
+own `std::string` already compared by value; only `String`'s
+`shared_ptr<StringInstance>` needed the fix).
+
+**`str` is now orderable; the owned `String` type still isn't.**
+`TypeChecker::isOrderableKind` (`docs/language/0039-priority-queues.md`)
+accepts `str` alongside `i32`/`char` - `<`/`<=`/`>`/`>=` type-check and, via
+the same `registerOrderRuntime`, `PriorityQueue<str>`/`SortedMap<str,V>`/
+`SortedSet<str>` all work too. The *owned* `String` type stays excluded
+from ordering specifically (even though `==`/`!=` on two `String`s
+type-checks, and is now content-correct) - orderability, like
+`Set<T>`/`Map<K,V>`'s own hashability, only ever considers the bare value
+type; convert to `str` first, the same "String lends a str" idiom every
+other str-only operation here already uses.
+
+---
+
 # Parsing: A Call-Shaped Constructor, Not a Generic One
 
 `String` in type position is a bare identifier - unlike every collection
@@ -175,9 +217,14 @@ in ordinary function-call argument checking (see `docs/language/0032-slices.md`
 for that check's own original shape). `.length` gets its own standalone
 `checkFieldType` case, mirroring every non-indexable collection's own
 identical pattern - `String` is deliberately not added to `isIndexable`
-(single-character `[i]` indexing remains out of scope; range-slicing
-`String[a..b]` followed later via a separate, dedicated AST node rather
-than `isIndexable` - see `docs/language/0045-str-slicing.md`).
+(this phase); range-slicing `String[a..b]` followed later via a separate,
+dedicated AST node rather than `isIndexable` - see
+`docs/language/0045-str-slicing.md`. Single-character indexing (`s[i]`,
+a real Unicode *codepoint* index, not a byte offset) followed later still,
+via its own dedicated check ahead of `isIndexable` in `IndexExpr`'s own
+type-checking case, rather than joining `isIndexable` itself (`str`/
+`String` stay immutable, so `s[i] = ...` still has to keep being rejected
+- see docs/language/0047-unicode.md).
 
 ```text
 $ ax capabilities bad.ax   # x = String(5)
@@ -328,16 +375,20 @@ diverge.
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No single-character `[i]` indexing.** Range-slicing (`date[..4]`) is
-  now implemented separately (`docs/language/0045-str-slicing.md`), but
-  indexing a single character out of a `str`/`String` still isn't -
-  `char` (`docs/language/0044-char.md`) exists as a type now, but nothing
-  yet extracts one out of a string's own bytes.
-- **No interpolation-lowering.** `Buffer`/`.finish()` itself is now
-  implemented (`docs/language/0043-buffer.md`), but the compiler-driven
-  lowering of string interpolation into it is still purely aspirational -
-  string interpolation itself (`"Hello {name}"`) has no lexer/parser
-  support at all yet.
+- **Single-character `[i]` indexing is now implemented** (was listed here
+  as out of scope in this document's own earlier revision) - `s[i]`
+  returns a real `char` (`docs/language/0044-char.md`), indexed by
+  Unicode codepoint (matching `.length`'s own codepoint-not-byte
+  counting - see `docs/language/0047-unicode.md`), via a dedicated
+  `@axea.utf8.char_at` runtime walk in the compiled backend, not simple
+  byte-offset pointer arithmetic. Read-only, same as `.length`/range-
+  slicing - `s[i] = ...` still isn't allowed, `str`/`String` stay
+  immutable.
+- **Interpolation-lowering is now implemented** (was listed here as
+  aspirational in this document's own earlier revision) - string
+  interpolation (`"Hello {name}"`) has real lexer/parser support, and
+  really does lower into `Buffer` new/append/finish operations under the
+  hood (`docs/language/0043-buffer.md`).
 - **`.length`/`.bytes` are now Unicode-aware** (`docs/language/0047-unicode.md`)
   - `.length` counts codepoints, `.bytes` gives the raw byte count,
   reversing this document's own original "byte count" framing above. Not
@@ -349,9 +400,12 @@ diverge.
   makes an eventual `to_cstr()` a trivial "return the data pointer"
   operation once `extern` exists.
 - **`.parse<T>()` is now implemented** (`docs/language/0046-generic-methods.md`),
-  restricted to `T ∈ {i32, bool}` and returning `T` directly rather than a
-  fallible result - `docs/std/strings/0008-parsing-formatting.md`'s own
-  `?`-based sketch still needs the `?` operator, which doesn't exist yet.
+  covering `T ∈ {i32, i64, f64, bool}` (`i64`/`f64` added once those
+  numeric types themselves existed - see
+  `docs/language/0051-numeric-widening.md`) and returning `T` directly
+  rather than a fallible result - `docs/std/strings/0008-parsing-formatting.md`'s
+  own `?`-based sketch still needs the `?` operator, which doesn't exist
+  yet.
 - **`append` is not amortized O(1).** Every call reallocates the entire
   buffer - the same complexity shortfall `List<T>.push`'s own docs already
   accept and document.

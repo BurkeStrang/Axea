@@ -5,11 +5,10 @@
 namespace
 {
     // Builds a Type with only `kind`/`structName` set, value-initializing
-    // every other field (elementKind/elementStructName/arraySize/
-    // elementTypeName/valueTypeName) - avoids -Wmissing-field-initializers,
-    // which (unlike leaving every field default via `Type{}`) does fire on
-    // any *partial* aggregate init, no matter how many trailing fields are
-    // provided.
+    // every other field (arraySize/elementTypeName/valueTypeName) - avoids
+    // -Wmissing-field-initializers, which (unlike leaving every field
+    // default via `Type{}`) does fire on any *partial* aggregate init, no
+    // matter how many trailing fields are provided.
     Type simpleType(TypeKind kind, std::string structName = "")
     {
         Type type{};
@@ -18,49 +17,92 @@ namespace
         return type;
     }
 
-    // Same reasoning as simpleType above, for Array/Slice/List's flat
-    // one-level element representation.
-    Type arrayLikeType(TypeKind kind,
-                       TypeKind elementKind,
-                       std::string elementStructName,
-                       int arraySize = 0)
+    // Builds a Type for any single-type-parameter kind (Array/Slice/List/
+    // Stack/LinkedList/Deque/Queue/PriorityQueue/Optional) -
+    // `elementTypeName` must already be canonical (typeName(...) of the
+    // resolved element, not raw source text - see Type::elementTypeName's
+    // own comment for why this is a string, not a flat elementKind tag).
+    Type arrayLikeType(TypeKind kind, std::string elementTypeName, int arraySize = 0)
     {
         Type type{};
         type.kind = kind;
-        type.elementKind = elementKind;
-        type.elementStructName = std::move(elementStructName);
+        type.elementTypeName = std::move(elementTypeName);
         type.arraySize = arraySize;
         return type;
     }
 
     const Type kBool = simpleType(TypeKind::Bool);
     const Type kI32 = simpleType(TypeKind::I32);
+    const Type kI64 = simpleType(TypeKind::I64);
+    const Type kF64 = simpleType(TypeKind::F64);
     const Type kChar = simpleType(TypeKind::Char);
     const Type kUnit = simpleType(TypeKind::Unit);
     const Type kStr = simpleType(TypeKind::String);
 
-    void requireInt(const Type& left, const Type& right)
+    // True for the three TypeKinds with real arithmetic today: i32, i64
+    // (both signed integers - same operations, just different width), and
+    // f64 (real floating-point +/-/*//, unlike the integers' truncating
+    // `/`). Every other declared numeric TypeKind (i8/i16/i128, every
+    // unsigned width, f32) stays an "unsupported type" error via
+    // resolveType, same as before this phase (see
+    // docs/language/0005-type-system.md). Shared by requireInt below and
+    // by CastExpr's own numeric-conversion check.
+    bool isNumericKind(TypeKind kind)
     {
-        if (!(left == kI32) || !(right == kI32))
+        return kind == TypeKind::I32 || kind == TypeKind::I64 || kind == TypeKind::F64;
+    }
+
+    // Arithmetic (`+`/`-`/`*`/`/`) - both operands must be the *same*
+    // numeric kind (see isNumericKind above); `i32 + i64` is still
+    // rejected, same as every other mixed-type binary op in this checker -
+    // no implicit widening, convert explicitly first with `as` (see
+    // docs/language/0005-type-system.md). Returns that shared kind as the
+    // result type (not always kI32 - `i64 + i64` must yield `i64`).
+    Type requireInt(const Type& left, const Type& right)
+    {
+        if (left.kind != right.kind || !isNumericKind(left.kind))
         {
-            throw std::runtime_error("arithmetic/comparison requires i32 operands, found " +
-                                     typeName(left) + " and " + typeName(right));
+            throw std::runtime_error(
+                "arithmetic requires two i32, two i64, or two f64 operands, found " +
+                typeName(left) + " and " + typeName(right));
         }
+        return left;
+    }
+
+    // True for any TypeKind that has a real total order today: i32/i64
+    // (numeric - see isNumericKind above; f64 too, via LLVM's *ordered*
+    // fcmp predicates, so a NaN operand simply compares false against
+    // everything, including itself, rather than being specially rejected -
+    // not overengineered further this phase), char (codepoint order, see
+    // docs/language/0044-char.md), and str (real lexicographic byte order,
+    // via LlvmIrEmitter's own registerOrderRuntime/@axea.less.str - not
+    // pointer identity). The *owned* String type is deliberately excluded
+    // even though it's str-coercible everywhere else in this language -
+    // ordering, like Set<T>/Map<K,V>'s own hashability below, only ever
+    // considers the bare value type; convert to str first, the same way a
+    // String already has to for any other str-only operation. Shared by
+    // requireOrdered below and by PriorityQueue<T>/SortedMap<K,V>/
+    // SortedSet<T>'s own element/key-type checks, which all mean the same
+    // "orderable" (see docs/language/0039-priority-queues.md).
+    bool isOrderableKind(TypeKind kind)
+    {
+        return isNumericKind(kind) || kind == TypeKind::Char || kind == TypeKind::String;
     }
 
     // Ordering (`<`/`<=`/`>`/`>=`) - unlike arithmetic (requireInt above,
-    // i32-only), also accepts char, since a Unicode scalar value has a
-    // natural total order by codepoint (see docs/language/0044-char.md).
-    // A char is never itself accepted in requireInt - char + char, unlike
-    // char < char, is deliberately still an error.
+    // i32-only), also accepts char and str (see isOrderableKind above). A
+    // char is never itself accepted in requireInt - char + char, unlike
+    // char < char, is deliberately still an error. Both sides must be the
+    // *same* orderable kind - i32 < char is still rejected, same as every
+    // other mixed-type binary op in this checker.
     void requireOrdered(const Type& left, const Type& right)
     {
-        const bool bothInt = left == kI32 && right == kI32;
-        const bool bothChar = left == kChar && right == kChar;
-        if (!bothInt && !bothChar)
+        if (left.kind != right.kind || !isOrderableKind(left.kind))
         {
-            throw std::runtime_error("comparison requires two i32 or two char operands, found " +
-                                     typeName(left) + " and " + typeName(right));
+            throw std::runtime_error(
+                "comparison requires two i32, two i64, two f64, two char, or two str operands, "
+                "found " +
+                typeName(left) + " and " + typeName(right));
         }
     }
 
@@ -75,6 +117,59 @@ namespace
     bool isStrCoercible(const Type& type)
     {
         return type == kStr || type.kind == TypeKind::OwnedString;
+    }
+
+    // Types safe to cross an `extern c` boundary (see
+    // docs/language/0048-ffi.md) - a real, deliberately narrow allowlist,
+    // not "anything goes": `char` (i24) has no C equivalent width, and
+    // every collection/String/Buffer is a heap object with an
+    // Axea-specific memory layout no C caller could correctly interpret.
+    // `str`/`cstr` are both bare, null-terminated i8* - representationally
+    // identical, both allowed.
+    bool isFfiSafeType(const Type& type)
+    {
+        return type == kI32 || type == kBool || type == kStr || type.kind == TypeKind::CStr;
+    }
+
+    // Types with a well-defined text representation this phase (see
+    // docs/language/Axea_Printing_Formatting.md) - used by both string
+    // interpolation (`"{expr}"`) and the `print`/`write` builtins. As of
+    // docs/language/0054-collection-printing.md, this covers every
+    // struct and collection kind too (registerStrbufRuntime/
+    // emitStructToStringHelpers/registerCollectionToStrRuntime give each
+    // one a real "stringify to a heap string" runtime function, not just
+    // a "print directly" one - the distinction that blocked interpolation
+    // specifically from supporting them before), with one deliberate
+    // exception: `slice<T>` - a by-value fat pointer (`{T*, i32}`),
+    // structurally unlike every other collection's own heap-header
+    // convention, and (unlike them) already forbidden as a collection
+    // element type almost everywhere via rejectSliceOutsideParameter, so
+    // stringifying a bare slice specifically is real further work, not
+    // yet built.
+    bool isTextRepresentable(const Type& type)
+    {
+        if (type == kI32 || type == kI64 || type == kF64 || type == kBool || type == kChar ||
+            isStrCoercible(type))
+        {
+            return true;
+        }
+        switch (type.kind)
+        {
+            case TypeKind::Optional:
+            case TypeKind::Struct:
+            case TypeKind::Array:
+            case TypeKind::List:
+            case TypeKind::Stack:
+            case TypeKind::LinkedList:
+            case TypeKind::Deque:
+            case TypeKind::Queue:
+            case TypeKind::PriorityQueue:
+            case TypeKind::Map:
+            case TypeKind::Set:
+            case TypeKind::SortedMap:
+            case TypeKind::SortedSet: return true;
+            default: return false;
+        }
     }
 
     // Shared by IndexExpr and IndexAssignStmt: a literal (compile-time-known)
@@ -266,6 +361,36 @@ namespace
         }
         return std::string::npos;
     }
+
+    // Same reasoning as findTopLevelComma above, for `[elem;N]`'s own `;` -
+    // needed as soon as `elem` can itself be a nested array (`[[i32;3];4]`),
+    // whose own `;` would otherwise be found first by a naive
+    // `text.find(';')` (see docs/language/0052-optional.md's own
+    // follow-up). Only the semicolon needs this treatment, not the
+    // trailing `]` - array-type text is always exactly one top-level
+    // bracket pair, so the *last* `]` in the string is always the correct
+    // outer one regardless of nesting, unlike `,` which can occur at any
+    // depth in Map<K,V>'s own text.
+    std::size_t findTopLevelSemicolon(const std::string& text)
+    {
+        int depth = 0;
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == '<' || text[i] == '[')
+            {
+                ++depth;
+            }
+            else if (text[i] == '>' || text[i] == ']')
+            {
+                --depth;
+            }
+            else if (text[i] == ';' && depth == 1)
+            {
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
 } // namespace
 
 std::string typeName(const Type& type)
@@ -274,54 +399,30 @@ std::string typeName(const Type& type)
     {
         case TypeKind::Bool: return "bool";
         case TypeKind::I32: return "i32";
+        case TypeKind::I64: return "i64";
+        case TypeKind::F64: return "f64";
         case TypeKind::Char: return "char";
         case TypeKind::String: return "str";
         case TypeKind::Unit: return "unit";
         case TypeKind::Struct: return type.structName;
-        case TypeKind::Array:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "[" + typeName(element) + "; " + std::to_string(type.arraySize) + "]";
-        }
-        case TypeKind::Slice:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "slice<" + typeName(element) + ">";
-        }
-        case TypeKind::List:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "List<" + typeName(element) + ">";
-        }
-        case TypeKind::Stack:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "Stack<" + typeName(element) + ">";
-        }
-        case TypeKind::LinkedList:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "LinkedList<" + typeName(element) + ">";
-        }
-        case TypeKind::Deque:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "Deque<" + typeName(element) + ">";
-        }
-        case TypeKind::Queue:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "Queue<" + typeName(element) + ">";
-        }
-        case TypeKind::PriorityQueue:
-        {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
-            return "PriorityQueue<" + typeName(element) + ">";
-        }
         // elementTypeName/valueTypeName are always already-canonical strings
-        // (see docs/language/0034-maps-and-sets.md's generic rewrite), so
-        // reconstruction is trivial - unlike Array/Slice/List's flat
-        // elementKind tag, there's no nested Type to recurse into here.
+        // (see Type::elementTypeName's own comment), so reconstruction is
+        // trivial string concatenation - no nested Type to recurse into
+        // here, for any of these (docs/language/0052-optional.md's own
+        // follow-up moved Array/Slice/List/Stack/LinkedList/Deque/Queue/
+        // PriorityQueue/Optional off their old flat elementKind tag onto
+        // this exact same string-based representation Map/Set/SortedMap/
+        // SortedSet already used, to support genuinely arbitrary nesting).
+        case TypeKind::Array:
+            return "[" + type.elementTypeName + "; " + std::to_string(type.arraySize) + "]";
+        case TypeKind::Slice: return "slice<" + type.elementTypeName + ">";
+        case TypeKind::Optional: return "Optional<" + type.elementTypeName + ">";
+        case TypeKind::List: return "List<" + type.elementTypeName + ">";
+        case TypeKind::Stack: return "Stack<" + type.elementTypeName + ">";
+        case TypeKind::LinkedList: return "LinkedList<" + type.elementTypeName + ">";
+        case TypeKind::Deque: return "Deque<" + type.elementTypeName + ">";
+        case TypeKind::Queue: return "Queue<" + type.elementTypeName + ">";
+        case TypeKind::PriorityQueue: return "PriorityQueue<" + type.elementTypeName + ">";
         case TypeKind::Map: return "Map<" + type.elementTypeName + "," + type.valueTypeName + ">";
         case TypeKind::Set: return "Set<" + type.elementTypeName + ">";
         case TypeKind::SortedMap:
@@ -329,6 +430,7 @@ std::string typeName(const Type& type)
         case TypeKind::SortedSet: return "SortedSet<" + type.elementTypeName + ">";
         case TypeKind::OwnedString: return "String";
         case TypeKind::Buffer: return "Buffer";
+        case TypeKind::CStr: return "cstr";
         default: return "<unsupported type>";
     }
 }
@@ -361,7 +463,10 @@ Type TypeChecker::resolveType(const std::string& name) const
     static const std::unordered_map<std::string, TypeKind> primitives{
         {"bool", TypeKind::Bool},
         {"i32", TypeKind::I32},
+        {"i64", TypeKind::I64},
+        {"f64", TypeKind::F64},
         {"char", TypeKind::Char},
+        {"cstr", TypeKind::CStr},
         {"str", TypeKind::String},
         {"unit", TypeKind::Unit},
     };
@@ -370,7 +475,7 @@ Type TypeChecker::resolveType(const std::string& name) const
     // always produces (see docs/language/0031-arrays.md).
     if (!name.empty() && name.front() == '[')
     {
-        const auto semicolon = name.find(';');
+        const auto semicolon = findTopLevelSemicolon(name);
         const auto closeBracket = name.rfind(']');
         if (semicolon == std::string::npos || closeBracket == std::string::npos)
         {
@@ -379,14 +484,9 @@ Type TypeChecker::resolveType(const std::string& name) const
 
         const std::string elementName = name.substr(1, semicolon - 1);
         const std::string sizeText = name.substr(semicolon + 1, closeBracket - semicolon - 1);
-        const Type elementType = resolveType(elementName); // one level deep only - no nested arrays
-        if (elementType.kind == TypeKind::Array)
-        {
-            throw std::runtime_error("nested array types are not supported: " + name);
-        }
+        const Type elementType = resolveType(elementName);
 
-        return arrayLikeType(
-            TypeKind::Array, elementType.kind, elementType.structName, std::stoi(sizeText));
+        return arrayLikeType(TypeKind::Array, typeName(elementType), std::stoi(sizeText));
     }
 
     // "slice<elem>" - the canonical form Parser::parseTypeName always
@@ -394,13 +494,19 @@ Type TypeChecker::resolveType(const std::string& name) const
     if (name.starts_with("slice<") && name.back() == '>')
     {
         const std::string elementName = name.substr(6, name.size() - 7);
-        const Type elementType = resolveType(elementName); // one level deep only - no nested slices
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice)
-        {
-            throw std::runtime_error("nested array/slice element types are not supported: " + name);
-        }
+        const Type elementType = resolveType(elementName);
 
-        return arrayLikeType(TypeKind::Slice, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Slice, typeName(elementType));
+    }
+
+    // "Optional<elem>" - the canonical form Parser::parseTypeName always
+    // produces (see docs/language/0052-optional.md).
+    if (name.starts_with("Optional<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(9, name.size() - 10);
+        const Type elementType = resolveType(elementName);
+
+        return arrayLikeType(TypeKind::Optional, typeName(elementType));
     }
 
     // "List<elem>" - the canonical form Parser::parseTypeName always
@@ -408,19 +514,8 @@ Type TypeChecker::resolveType(const std::string& name) const
     if (name.starts_with("List<") && name.back() == '>')
     {
         const std::string elementName = name.substr(5, name.size() - 6);
-        const Type elementType = resolveType(elementName); // one level deep only - no nested lists
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                name);
-        }
-
-        return arrayLikeType(TypeKind::List, elementType.kind, elementType.structName);
+        const Type elementType = resolveType(elementName);
+        return arrayLikeType(TypeKind::List, typeName(elementType));
     }
 
     // "Stack<elem>" - a LIFO collection backed internally by List<T>'s own
@@ -431,18 +526,7 @@ Type TypeChecker::resolveType(const std::string& name) const
     {
         const std::string elementName = name.substr(6, name.size() - 7);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                name);
-        }
-
-        return arrayLikeType(TypeKind::Stack, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Stack, typeName(elementType));
     }
 
     // "LinkedList<elem>" - a doubly linked, node-based collection (see
@@ -452,18 +536,7 @@ Type TypeChecker::resolveType(const std::string& name) const
     {
         const std::string elementName = name.substr(11, name.size() - 12);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                name);
-        }
-
-        return arrayLikeType(TypeKind::LinkedList, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
     }
 
     // "Deque<elem>" - a growable array with a `start` offset, supporting
@@ -474,18 +547,7 @@ Type TypeChecker::resolveType(const std::string& name) const
     {
         const std::string elementName = name.substr(6, name.size() - 7);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                name);
-        }
-
-        return arrayLikeType(TypeKind::Deque, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Deque, typeName(elementType));
     }
 
     // "Queue<elem>" - a FIFO collection backed internally by Deque<T>'s own
@@ -496,42 +558,31 @@ Type TypeChecker::resolveType(const std::string& name) const
     {
         const std::string elementName = name.substr(6, name.size() - 7);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                name);
-        }
-
-        return arrayLikeType(TypeKind::Queue, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Queue, typeName(elementType));
     }
 
     // "PriorityQueue<elem>" - a real binary heap (see
     // docs/language/0039-priority-queues.md). Unlike List/Stack/LinkedList/
     // Deque/Queue above, this is a real *semantic* restriction, not a
-    // structural nesting-depth one - `<`/`<=`/`>`/`>=` (requireInt above)
-    // only ever typecheck for i32 operands, so i32 is, today, the only type
-    // in this language a heap can meaningfully order at all. Mirrors how
-    // Set<T>/Map<K,V> below call isHashable rather than a structural check,
-    // for the identical reason: "some types don't qualify, and the reason
-    // is domain-specific, not nesting depth."
+    // structural nesting-depth one - only types isOrderableKind above
+    // accepts (i32, char) have a real total order in this language today.
+    // Mirrors how Set<T>/Map<K,V> below call isHashable rather than a
+    // structural check, for the identical reason: "some types don't
+    // qualify, and the reason is domain-specific, not nesting depth."
     if (name.starts_with("PriorityQueue<") && name.back() == '>')
     {
         const std::string elementName = name.substr(14, name.size() - 15);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind != TypeKind::I32)
+        if (!isOrderableKind(elementType.kind))
         {
             throw std::runtime_error(
-                "PriorityQueue<T> requires an orderable element type (i32 only in this phase - "
-                "no other type is comparable yet), found PriorityQueue<" +
+                "PriorityQueue<T> requires an orderable element type (i32, i64, f64, char, or str "
+                "only in "
+                "this phase - no other type is comparable yet), found PriorityQueue<" +
                 typeName(elementType) + ">");
         }
 
-        return arrayLikeType(TypeKind::PriorityQueue, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::PriorityQueue, typeName(elementType));
     }
 
     // "Set<elem>" - the canonical form Parser::parseTypeName always produces
@@ -565,19 +616,19 @@ Type TypeChecker::resolveType(const std::string& name) const
     // elementTypeName representation Set<T> above uses (not List/Stack's
     // own flat elementKind - mirrors Set<T>, not the array-like
     // collections, since SortedSet<T> is "Set<T>, but ordered"). The
-    // restriction here is orderability, not hashability - same i32-only
-    // requirement PriorityQueue<T>/SortedMap<K,V>'s own element/key already
-    // have (see docs/language/0039-priority-queues.md), since `<`/`<=`/
-    // `>`/`>=` only ever typecheck for i32 operands today.
+    // restriction here is orderability, not hashability - same
+    // isOrderableKind requirement PriorityQueue<T>/SortedMap<K,V>'s own
+    // element/key already have (see docs/language/0039-priority-queues.md).
     if (name.starts_with("SortedSet<") && name.back() == '>')
     {
         const std::string elementName = name.substr(10, name.size() - 11);
         const Type elementType = resolveType(elementName);
-        if (elementType.kind != TypeKind::I32)
+        if (!isOrderableKind(elementType.kind))
         {
             throw std::runtime_error(
-                "SortedSet<T> requires an orderable element type (i32 only in this phase - no "
-                "other type is comparable yet), found SortedSet<" +
+                "SortedSet<T> requires an orderable element type (i32, i64, f64, char, or str only "
+                "in "
+                "this phase - no other type is comparable yet), found SortedSet<" +
                 typeName(elementType) + ">");
         }
         Type result{};
@@ -622,14 +673,13 @@ Type TypeChecker::resolveType(const std::string& name) const
     // "SortedMap<key,value>" - a real AVL tree, keeping keys ordered (see
     // docs/language/0040-sorted-maps.md). Same two-type-argument shape as
     // Map<K,V> above, reusing its bracket-depth-aware comma split - but the
-    // key restriction is orderability, not hashability: `<`/`<=`/`>`/`>=`
-    // (requireInt above) only ever typecheck for i32 operands, so i32 is,
-    // today, the only key type a tree can meaningfully order at all (same
-    // reasoning PriorityQueue<T>'s own element-type restriction already
-    // established - see docs/language/0039-priority-queues.md). V has no
-    // such requirement (never compared, only stored) and may be any
-    // resolvable type except slice<T> (still parameter-only), exactly like
-    // Map<K,V>'s own V.
+    // key restriction is orderability, not hashability: only types
+    // isOrderableKind accepts (i32, char) have a real total order in this
+    // language today (same reasoning PriorityQueue<T>'s own element-type
+    // restriction already established - see
+    // docs/language/0039-priority-queues.md). V has no such requirement
+    // (never compared, only stored) and may be any resolvable type except
+    // slice<T> (still parameter-only), exactly like Map<K,V>'s own V.
     if (name.starts_with("SortedMap<") && name.back() == '>')
     {
         const std::string args = name.substr(10, name.size() - 11);
@@ -643,12 +693,12 @@ Type TypeChecker::resolveType(const std::string& name) const
         const Type keyType = resolveType(keyName);
         const Type valueType = resolveType(valueName);
         rejectSliceOutsideParameter(valueType, "a SortedMap value type");
-        if (keyType.kind != TypeKind::I32)
+        if (!isOrderableKind(keyType.kind))
         {
-            throw std::runtime_error(
-                "SortedMap<K,V> requires an orderable key type (i32 only in this phase - no "
-                "other type is comparable yet), found SortedMap<" +
-                typeName(keyType) + "," + typeName(valueType) + ">");
+            throw std::runtime_error("SortedMap<K,V> requires an orderable key type (i32, i64, "
+                                     "f64, char, or str only in this "
+                                     "phase - no other type is comparable yet), found SortedMap<" +
+                                     typeName(keyType) + "," + typeName(valueType) + ">");
         }
         Type result{};
         result.kind = TypeKind::SortedMap;
@@ -696,16 +746,17 @@ bool TypeChecker::isHashable(const Type& type,
         case TypeKind::Bool:
         case TypeKind::String: return true;
 
-        // Array/List/Stack all use the flat elementKind/elementStructName
-        // representation (untouched by this phase's Map/Set rewrite) - so
-        // their element's Type is directly reconstructible, no re-resolve
-        // needed. Stack<T> is hashable under the same rule as List<T> - it's
-        // backed by the identical mechanism (see docs/language/0035-stacks.md).
+        // Array/List/Stack all store their element type as a canonical,
+        // re-resolvable string (see docs/language/0052-optional.md's own
+        // follow-up, which moved these off their old flat elementKind
+        // representation onto Map/Set's). Stack<T> is hashable under the
+        // same rule as List<T> - it's backed by the identical mechanism
+        // (see docs/language/0035-stacks.md).
         case TypeKind::Array:
         case TypeKind::List:
         case TypeKind::Stack:
         {
-            const Type element = simpleType(type.elementKind, type.elementStructName);
+            const Type element = resolveType(type.elementTypeName);
             return isHashable(element, visitedStructs);
         }
 
@@ -743,11 +794,44 @@ void TypeChecker::registerSignatures(const Program& program)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
+            // "print"/"write" are reserved builtin names (see
+            // docs/language/Axea_Printing_Formatting.md) - a real Axea
+            // function with either name would otherwise be permanently
+            // unreachable, since CallExpr checks the builtin names first.
+            if (function->name == "print" || function->name == "write")
+            {
+                throw std::runtime_error("'" + function->name +
+                                         "' is a reserved builtin name and cannot be redefined");
+            }
+            if (externs_.contains(function->name))
+            {
+                throw std::runtime_error("'" + function->name +
+                                         "' is declared both as a function and as an extern");
+            }
             functions_[function->name] = function;
         }
         else if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
             structs_[structDecl->name] = structDecl;
+        }
+        else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
+        {
+            if (externDecl->name == "print" || externDecl->name == "write")
+            {
+                throw std::runtime_error("'" + externDecl->name +
+                                         "' is a reserved builtin name and cannot be redefined");
+            }
+            // Rejected explicitly, not left to silently shadow - a real
+            // Axea function and an extern c declaration sharing one name
+            // would otherwise let CallExpr's own functions_-before-externs_
+            // lookup order silently pick one over the other with no
+            // warning (see docs/language/0048-ffi.md).
+            if (functions_.contains(externDecl->name))
+            {
+                throw std::runtime_error("'" + externDecl->name +
+                                         "' is declared both as a function and as an extern");
+            }
+            externs_[externDecl->name] = externDecl;
         }
     }
 
@@ -763,6 +847,36 @@ void TypeChecker::registerSignatures(const Program& program)
         {
             rejectSliceOutsideParameter(resolveType(*function->returnType),
                                         "a function return type");
+        }
+    }
+    // extern c signatures are validated separately (see
+    // docs/language/0048-ffi.md) - every param/return type must be
+    // FFI-safe (isFfiSafeType above), a real, narrower restriction than
+    // an ordinary Axea function's own param/return type has.
+    for (const auto& [name, externDecl] : externs_)
+    {
+        for (const auto& param : externDecl->params)
+        {
+            const Type paramType = resolveType(param.type);
+            if (!isFfiSafeType(paramType))
+            {
+                throw std::runtime_error(
+                    "extern function '" + externDecl->name +
+                    "' has an unsupported parameter type: " + typeName(paramType) +
+                    " (only i32, bool, str, and cstr are FFI-safe)");
+            }
+        }
+        if (externDecl->returnType)
+        {
+            const Type returnType = resolveType(*externDecl->returnType);
+            if (!isFfiSafeType(returnType))
+            {
+                throw std::runtime_error(
+                    "extern function '" + externDecl->name +
+                    "' has an unsupported return type: " + typeName(returnType) +
+                    " (only i32, bool, str, cstr, or no return type/unit "
+                    "are FFI-safe)");
+            }
         }
     }
     for (const auto& [name, structDecl] : structs_)
@@ -800,6 +914,14 @@ void TypeChecker::check(const Program& program)
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             checkStmt(*assignment, globalEnv, nullptr, nullptr);
+        }
+        else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
+        {
+            // A bare top-level call kept for its side effect
+            // (`print("hi")`, `write("...")`) - see
+            // Parser::looksLikeFunctionDecl's own doc comment for why
+            // this is the one non-assignment top-level statement shape.
+            checkStmt(*exprStmt, globalEnv, nullptr, nullptr);
         }
     }
 }
@@ -883,8 +1005,27 @@ void TypeChecker::checkStmt(const Stmt& stmt,
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        const Type valueType =
-            checkExpr(*assignment->value, env, expectedReturnType, currentLoopBreakTypes);
+        // `x: Optional<T> = None` (see docs/language/0052-optional.md) -
+        // NoneExpr carries no expression to synthesize a type from, so its
+        // type is taken directly from the declared type here rather than
+        // through the generic checkExpr(NoneExpr) path (which always
+        // throws "cannot infer", since it has no such context available).
+        Type valueType;
+        if (dynamic_cast<const NoneExpr*>(assignment->value.get()) && assignment->declaredType)
+        {
+            const Type declared = resolveType(*assignment->declaredType);
+            if (declared.kind != TypeKind::Optional)
+            {
+                throw std::runtime_error("'None' requires a declared Optional<T> type, found " +
+                                         typeName(declared));
+            }
+            valueType = declared;
+        }
+        else
+        {
+            valueType =
+                checkExpr(*assignment->value, env, expectedReturnType, currentLoopBreakTypes);
+        }
         if (assignment->declaredType)
         {
             const Type declared = resolveType(*assignment->declaredType);
@@ -906,10 +1047,26 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         {
             throw std::runtime_error("'return' used outside a function");
         }
-        const Type valueType =
-            returnStmt->value
-                ? checkExpr(*returnStmt->value, env, expectedReturnType, currentLoopBreakTypes)
-                : kUnit;
+        // `return None` (see docs/language/0052-optional.md) - same
+        // "borrow the type from context instead of synthesizing it" special
+        // case AssignmentStmt's own NoneExpr handling above needs, using
+        // the enclosing function's own declared return type as the context
+        // this time. If expectedReturnType isn't itself Optional<U>, this
+        // deliberately falls through to the generic checkExpr(NoneExpr)
+        // path below, whose "cannot infer" error is the right message.
+        Type valueType;
+        if (returnStmt->value && dynamic_cast<const NoneExpr*>(returnStmt->value.get()) &&
+            expectedReturnType->kind == TypeKind::Optional)
+        {
+            valueType = *expectedReturnType;
+        }
+        else
+        {
+            valueType =
+                returnStmt->value
+                    ? checkExpr(*returnStmt->value, env, expectedReturnType, currentLoopBreakTypes)
+                    : kUnit;
+        }
         if (!(valueType == *expectedReturnType))
         {
             throw std::runtime_error("'return' produces " + typeName(valueType) +
@@ -961,7 +1118,7 @@ void TypeChecker::checkStmt(const Stmt& stmt,
             checkLiteralIndexBounds(*indexAssign->index, objectType);
         }
 
-        const Type elementType = simpleType(objectType.elementKind, objectType.elementStructName);
+        const Type elementType = resolveType(objectType.elementTypeName);
         const Type valueType =
             checkExpr(*indexAssign->value, env, expectedReturnType, currentLoopBreakTypes);
         if (!(valueType == elementType))
@@ -1223,6 +1380,16 @@ Type TypeChecker::checkExpr(const Expr& expr,
         return kI32;
     }
 
+    if (dynamic_cast<const Int64Expr*>(&expr))
+    {
+        return kI64;
+    }
+
+    if (dynamic_cast<const FloatExpr*>(&expr))
+    {
+        return kF64;
+    }
+
     if (dynamic_cast<const BoolExpr*>(&expr))
     {
         return kBool;
@@ -1236,6 +1403,35 @@ Type TypeChecker::checkExpr(const Expr& expr,
     if (dynamic_cast<const CharExpr*>(&expr))
     {
         return kChar;
+    }
+
+    // `"Hello {name}, you are {age}."` (see
+    // docs/language/Axea_Printing_Formatting.md) - each piece's own expr
+    // (literal pieces have none) must be text-representable; the result
+    // is always a fresh String, matching that doc's own "when runtime
+    // construction is necessary, the result is an owned String" framing -
+    // even a piece-free literal never reaches this node at all (the
+    // parser only builds one when at least one `{...}` span was found;
+    // see Parser::parseStringLiteral).
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (!piece.expr)
+            {
+                continue;
+            }
+            const Type pieceType =
+                checkExpr(*piece.expr, env, expectedReturnType, currentLoopBreakTypes);
+            if (!isTextRepresentable(pieceType))
+            {
+                throw std::runtime_error(
+                    "interpolation expression has unsupported type " + typeName(pieceType) +
+                    " (only i32, i64, f64, bool, char, str, and String are supported this "
+                    "phase)");
+            }
+        }
+        return simpleType(TypeKind::OwnedString);
     }
 
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
@@ -1297,17 +1493,72 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
-        const auto it = functions_.find(call->callee);
-        if (it == functions_.end())
+        // `print`/`write` (see docs/language/Axea_Printing_Formatting.md) -
+        // compiler builtins, checked before the ordinary
+        // functions_/externs_ lookup below (mirrors `.parse<T>()`'s own
+        // "checked first, not tied to one TypeKind" placement). Any
+        // number of arguments (including zero - `print()` alone prints
+        // just a newline), each independently required to be
+        // text-representable - the same restriction interpolation
+        // pieces already have, and for the identical reason: neither
+        // mechanism yet reuses the top-level binding printer's own
+        // full per-type dispatch (structs, arrays, collections).
+        // `registerSignatures` already rejects a user function/extern
+        // named "print"/"write", so this can never shadow a real
+        // declaration.
+        if (call->callee == "print" || call->callee == "write")
         {
-            throw std::runtime_error("undefined function: " + call->callee);
+            for (const auto& argument : call->arguments)
+            {
+                const Type argType =
+                    checkExpr(*argument, env, expectedReturnType, currentLoopBreakTypes);
+                // Same allowlist interpolation uses (see
+                // isTextRepresentable's own comment) - a struct argument
+                // prints directly (see emitPrint, which special-cases
+                // isNamedStructPointerType before falling through to
+                // stringifyValue), everything else routes through the
+                // general stringify-then-"%s" path, same as interpolation.
+                if (!isTextRepresentable(argType))
+                {
+                    throw std::runtime_error("'" + call->callee +
+                                             "' argument has unsupported type " +
+                                             typeName(argType) +
+                                             " (slice<T> is the one remaining unsupported type "
+                                             "this phase)");
+                }
+            }
+            return kUnit;
         }
 
-        const FunctionDecl& function = *it->second;
-        if (call->arguments.size() != function.params.size())
+        // extern c functions (see docs/language/0048-ffi.md) share this
+        // exact same call-checking logic - both FunctionDecl and
+        // ExternDecl happen to have the identical (params, returnType)
+        // shape, so a call site needs to know only which one it found,
+        // not which kind of declaration it came from.
+        const std::vector<Param>* params = nullptr;
+        const std::optional<std::string>* returnType = nullptr;
+
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end())
+        {
+            params = &it->second->params;
+            returnType = &it->second->returnType;
+        }
+        else
+        {
+            const auto externIt = externs_.find(call->callee);
+            if (externIt == externs_.end())
+            {
+                throw std::runtime_error("undefined function: " + call->callee);
+            }
+            params = &externIt->second->params;
+            returnType = &externIt->second->returnType;
+        }
+
+        if (call->arguments.size() != params->size())
         {
             throw std::runtime_error("function '" + call->callee + "' expects " +
-                                     std::to_string(function.params.size()) + " argument(s), got " +
+                                     std::to_string(params->size()) + " argument(s), got " +
                                      std::to_string(call->arguments.size()));
         }
 
@@ -1315,17 +1566,16 @@ Type TypeChecker::checkExpr(const Expr& expr,
         {
             const Type argType =
                 checkExpr(*call->arguments[i], env, expectedReturnType, currentLoopBreakTypes);
-            const Type paramType = resolveType(function.params[i].type);
+            const Type paramType = resolveType((*params)[i].type);
             // An array of *any* size implicitly converts to a slice of the
             // same element type at a call boundary - the whole point of
             // slice<T> (docs/language/0032-slices.md). An existing slice
             // passed straight through to another slice parameter needs no
             // special-casing: ordinary Slice == Slice equality already
             // covers that forwarding case.
-            const bool arrayToSliceCoercion =
-                paramType.kind == TypeKind::Slice && argType.kind == TypeKind::Array &&
-                argType.elementKind == paramType.elementKind &&
-                argType.elementStructName == paramType.elementStructName;
+            const bool arrayToSliceCoercion = paramType.kind == TypeKind::Slice &&
+                                              argType.kind == TypeKind::Array &&
+                                              argType.elementTypeName == paramType.elementTypeName;
             // An owned String implicitly lends a str at a call boundary -
             // the same "wider owned type stands in for a narrower borrowed
             // view" shape arrayToSliceCoercion already covers for arrays,
@@ -1341,7 +1591,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
             }
         }
 
-        return function.returnType ? resolveType(*function.returnType) : kUnit;
+        return *returnType ? resolveType(**returnType) : kUnit;
     }
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
@@ -1371,23 +1621,143 @@ Type TypeChecker::checkExpr(const Expr& expr,
                 throw std::runtime_error("'parse' expects 0 arguments, got " +
                                          std::to_string(methodCall->arguments.size()));
             }
+            // Returns Optional<T>, not T directly (see
+            // docs/language/0052-optional.md) - invalid input is now a real
+            // None, not a silently-returned fallback like 0/0.0/false.
             if (methodCall->typeArgument == "i32")
             {
-                return kI32;
+                return arrayLikeType(TypeKind::Optional, "i32");
+            }
+            if (methodCall->typeArgument == "i64")
+            {
+                return arrayLikeType(TypeKind::Optional, "i64");
+            }
+            if (methodCall->typeArgument == "f64")
+            {
+                return arrayLikeType(TypeKind::Optional, "f64");
             }
             if (methodCall->typeArgument == "bool")
             {
-                return kBool;
+                return arrayLikeType(TypeKind::Optional, "bool");
             }
-            throw std::runtime_error("parse<" + methodCall->typeArgument +
-                                     "> is not supported - only parse<i32> and parse<bool> are "
-                                     "implemented this phase");
+            throw std::runtime_error(
+                "parse<" + methodCall->typeArgument +
+                "> is not supported - only parse<i32>, parse<i64>, parse<f64>, and "
+                "parse<bool> are implemented this phase");
+        }
+
+        // `.to_cstr()` (see docs/language/0048-ffi.md) - the sole legal
+        // way to obtain a `cstr`, mirroring `.parse<T>()`'s own placement
+        // (checked before the object-type-keyed dispatch chain, since it
+        // applies across both str-coercible TypeKinds). Representationally
+        // a complete no-op (str is already a null-terminated i8*, exactly
+        // what cstr is too - see docs/language/0042-string.md's own
+        // Design section) - the conversion exists purely at the type
+        // level, matching docs/std/strings/0007-ffi.md's own explicit
+        // "use to_cstr() for C interop" framing rather than silent
+        // interchangeability.
+        if (methodCall->method == "to_cstr")
+        {
+            if (!isStrCoercible(objectType))
+            {
+                throw std::runtime_error("'to_cstr' requires str, got " + typeName(objectType));
+            }
+            if (!methodCall->arguments.empty())
+            {
+                throw std::runtime_error("'to_cstr' expects 0 arguments, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            return simpleType(TypeKind::CStr);
+        }
+
+        // `.unwrap_or(default)`/`.is_some()`/`.is_none()` (see
+        // docs/language/0052-optional.md) - the non-propagating, usable-
+        // anywhere half of Optional<T>'s API (the propagating half is `?`,
+        // TryExpr, checked separately below since it isn't a MethodCallExpr
+        // at all). Grouped here (before the per-kind dispatch chain), same
+        // reasoning as `.parse`/`.to_cstr`/`.join` above, even though these
+        // three are tied to exactly one TypeKind (Optional) - kept out of
+        // that chain anyway since Optional<T> has no TypeKind-keyed "new"
+        // dispatch section of its own to join (it's never constructed via
+        // a `.method()` call, only Some(x)/None/`.parse<T>()`).
+        if (methodCall->method == "unwrap_or")
+        {
+            if (objectType.kind != TypeKind::Optional)
+            {
+                throw std::runtime_error("'unwrap_or' requires an Optional<T>, got " +
+                                         typeName(objectType));
+            }
+            if (methodCall->arguments.size() != 1)
+            {
+                throw std::runtime_error("'unwrap_or' expects 1 argument, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            const Type payloadType = resolveType(objectType.elementTypeName);
+            const Type defaultType = checkExpr(
+                *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+            if (!(defaultType == payloadType))
+            {
+                throw std::runtime_error("'unwrap_or' default has type " + typeName(defaultType) +
+                                         " but Optional payload is " + typeName(payloadType));
+            }
+            return payloadType;
+        }
+
+        if (methodCall->method == "is_some" || methodCall->method == "is_none")
+        {
+            if (objectType.kind != TypeKind::Optional)
+            {
+                throw std::runtime_error("'" + methodCall->method +
+                                         "' requires an Optional<T>, "
+                                         "got " +
+                                         typeName(objectType));
+            }
+            if (!methodCall->arguments.empty())
+            {
+                throw std::runtime_error("'" + methodCall->method + "' expects 0 arguments, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            return kBool;
+        }
+
+        // `.join(separator)` (see
+        // docs/language/0050-collection-join-and-slicing.md) - applies
+        // across both Array and List<T> (mirrors `.parse`/`.to_cstr`'s own
+        // placement here, before the per-kind dispatch chain below, since
+        // it too applies across more than one TypeKind), T restricted to
+        // isTextRepresentable. Always returns a fresh, owned String, built
+        // the same way interpolation builds one.
+        if (methodCall->method == "join")
+        {
+            if (objectType.kind != TypeKind::Array && objectType.kind != TypeKind::List)
+            {
+                throw std::runtime_error("'join' requires an Array or List, got " +
+                                         typeName(objectType));
+            }
+            const Type elementType = resolveType(objectType.elementTypeName);
+            if (!isTextRepresentable(elementType))
+            {
+                throw std::runtime_error(
+                    "'join' requires i32/bool/char/str/String elements, found " +
+                    typeName(elementType));
+            }
+            if (methodCall->arguments.size() != 1)
+            {
+                throw std::runtime_error("'join' expects 1 argument, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            const Type sepType = checkExpr(
+                *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
+            if (!isStrCoercible(sepType))
+            {
+                throw std::runtime_error("'join' separator must be str, got " + typeName(sepType));
+            }
+            return simpleType(TypeKind::OwnedString);
         }
 
         if (objectType.kind == TypeKind::List)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "push")
             {
@@ -1427,8 +1797,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // matters for struct-typed T).
         if (objectType.kind == TypeKind::Stack)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "push")
             {
@@ -1471,8 +1840,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // exception clause for LinkedList<T> at all.
         if (objectType.kind == TypeKind::LinkedList)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "push_front" || methodCall->method == "push_back")
             {
@@ -1517,8 +1885,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // exception either (pop_front/pop_back always remove).
         if (objectType.kind == TypeKind::Deque)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "push_front" || methodCall->method == "push_back")
             {
@@ -1562,8 +1929,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // exception either (dequeue always removes).
         if (objectType.kind == TypeKind::Queue)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "enqueue")
             {
@@ -1604,8 +1970,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // their type-checking shape.
         if (objectType.kind == TypeKind::PriorityQueue)
         {
-            const Type elementType =
-                simpleType(objectType.elementKind, objectType.elementStructName);
+            const Type elementType = resolveType(objectType.elementTypeName);
 
             if (methodCall->method == "push")
             {
@@ -1988,89 +2353,38 @@ Type TypeChecker::checkExpr(const Expr& expr,
         }
 
         return arrayLikeType(TypeKind::Array,
-                             elementType.kind,
-                             elementType.structName,
+                             typeName(elementType),
                              static_cast<int>(arrayLiteral->elements.size()));
     }
 
     if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
     {
         const Type elementType = resolveType(listNew->elementType);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                typeName(elementType));
-        }
-        return arrayLikeType(TypeKind::List, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::List, typeName(elementType));
     }
 
     if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
     {
         const Type elementType = resolveType(stackNew->elementType);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                typeName(elementType));
-        }
-        return arrayLikeType(TypeKind::Stack, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Stack, typeName(elementType));
     }
 
     if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
     {
         const Type elementType = resolveType(linkedListNew->elementType);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                typeName(elementType));
-        }
-        return arrayLikeType(TypeKind::LinkedList, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
     }
 
     if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
     {
         const Type elementType = resolveType(dequeNew->elementType);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                typeName(elementType));
-        }
-        return arrayLikeType(TypeKind::Deque, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Deque, typeName(elementType));
     }
 
     if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
     {
         const Type elementType = resolveType(queueNew->elementType);
-        if (elementType.kind == TypeKind::Array || elementType.kind == TypeKind::Slice ||
-            elementType.kind == TypeKind::List || elementType.kind == TypeKind::Stack ||
-            elementType.kind == TypeKind::LinkedList || elementType.kind == TypeKind::Deque ||
-            elementType.kind == TypeKind::Queue || elementType.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "nested array/slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue element "
-                "types are not supported: " +
-                typeName(elementType));
-        }
-        return arrayLikeType(TypeKind::Queue, elementType.kind, elementType.structName);
+        return arrayLikeType(TypeKind::Queue, typeName(elementType));
     }
 
     if (const auto* priorityQueueNew = dynamic_cast<const PriorityQueueNewExpr*>(&expr))
@@ -2140,6 +2454,27 @@ Type TypeChecker::checkExpr(const Expr& expr,
     {
         const Type objectType =
             checkExpr(*index->object, env, expectedReturnType, currentLoopBreakTypes);
+
+        // Single-character indexing (`s[i]`) on a str-coercible object - a
+        // real Unicode *codepoint* index, matching `.length`'s own
+        // codepoint-not-byte counting (see docs/language/0047-unicode.md),
+        // not a byte offset. Checked before (and instead of) `isIndexable`
+        // deliberately - str/String are immutable, so this stays absent
+        // from `isIndexable` itself (shared with IndexAssignStmt, which
+        // must keep rejecting `s[i] = ...`), and str/String don't have an
+        // elementTypeName the Array/Slice/List/Deque branch below relies on
+        // for its own return type.
+        if (isStrCoercible(objectType))
+        {
+            const Type indexType =
+                checkExpr(*index->index, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(indexType == kI32))
+            {
+                throw std::runtime_error("string index must be i32, found " + typeName(indexType));
+            }
+            return kChar;
+        }
+
         if (!isIndexable(objectType))
         {
             throw std::runtime_error("indexing into non-array/slice type " + typeName(objectType));
@@ -2155,22 +2490,46 @@ Type TypeChecker::checkExpr(const Expr& expr,
             checkLiteralIndexBounds(*index->index, objectType);
         }
 
-        return simpleType(objectType.elementKind, objectType.elementStructName);
+        return resolveType(objectType.elementTypeName);
     }
 
     if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
     {
-        // Restricted to str-coercible objects (str or String) - a
-        // deliberately narrower scope than IndexExpr's own array/slice
-        // reach, and deliberately *not* extended to arrays/slices in this
-        // phase (sub-slicing an array is explicitly out of scope per
-        // docs/language/0032-slices.md's own "Explicitly out of scope"
-        // section). See docs/language/0045-str-slicing.md.
+        // Originally str-coercible-only (str or String); widened in
+        // docs/language/0050-collection-join-and-slicing.md to also accept
+        // an Array or List<T>, T restricted to isTextRepresentable
+        // (i32/bool/char/str/String - the same set print()/interpolation
+        // already established) - struct-typed T is deliberately out of
+        // scope this phase (see that document's own Design section for
+        // why: a bulk element copy would alias struct-typed elements with
+        // the source object, a RegionChecker question this phase doesn't
+        // take on). A str-coercible object always yields a fresh str; an
+        // Array/List object always yields a fresh List<T> - mirrors
+        // IndexExpr's own isIndexable dispatch, generalized one step
+        // further to a second, deliberately narrower object-type set.
         const Type objectType =
             checkExpr(*strSlice->object, env, expectedReturnType, currentLoopBreakTypes);
-        if (!isStrCoercible(objectType))
+        Type resultType;
+        if (isStrCoercible(objectType))
         {
-            throw std::runtime_error("slicing requires str, got " + typeName(objectType));
+            resultType = kStr;
+        }
+        else if (objectType.kind == TypeKind::Array || objectType.kind == TypeKind::List)
+        {
+            const Type elementType = resolveType(objectType.elementTypeName);
+            if (!isTextRepresentable(elementType))
+            {
+                throw std::runtime_error(
+                    "slicing an Array/List requires i32/bool/char/str/String elements, found " +
+                    typeName(elementType));
+            }
+            resultType = arrayLikeType(TypeKind::List, objectType.elementTypeName);
+        }
+        else
+        {
+            throw std::runtime_error(
+                "slicing requires str, or an Array/List of i32/bool/char/str/String, got " +
+                typeName(objectType));
         }
         if (strSlice->start)
         {
@@ -2190,7 +2549,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
                 throw std::runtime_error("slice end must be i32, found " + typeName(endType));
             }
         }
-        return kStr;
+        return resultType;
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
@@ -2205,7 +2564,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
             case TokenKind::Plus:
             case TokenKind::Minus:
             case TokenKind::Star:
-            case TokenKind::Slash: requireInt(leftType, rightType); return kI32;
+            case TokenKind::Slash: return requireInt(leftType, rightType);
             case TokenKind::Less:
             case TokenKind::LessEqual:
             case TokenKind::Greater:
@@ -2220,6 +2579,64 @@ Type TypeChecker::checkExpr(const Expr& expr,
                 return kBool;
             default: throw std::runtime_error("unsupported operator");
         }
+    }
+
+    // `<expr> as <targetType>` (see docs/language/0005-type-system.md) -
+    // both the operand's own type and the target must be numeric
+    // (isNumericKind: i32, i64, or f64) - no casting to/from bool/char/
+    // str/struct/collections this phase, and no wrapping/checked/
+    // saturating variants, just a direct value conversion. Same-kind casts
+    // (`i32 as i32`) are allowed too, same as this checker's general
+    // "reject only what's actually wrong" philosophy - a redundant cast is
+    // harmless, not an error.
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        const Type operandType =
+            checkExpr(*cast->operand, env, expectedReturnType, currentLoopBreakTypes);
+        const Type targetType = resolveType(cast->targetType);
+        if (!isNumericKind(operandType.kind) || !isNumericKind(targetType.kind))
+        {
+            throw std::runtime_error("'as' cast requires both sides to be i32, i64, or f64, "
+                                     "found " +
+                                     typeName(operandType) + " as " + typeName(targetType));
+        }
+        return targetType;
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        const Type payloadType =
+            checkExpr(*someExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+        return arrayLikeType(TypeKind::Optional, typeName(payloadType));
+    }
+
+    if (dynamic_cast<const NoneExpr*>(&expr))
+    {
+        // A bare `None` carries no expression to synthesize a payload type
+        // from - only reachable here when it appears somewhere checkStmt's
+        // AssignmentStmt/ReturnStmt cases don't already special-case it
+        // (see docs/language/0052-optional.md), e.g. as a function-call
+        // argument or nested inside another expression.
+        throw std::runtime_error(
+            "cannot infer the type of 'None' here - use it in a declared-type assignment "
+            "(x: Optional<T> = None) or a bare 'return None' inside a function declared to "
+            "return Optional<T>");
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        if (!expectedReturnType || expectedReturnType->kind != TypeKind::Optional)
+        {
+            throw std::runtime_error(
+                "'?' can only be used inside a function whose own return type is Optional<T>");
+        }
+        const Type operandType =
+            checkExpr(*tryExpr->operand, env, expectedReturnType, currentLoopBreakTypes);
+        if (operandType.kind != TypeKind::Optional)
+        {
+            throw std::runtime_error("'?' requires an Optional<T>, got " + typeName(operandType));
+        }
+        return resolveType(operandType.elementTypeName);
     }
 
     throw std::runtime_error("unsupported expression");

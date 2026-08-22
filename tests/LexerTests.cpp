@@ -44,6 +44,48 @@ TEST("Lexer tokenizes boolean keywords and string literals")
     EXPECT_EQ(tokens[3].kind, TokenKind::EndOfFile);
 }
 
+TEST("Lexer tokenizes a string literal containing a nested string literal inside an "
+     "interpolation span as a single String token, not truncated at the nested string's own "
+     "opening quote (see docs/language/0049-printing-formatting.md's own follow-up)")
+{
+    Lexer lexer(R"("First two: {numbers[..2].join(",")}")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"("First two: {numbers[..2].join(",")}")");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer tokenizes a string literal with two interpolation spans, each containing its own "
+     "nested string literal, as one String token")
+{
+    Lexer lexer(R"("{a.join(",")} and {b.join("-")}")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"("{a.join(",")} and {b.join("-")}")");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer still tokenizes doubled '{{'/'}}' literal braces correctly, unaffected by the new "
+     "brace-depth tracking")
+{
+    Lexer lexer(R"("Set = {{1, 2, 3}}")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"("Set = {{1, 2, 3}}")");
+}
+
+TEST("Lexer still reports Invalid for a string literal with no closing quote at all, even "
+     "with the new interpolation-aware scan")
+{
+    Lexer lexer(R"("hello)");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
+}
+
 TEST("Lexer tokenizes Phase 2 punctuation")
 {
     Lexer lexer(", . -> =>");
@@ -92,6 +134,17 @@ TEST("Lexer marks an unterminated char literal as Invalid")
     EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
 }
 
+TEST("Lexer tokenizes the 'extern' keyword")
+{
+    Lexer lexer("extern c puts");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Extern);
+    EXPECT_EQ(tokens[1].kind, TokenKind::Identifier);
+    EXPECT_EQ(tokens[1].text, "c");
+    EXPECT_EQ(tokens[2].kind, TokenKind::Identifier);
+}
+
 TEST("Lexer tokenizes increment and decrement operators")
 {
     Lexer lexer("++ -- + -");
@@ -102,4 +155,69 @@ TEST("Lexer tokenizes increment and decrement operators")
     EXPECT_EQ(tokens[2].kind, TokenKind::Plus);
     EXPECT_EQ(tokens[3].kind, TokenKind::Minus);
     EXPECT_EQ(tokens[4].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer tokenizes an i64-suffixed integer literal, keeping the suffix in Token.text (see "
+     "docs/language/0005-type-system.md)")
+{
+    Lexer lexer("100i64");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Int64);
+    EXPECT_EQ(tokens[0].text, "100i64");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer tokenizes a bare decimal float literal as Float, defaulting to f64 with no suffix "
+     "required")
+{
+    Lexer lexer("1.5");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Float);
+    EXPECT_EQ(tokens[0].text, "1.5");
+}
+
+TEST("Lexer tokenizes an f64-suffixed whole-number literal (no decimal point) as Float")
+{
+    Lexer lexer("100f64");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Float);
+    EXPECT_EQ(tokens[0].text, "100f64");
+}
+
+TEST("Lexer does not consume '..' (a slice range) as a float's decimal point - '5..7' stays "
+     "Integer, DotDot, Integer (see docs/language/0032-slices.md)")
+{
+    Lexer lexer("5..7");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Integer);
+    EXPECT_EQ(tokens[0].text, "5");
+    EXPECT_EQ(tokens[1].kind, TokenKind::DotDot);
+    EXPECT_EQ(tokens[2].kind, TokenKind::Integer);
+    EXPECT_EQ(tokens[2].text, "7");
+}
+
+TEST("Lexer does not treat 'i64' as a suffix when immediately followed by another identifier "
+     "character - only a full, non-identifier-continuing match counts")
+{
+    Lexer lexer("100i64x");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Integer);
+    EXPECT_EQ(tokens[0].text, "100");
+    EXPECT_EQ(tokens[1].kind, TokenKind::Identifier);
+    EXPECT_EQ(tokens[1].text, "i64x");
+}
+
+TEST("Lexer tokenizes the 'as' keyword")
+{
+    Lexer lexer("x as i64");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Identifier);
+    EXPECT_EQ(tokens[1].kind, TokenKind::As);
+    EXPECT_EQ(tokens[2].kind, TokenKind::Identifier);
 }

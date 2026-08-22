@@ -30,9 +30,16 @@ struct SortedMapInstance;
 struct SortedSetInstance;
 struct StringInstance;
 struct BufferInstance;
+struct OptionalInstance;
 
 using Value =
-    std::variant<std::int64_t,
+    std::variant<std::int64_t, // i32 and i64 both (see docs/language/0005-type-system.md) -
+                               // this interpreter never distinguishes their width at runtime,
+                               // only TypeChecker does, exactly like i32/char already share the
+                               // numeric-unification `asInt` helper provides
+                 double,       // f64 - the one numeric kind that needs a genuinely distinct C++
+                               // type here, since integer and floating-point arithmetic are
+                               // real, different operations, unlike i32-vs-i64's shared width
                  bool,
                  char32_t, // a single Unicode scalar value (see docs/language/0044-char.md) -
                            // a genuinely distinct C++ type from std::int64_t/bool, so it needs
@@ -54,6 +61,7 @@ using Value =
                  std::shared_ptr<SortedSetInstance>,
                  std::shared_ptr<StringInstance>,
                  std::shared_ptr<BufferInstance>,
+                 std::shared_ptr<OptionalInstance>,
                  std::monostate>;
 
 struct StructInstance
@@ -177,6 +185,21 @@ struct ValueEq
     bool operator()(const Value& a, const Value& b) const;
 };
 
+// Orderable, structural less-than over Value - for SortedMap<K,V>/
+// SortedSet<T> below (see docs/language/0040-sorted-maps.md,
+// docs/language/0041-sorted-sets.md), which need a real ordering, not just
+// the Hash+Eq ValueHash/ValueEq above provide. Only ever invoked on the
+// three kinds TypeChecker::isOrderableKind actually allows through - i32/
+// char (unified numerically, exactly like `asInt` already unifies them for
+// arithmetic/ordering elsewhere) and str (a bare std::string, compared by
+// its own real `<`) - so, unlike ValueHash/ValueEq, this needs no struct/
+// array/List recursion or self-reference guard; those types were never
+// orderable to begin with.
+struct ValueLess
+{
+    bool operator()(const Value& a, const Value& b) const;
+};
+
 // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
 // rewrite). The STL already provides a real, correct hash table for any key
 // type once given hash/equality - ValueHash/ValueEq above are the only piece
@@ -196,28 +219,25 @@ struct SetInstance
 // in the compiled backend, but (mirroring MapInstance/SetInstance's own
 // choice above, and LinkedListInstance's identical reasoning) the
 // interpreter's own representation doesn't need to replicate that
-// node-based layout: std::map<std::int64_t, Value> is *already* a real
+// node-based layout: std::map<Value, Value, ValueLess> is *already* a real
 // balanced tree (red-black, in every standard implementation), giving the
 // exact same "keys stay ordered, O(log n) operations" behavior for free. K
-// is std::int64_t directly, not Value/ValueHash/ValueEq - K is restricted
-// to i32 this phase (the only orderable type - see
-// docs/language/0039-priority-queues.md's identical restriction), so no
-// generic key comparator is needed the way MapInstance's arbitrary-hashable
-// K requires.
+// is a full Value (not a flat std::int64_t) precisely because K is no
+// longer i32-only - it's any of the three kinds ValueLess above orders
+// (i32, char, str; see TypeChecker::isOrderableKind and
+// docs/language/0039-priority-queues.md).
 struct SortedMapInstance
 {
-    std::map<std::int64_t, Value> entries;
+    std::map<Value, Value, ValueLess> entries;
 };
 
 // SortedSet<T> (see docs/language/0041-sorted-sets.md) - same reasoning as
-// SortedMapInstance above: std::set<std::int64_t> is already a real
+// SortedMapInstance above: std::set<Value, ValueLess> is already a real
 // balanced tree, giving "elements stay ordered" for free with zero
-// hand-rolled AVL logic. T is restricted to i32 this phase (same
-// restriction PriorityQueue<T>/SortedMap<K,V>'s own element/key already
-// have), so std::int64_t directly, no ValueHash/ValueEq needed.
+// hand-rolled AVL logic.
 struct SortedSetInstance
 {
-    std::set<std::int64_t> elements;
+    std::set<Value, ValueLess> elements;
 };
 
 // String (see docs/language/0042-string.md) - Axea's own owned, growable
@@ -249,6 +269,29 @@ struct StringInstance
 struct BufferInstance
 {
     std::string data;
+    // Tracks the compiled backend's own explicit doubling-growth capacity
+    // (see ensureBufferCapacity/emitBufferNew/emitBufferAppend,
+    // docs/language/0043-buffer.md) - *not* `data.capacity()`. Those two
+    // are genuinely different quantities: `std::string::capacity()` is
+    // libstdc++'s own implementation-defined growth/SSO threshold (15 on
+    // a typical 64-bit build, regardless of what was actually appended,
+    // since a short string fits entirely in the small-string-optimization
+    // inline buffer) - it was never a correct stand-in for "how many
+    // bytes this language's own Buffer.capacity would report" and only
+    // happened to go unnoticed until a real byte-for-byte comparison
+    // against the compiled backend's own hand-rolled algorithm was run.
+    std::int64_t capacity = 1;
+};
+
+// Reference semantics (shared_ptr), mirroring every other collection above
+// - see docs/language/0052-optional.md. `value` holds a default-constructed
+// Value (std::monostate) when `hasValue` is false; never read in that state
+// (every consumer - `?`, .unwrap_or/.is_some/.is_none - checks `hasValue`
+// first).
+struct OptionalInstance
+{
+    bool hasValue;
+    Value value;
 };
 
 std::string toString(const Value& value);
@@ -283,6 +326,12 @@ public:
 
 private:
     Value callFunction(const FunctionDecl& decl, std::vector<Value> args);
+    // extern c functions (see docs/language/0048-ffi.md) - a small,
+    // explicit allowlist of hand-implemented libc functions (currently
+    // just "puts"), since the interpreter can't dynamically link against
+    // arbitrary C symbols the way the compiled backend's own `declare`+
+    // `call` genuinely does. Any other name throws.
+    Value callExtern(const std::string& name, const std::vector<Value>& args);
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;

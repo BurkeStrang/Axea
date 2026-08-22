@@ -1,0 +1,19 @@
+describe(numbers: [i32; 4]) -> String
+{
+    firstTwo = numbers[..2]
+    comma = ", "
+    plus = "+"
+    return "{numbers.join(comma)} (first two: {firstTwo.join(plus)})"
+}
+
+report = describe([10, 20, 30, 40])
+
+names = List<str>()
+pushed1 = names.push("ada")
+pushed2 = names.push("grace")
+pushed3 = names.push("linus")
+
+separator = ", "
+allNames = names.join(separator)
+ampersand = " & "
+tailNames = names[1..].join(ampersand)

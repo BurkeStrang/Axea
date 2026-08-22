@@ -141,6 +141,7 @@ Token Lexer::nextToken()
         case ':': return makeToken(TokenKind::Colon, start, startLine, startColumn);
         case ';': return makeToken(TokenKind::Semicolon, start, startLine, startColumn);
         case ',': return makeToken(TokenKind::Comma, start, startLine, startColumn);
+        case '?': return makeToken(TokenKind::Question, start, startLine, startColumn);
         case '.':
             if (current() == '.')
             {
@@ -208,7 +209,60 @@ Token Lexer::lexNumber()
         advance();
     }
 
-    return makeToken(TokenKind::Integer, start, startLine, startColumn);
+    // A '.' starts a fractional part only when followed by a digit -
+    // otherwise it's DotDot (a slice range, "5..7") or a bare Dot, neither
+    // of which this function should consume (see
+    // docs/language/0032-slices.md). f64 is the only float type this
+    // phase (see docs/language/0005-type-system.md), so a fractional
+    // literal is always f64 regardless of suffix.
+    bool isFloat = false;
+    if (current() == '.' && std::isdigit(static_cast<unsigned char>(peek(1))))
+    {
+        isFloat = true;
+        advance(); // '.'
+        while (std::isdigit(static_cast<unsigned char>(current())))
+        {
+            advance();
+        }
+    }
+
+    // A numeric suffix (i64/f64 only this phase) is consumed only on a
+    // full, non-identifier-continuing match, so "100i64x" isn't silently
+    // misread as an i64 literal followed by a stray "x" - it's left for
+    // the identifier lexer to pick up "i64x" as its own (later invalid,
+    // in that position) token instead. Token.text keeps the suffix - the
+    // parser strips it back off before parsing the numeric text itself
+    // (see Parser::parseIntegerLiteral/parseFloatLiteral).
+    const auto matchesSuffix = [this](const char* suffix)
+    {
+        for (std::size_t i = 0; i < 3; ++i)
+        {
+            if (peek(i) != suffix[i])
+            {
+                return false;
+            }
+        }
+        const char after = peek(3);
+        return !(std::isalnum(static_cast<unsigned char>(after)) || after == '_');
+    };
+
+    if (!isFloat && matchesSuffix("i64"))
+    {
+        advance();
+        advance();
+        advance();
+        return makeToken(TokenKind::Int64, start, startLine, startColumn);
+    }
+    if (matchesSuffix("f64"))
+    {
+        advance();
+        advance();
+        advance();
+        return makeToken(TokenKind::Float, start, startLine, startColumn);
+    }
+
+    return makeToken(
+        isFloat ? TokenKind::Float : TokenKind::Integer, start, startLine, startColumn);
 }
 
 Token Lexer::lexIdentifierOrKeyword()
@@ -240,7 +294,9 @@ Token Lexer::lexIdentifierOrKeyword()
         {"break", TokenKind::Break},
         {"continue", TokenKind::Continue},
         {"for", TokenKind::For},
-        {"in", TokenKind::In}};
+        {"in", TokenKind::In},
+        {"extern", TokenKind::Extern},
+        {"as", TokenKind::As}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {
@@ -250,21 +306,80 @@ Token Lexer::lexIdentifierOrKeyword()
     return token;
 }
 
+bool Lexer::scanStringSpan()
+{
+    advance(); // opening quote
+
+    // Depth-tracked so a quote *inside* an active interpolation span
+    // (e.g. `"{x.join(",")}"`) is a nested string literal's own opening
+    // quote, not this string's own closing one - only a bare '"' at
+    // depth 0 ends the scan. '{{'/'}}' are only escaped-literal-brace
+    // pairs at depth 0, mirroring Parser::parseStringLiteral's own
+    // identical escaping rule exactly, so this scan treats the same
+    // source text as an interpolation span that the later parsing pass
+    // will.
+    int braceDepth = 0;
+    while (!atEnd())
+    {
+        const char c = current();
+        if (c == '"' && braceDepth == 0)
+        {
+            advance();
+            return true;
+        }
+        if (c == '{')
+        {
+            if (braceDepth == 0 && peek() == '{')
+            {
+                advance();
+                advance();
+                continue;
+            }
+            ++braceDepth;
+            advance();
+            continue;
+        }
+        if (c == '}')
+        {
+            if (braceDepth == 0 && peek() == '}')
+            {
+                advance();
+                advance();
+                continue;
+            }
+            if (braceDepth > 0)
+            {
+                --braceDepth;
+            }
+            advance();
+            continue;
+        }
+        if (c == '"' && braceDepth > 0)
+        {
+            // A nested string literal inside an active span - recurse,
+            // so it's skipped over using this exact same logic (handling
+            // arbitrary further nesting inside *it*, too), rather than
+            // naively scanning to the next bare '"'.
+            if (!scanStringSpan())
+            {
+                return false;
+            }
+            continue;
+        }
+        advance();
+    }
+
+    return false; // ran out of input before a real (depth-0) closing quote
+}
+
 Token Lexer::lexString()
 {
     const auto start = index_;
     const auto startLine = line_;
     const auto startColumn = column_;
 
-    advance(); // opening quote
-    while (!atEnd() && current() != '"')
+    if (scanStringSpan())
     {
-        advance();
-    }
-
-    if (current() == '"')
-    {
-        advance();
         return makeToken(TokenKind::String, start, startLine, startColumn);
     }
 

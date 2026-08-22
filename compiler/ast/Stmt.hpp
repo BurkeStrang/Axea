@@ -207,6 +207,29 @@ struct FunctionDecl final : Stmt
     std::unique_ptr<Expr> body; // always a BlockExpr (`=>` shorthand is normalized to one)
 };
 
+// `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md) -
+// a top-level declaration with no body, unlike FunctionDecl: the actual
+// implementation is linked in externally (a real libc symbol at compiled-
+// code time; a small hand-implemented allowlist at interpreted-code time -
+// see Interpreter.cpp). Only the "c" calling convention is recognized
+// this phase - a bare identifier check at parse time, not a keyword,
+// mirroring how "String"/"Buffer" are recognized by their own literal
+// text rather than reserved words.
+struct ExternDecl final : Stmt
+{
+    ExternDecl(std::string name, std::vector<Param> params, std::optional<std::string> returnType)
+        : name(std::move(name)),
+          params(std::move(params)),
+          returnType(std::move(returnType))
+    {
+    }
+
+    std::string name;
+    std::vector<Param> params; // declaredCapability is always nullopt - extern params take no
+                               // read/write/take prefix, mirroring a plain C function signature
+    std::optional<std::string> returnType; // empty => unit (void)
+};
+
 struct StructDecl final : Stmt
 {
     StructDecl(std::string name, std::vector<Field> fields)

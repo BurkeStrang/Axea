@@ -312,8 +312,15 @@ TEST("RegionChecker accepts returning a str slice taken directly from a borrowed
 TEST("RegionChecker accepts returning a parse<T>() result taken directly from a borrowed str "
      "parameter - i32/bool are plain values with nothing to borrow or alias")
 {
-    checkRegions("toInt(d: str) -> i32 { return d.parse<i32>() } "
+    checkRegions("toInt(d: str) -> Optional<i32> { return d.parse<i32>() } "
                  "a = toInt(\"42\")");
+}
+
+TEST("RegionChecker accepts an extern call through .to_cstr() on a borrowed str parameter")
+{
+    checkRegions("extern c puts(text: cstr) "
+                 "greet(name: str) -> i32 { called = puts(name.to_cstr())  return 1 } "
+                 "a = greet(\"hi\")");
 }
 
 TEST("RegionChecker rejects returning a struct value read via Stack<T>.peek() from a borrowed "
@@ -525,4 +532,41 @@ TEST("RegionChecker accepts a primitive value read via PriorityQueue<T>.peek() f
                  "a = PriorityQueue<i32>() "
                  "b = a.push(1) "
                  "x = top(a)");
+}
+
+TEST("RegionChecker accepts print/write called with a borrowed parameter's fields - the builtin "
+     "call arguments are read-only, same as any other read-only use")
+{
+    checkRegions("struct Point { x: i32 } "
+                 "show(p: Point) -> i32 { print(p.x) return 1 } "
+                 "a = Point { x: 1 } "
+                 "x = show(a)");
+}
+
+TEST("RegionChecker treats an interpolated string literal's result as Owned, matching the "
+     "InterpolatedStringExpr's always-owned String typing")
+{
+    checkRegions("struct Packet { id: i32 } "
+                 "consume(take p: Packet) -> Packet { return p } "
+                 "greet() -> Packet { "
+                 "  a = Packet { id: 1 } "
+                 "  s = \"packet {a.id}\" "
+                 "  return consume(a) "
+                 "} "
+                 "x = greet()");
+}
+
+TEST("RegionChecker treats a slice of a borrowed Array parameter as Owned - a slice always "
+     "allocates a fresh List<T>, never aliasing the source (see "
+     "docs/language/0050-collection-join-and-slicing.md)")
+{
+    checkRegions("firstTwo(nums: [i32; 4]) -> List<i32> { return nums[..2] } "
+                 "x = firstTwo([1, 2, 3, 4])");
+}
+
+TEST("RegionChecker treats a .join() of a borrowed Array parameter as Owned - always allocates a "
+     "fresh String, never aliasing the source")
+{
+    checkRegions("describe(nums: [i32; 4]) -> String { return nums.join(\",\") } "
+                 "x = describe([1, 2, 3, 4])");
 }

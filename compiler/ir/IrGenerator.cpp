@@ -29,6 +29,20 @@ namespace
         }
         return false;
     }
+
+    // "Optional<T>" -> "T" (see docs/language/0052-optional.md) - the
+    // canonical form Parser::parseTypeName/TypeChecker::typeName always
+    // produce, mirroring the substr-based unwrapping every generic type
+    // string elsewhere in this codebase already uses (e.g.
+    // LlvmIrEmitter::llvmType's own "slice<elem>" case). Used only for a
+    // bare `None`, which - unlike Some(x) - carries no expression to infer
+    // its payload type from at IrGenerator level (which keeps no real type
+    // table by design), so its payload type is read directly out of the
+    // declared/expected type string already present in the AST instead.
+    std::string optionalPayloadTypeName(const std::string& optionalTypeName)
+    {
+        return optionalTypeName.substr(9, optionalTypeName.size() - 10);
+    }
 } // namespace
 
 IrScope::IrScope(IrScope* parent, bool isBarrier)
@@ -692,6 +706,20 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* int64Expr = dynamic_cast<const Int64Expr*>(&expr))
+    {
+        auto inst = std::make_unique<IrConstInt64>();
+        inst->value = int64Expr->value;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* floatExpr = dynamic_cast<const FloatExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrConstFloat>();
+        inst->value = floatExpr->value;
+        return emit(ctx, std::move(inst));
+    }
+
     if (const auto* boolean = dynamic_cast<const BoolExpr*>(&expr))
     {
         auto inst = std::make_unique<IrConstBool>();
@@ -713,6 +741,48 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        // Desugars into "build a Buffer, then finish() into a String"
+        // (see docs/language/Axea_Printing_Formatting.md's own "the
+        // compiler may lower interpolation internally to efficient
+        // Buffer operations" hint) - a literal piece appends its own
+        // IrConstString directly (str-coercible already); an expression
+        // piece appends via IrBufferAppendValue, which stringifies at
+        // the LLVM layer based on the value's own inferred type (i32,
+        // bool, char are all not str-coercible on their own, unlike str/
+        // String, so a plain IrBufferAppend wouldn't work for those -
+        // this is why a distinct instruction is needed at all).
+        auto bufferNewInst = std::make_unique<IrBufferNew>();
+        const int bufferReg = emit(ctx, std::move(bufferNewInst));
+
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                const int valueReg = lowerExpr(*piece.expr, scope, ctx);
+                auto appendInst = std::make_unique<IrBufferAppendValue>();
+                appendInst->buffer = bufferReg;
+                appendInst->value = valueReg;
+                emit(ctx, std::move(appendInst));
+            }
+            else if (!piece.literalText.empty())
+            {
+                auto constInst = std::make_unique<IrConstString>();
+                constInst->value = piece.literalText;
+                const int textReg = emit(ctx, std::move(constInst));
+                auto appendInst = std::make_unique<IrBufferAppend>();
+                appendInst->buffer = bufferReg;
+                appendInst->text = textReg;
+                emit(ctx, std::move(appendInst));
+            }
+        }
+
+        auto finishInst = std::make_unique<IrBufferFinish>();
+        finishInst->buffer = bufferReg;
+        return emit(ctx, std::move(finishInst));
+    }
+
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
         return scope.find(name->name);
@@ -729,8 +799,95 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        const int operand = lowerExpr(*cast->operand, scope, ctx);
+        auto inst = std::make_unique<IrCast>();
+        inst->operand = operand;
+        inst->targetType = cast->targetType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        const int value = lowerExpr(*someExpr->value, scope, ctx);
+        auto inst = std::make_unique<IrOptionalNew>();
+        inst->value = value;
+        // payloadTypeName left empty - LlvmIrEmitter's own type inference
+        // reads the payload type directly off `value`'s already-inferred
+        // register type instead (see docs/language/0052-optional.md); only
+        // a bare None (no value register to infer from) needs it set.
+        return emit(ctx, std::move(inst));
+    }
+
+    if (dynamic_cast<const NoneExpr*>(&expr))
+    {
+        // Unreachable in a well-typed program - TypeChecker::checkStmt's
+        // AssignmentStmt/ReturnStmt cases (and their IrGenerator::lowerStmt
+        // mirrors just above) always intercept a bare `None` before it
+        // would reach generic lowerExpr (see docs/language/0052-optional.md).
+        return -1;
+    }
+
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        // `<expr>?` (see docs/language/0052-optional.md) - lowered as an
+        // IrBranch, the same "conditional + early-terminating side" shape
+        // IfExpr uses just below, exploiting emitBranch's own existing
+        // "a terminated side contributes no merge-block value" handling
+        // (see LlvmIrEmitter::emitBranch) for the None side's `return`.
+        const int optional = lowerExpr(*tryExpr->operand, scope, ctx);
+
+        auto isSomeInst = std::make_unique<IrOptionalIsSome>();
+        isSomeInst->object = optional;
+        const int isSome = emit(ctx, std::move(isSomeInst));
+
+        auto branch = std::make_unique<IrBranch>();
+        branch->condition = isSome;
+
+        IrScope thenScope(&scope, /*isBarrier=*/true);
+        std::vector<int> thenStructLocals;
+        Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+        auto unwrapInst = std::make_unique<IrOptionalUnwrap>();
+        unwrapInst->object = optional;
+        branch->thenValue = emit(thenCtx, std::move(unwrapInst));
+
+        IrScope elseScope(&scope, /*isBarrier=*/true);
+        std::vector<int> elseStructLocals;
+        Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+        auto noneInst = std::make_unique<IrOptionalNew>();
+        noneInst->value = -1;
+        noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
+        const int none = emit(elseCtx, std::move(noneInst));
+        auto returnInst = std::make_unique<IrReturn>();
+        returnInst->value = none;
+        emitVoid(elseCtx, std::move(returnInst));
+        branch->elseValue = -1; // elseBlock always terminates via `return` above
+
+        return emit(ctx, std::move(branch));
+    }
+
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
+        // `print`/`write` (see docs/language/Axea_Printing_Formatting.md)
+        // - checked before the ordinary IrCall lowering below, since
+        // neither is a real callable Axea function/extern (TypeChecker's
+        // own registerSignatures already guarantees no user declaration
+        // can shadow either name).
+        if (call->callee == "print" || call->callee == "write")
+        {
+            std::vector<int> printArgs;
+            printArgs.reserve(call->arguments.size());
+            for (const auto& argument : call->arguments)
+            {
+                printArgs.push_back(lowerExpr(*argument, scope, ctx));
+            }
+            auto printInst = std::make_unique<IrPrint>();
+            printInst->args = std::move(printArgs);
+            printInst->addNewline = call->callee == "print";
+            return emit(ctx, std::move(printInst));
+        }
+
         std::vector<int> args;
         args.reserve(call->arguments.size());
         for (const auto& argument : call->arguments)
@@ -778,6 +935,65 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             inst->object = object;
             inst->targetType = methodCall->typeArgument;
             return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "to_cstr")
+        {
+            // Unambiguous by name alone, same reasoning as "parse" above
+            // (see docs/language/0048-ffi.md).
+            auto inst = std::make_unique<IrToCstr>();
+            inst->object = object;
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "join")
+        {
+            // Unambiguous by name alone, same reasoning as "parse"/
+            // "to_cstr" above (see
+            // docs/language/0050-collection-join-and-slicing.md).
+            auto inst = std::make_unique<IrJoin>();
+            inst->object = object;
+            inst->separator = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "is_some" || methodCall->method == "is_none")
+        {
+            // Unambiguous by name alone, same reasoning as "parse"/
+            // "to_cstr"/"join" above (see docs/language/0052-optional.md).
+            auto inst = std::make_unique<IrOptionalIsSome>();
+            inst->object = object;
+            inst->negate = methodCall->method == "is_none";
+            return emit(ctx, std::move(inst));
+        }
+
+        if (methodCall->method == "unwrap_or")
+        {
+            // `.unwrap_or(default)` (see docs/language/0052-optional.md) -
+            // an ordinary two-sided IrBranch, exactly IfExpr's own shape
+            // below (unlike TryExpr's early-returning branch, both sides
+            // reach the merge block here, so emitBranch's usual phi path
+            // handles it with no special-casing needed).
+            auto isSomeInst = std::make_unique<IrOptionalIsSome>();
+            isSomeInst->object = object;
+            const int isSome = emit(ctx, std::move(isSomeInst));
+
+            auto branch = std::make_unique<IrBranch>();
+            branch->condition = isSome;
+
+            IrScope thenScope(&scope, /*isBarrier=*/true);
+            std::vector<int> thenStructLocals;
+            Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+            auto unwrapInst = std::make_unique<IrOptionalUnwrap>();
+            unwrapInst->object = object;
+            branch->thenValue = emit(thenCtx, std::move(unwrapInst));
+
+            IrScope elseScope(&scope, /*isBarrier=*/true);
+            std::vector<int> elseStructLocals;
+            Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+            branch->elseValue = lowerExpr(*methodCall->arguments.front(), elseScope, elseCtx);
+
+            return emit(ctx, std::move(branch));
         }
 
         if (methodCall->method == "push")
@@ -1315,7 +1531,26 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        const int value = lowerExpr(*assignment->value, scope, ctx);
+        // `x: Optional<T> = None` (see docs/language/0052-optional.md) -
+        // built directly here, bypassing the generic lowerExpr(NoneExpr)
+        // path (unreachable in a well-typed program), since only this call
+        // site has the declared type text None's own payload type is read
+        // from (mirrors TypeChecker::checkStmt's identical special case).
+        const bool isNoneWithDeclaredType =
+            dynamic_cast<const NoneExpr*>(assignment->value.get()) != nullptr &&
+            assignment->declaredType.has_value();
+        int value;
+        if (isNoneWithDeclaredType)
+        {
+            auto inst = std::make_unique<IrOptionalNew>();
+            inst->value = -1;
+            inst->payloadTypeName = optionalPayloadTypeName(*assignment->declaredType);
+            value = emit(ctx, std::move(inst));
+        }
+        else
+        {
+            value = lowerExpr(*assignment->value, scope, ctx);
+        }
         // Mutates an already-existing binding (in this scope or any
         // enclosing one, subject to the same barrier rule as assign()
         // itself), the same as `++`/`--` already do; only a genuinely new
@@ -1395,8 +1630,27 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
 
     if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
     {
+        // `return None` (see docs/language/0052-optional.md) - same
+        // reasoning as AssignmentStmt's own NoneExpr special case above,
+        // using the enclosing function's own declared return type (always
+        // Optional<T> here, in a well-typed program) as None's payload
+        // type source instead of a declared local type.
+        const bool isNoneReturn =
+            returnStmt->value &&
+            dynamic_cast<const NoneExpr*>(returnStmt->value.get()) != nullptr && ctx.function &&
+            ctx.function->returnType;
         auto inst = std::make_unique<IrReturn>();
-        inst->value = returnStmt->value ? lowerExpr(*returnStmt->value, scope, ctx) : -1;
+        if (isNoneReturn)
+        {
+            auto noneInst = std::make_unique<IrOptionalNew>();
+            noneInst->value = -1;
+            noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
+            inst->value = emit(ctx, std::move(noneInst));
+        }
+        else
+        {
+            inst->value = returnStmt->value ? lowerExpr(*returnStmt->value, scope, ctx) : -1;
+        }
         emitVoid(ctx, std::move(inst));
         return;
     }
@@ -1681,11 +1935,37 @@ IrGenerator::generate(const Program& program,
             irProgram.functions.push_back(generateFunction(
                 *function, capabilities.at(function->name), regions.at(function->name)));
         }
+        else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
+        {
+            // No body to lower (see docs/language/0048-ffi.md) - just
+            // registered so LlvmIrEmitter can emit a `declare` for it;
+            // call sites already lower identically to a regular
+            // FunctionDecl call (IrCall doesn't distinguish the two).
+            IrExtern irExtern;
+            irExtern.name = externDecl->name;
+            irExtern.paramTypes.reserve(externDecl->params.size());
+            for (const auto& param : externDecl->params)
+            {
+                irExtern.paramTypes.push_back(param.type);
+            }
+            irExtern.returnType = externDecl->returnType;
+            irProgram.externs.push_back(std::move(irExtern));
+        }
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             lowerStmt(*assignment, topScope, topCtx);
             irProgram.topLevelBindings.emplace_back(assignment->name,
                                                     topScope.find(assignment->name));
+        }
+        else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
+        {
+            // A bare top-level call kept for its side effect
+            // (`print("hi")`, `write("...")`) - see
+            // Parser::looksLikeFunctionDecl's own doc comment. No
+            // topLevelBindings entry (there's no name to bind), which is
+            // exactly right - it should run once, not also be
+            // auto-printed as if it were a binding.
+            lowerStmt(*exprStmt, topScope, topCtx);
         }
     }
 

@@ -29,6 +29,16 @@ struct IrConstInt final : IrInst
     std::int64_t value;
 };
 
+struct IrConstInt64 final : IrInst
+{
+    std::int64_t value;
+};
+
+struct IrConstFloat final : IrInst
+{
+    double value;
+};
+
 struct IrConstBool final : IrInst
 {
     bool value;
@@ -55,6 +65,16 @@ struct IrBinOp final : IrInst
     TokenKind op;
     int lhs;
     int rhs;
+};
+
+// `<operand> as <targetType>` (see docs/language/0005-type-system.md) - a
+// numeric conversion between i32/i64/f64, resolved to the specific LLVM
+// conversion opcode (sext/trunc/sitofp/fptosi) at the LlvmIrEmitter layer,
+// based on the operand's own inferred type vs. targetType.
+struct IrCast final : IrInst
+{
+    int operand;
+    std::string targetType;
 };
 
 struct IrCall final : IrInst
@@ -107,17 +127,41 @@ struct IrIndexSet final : IrInst
 };
 
 // `object[start..end]` / `object[..end]` / `object[start..]` / `object[..]`
-// (see docs/language/0045-str-slicing.md) - `object` is always
-// str-coercible (str or String, resolved to a bare i8* at the LLVM layer
-// exactly like IrStringAppend's own operands are). `start`/`end` are each
+// (see docs/language/0045-str-slicing.md). Originally str-coercible-only
+// (`object` resolved to a bare i8* at the LLVM layer exactly like
+// IrStringAppend's own operands are); widened in
+// docs/language/0050-collection-join-and-slicing.md to also accept an
+// Array or List<T> `object` (T restricted to i32/bool/char/str/String -
+// see that document's own Design section for why struct-typed T is out of
+// scope), producing a fresh List<T> instead of a fresh str in that case.
+// Kept as one instruction rather than split in two, mirroring IrIndexGet's
+// own precedent of one shared instruction dispatched by the object's
+// inferred LLVM type at the LlvmIrEmitter layer - `object`'s own resolved
+// type is all emitStrSlice/inferTypesInList need to pick the right
+// lowering, exactly like emitIndexGet already does. `start`/`end` are each
 // independently -1 when absent (mirrors IrInst's own dest == -1
 // "no destination" convention) - -1 means "0" for start, "the object's
-// own runtime strlen" for end.
+// own runtime length" for end (a real @strlen call for str, the object's
+// own length field/static size for Array/List).
 struct IrStrSlice final : IrInst
 {
     int object;
     int start;
     int end;
+};
+
+// `object.join(separator)` (see
+// docs/language/0050-collection-join-and-slicing.md) - `object` is an
+// Array or List<T>, T restricted to i32/bool/char/str/String (the same
+// isTextRepresentable set print()/interpolation already established);
+// `separator` is str-coercible. Always produces a fresh, owned String,
+// built the same way interpolation builds one (a Buffer under the hood,
+// stringifying each element via the exact stringifyValue machinery
+// print()/interpolation already share).
+struct IrJoin final : IrInst
+{
+    int object;
+    int separator;
 };
 
 // `List<elem>()` - a fresh, empty, growable list (see docs/language/0033-lists.md).
@@ -469,6 +513,70 @@ struct IrParse final : IrInst
     std::string targetType;
 };
 
+// `Some(x)`/`None` (see docs/language/0052-optional.md) - constructs an
+// Optional<T> value. `value` is -1 for None (no payload register to read).
+// `payloadTypeName` is T's own canonical type name, needed at LLVM emission
+// time to build the `{i1, T}` literal - unlike every other dest-typed
+// instruction here, it can't be inferred from `value` alone, since None has
+// no value register to infer from (mirrors IrListNew's own
+// elementTypeName, needed for the identical reason on an empty list).
+struct IrOptionalNew final : IrInst
+{
+    int value = -1;
+    std::string payloadTypeName;
+};
+
+// `.is_some()`/`.is_none()` (see docs/language/0052-optional.md) - `negate`
+// selects is_none (true) vs. is_some (false), avoiding a second near-
+// identical instruction type for what's otherwise the same i1 read.
+struct IrOptionalIsSome final : IrInst
+{
+    int object;
+    bool negate = false;
+};
+
+// `?`'s then-branch unwrap and `.unwrap_or`'s is-some branch both extract
+// Optional<T>'s payload unconditionally (see docs/language/0052-optional.md)
+// - the IrBranch each is always emitted inside already guarantees hasValue
+// is true whenever this instruction actually runs.
+struct IrOptionalUnwrap final : IrInst
+{
+    int object;
+};
+
+// `object.to_cstr()` (see docs/language/0048-ffi.md) - `object` is always
+// str-coercible (str or String), resolved to a bare i8* exactly like
+// IrParse's own operand. A representational no-op (cstr and str/String's
+// own underlying data pointer are bit-identical - see
+// docs/language/0042-string.md), so this exists purely to carry the type
+// distinction through to the dest register.
+struct IrToCstr final : IrInst
+{
+    int object;
+};
+
+// `print(...)`/`write(...)` (see
+// docs/language/Axea_Printing_Formatting.md) - compiler builtins, not
+// ordinary calls (no `functions_`/`externs_` lookup at all). `args` may
+// be empty (`print()` alone just prints a newline). `addNewline`
+// distinguishes the two - the only difference between them.
+struct IrPrint final : IrInst
+{
+    std::vector<int> args;
+    bool addNewline;
+};
+
+// One piece of `"Hello {name}"`'s own desugaring (see
+// docs/language/Axea_Printing_Formatting.md) - stringifies `value`
+// (restricted by TypeChecker to i32/bool/char/str/String) and appends
+// the result to `buffer`, mirroring IrBufferAppend's own shape but for a
+// value that isn't already str-coercible on its own.
+struct IrBufferAppendValue final : IrInst
+{
+    int buffer;
+    int value;
+};
+
 // `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's
 // generic rewrite). Carries the concrete K/V type strings explicitly - like
 // IrListNew's own elementTypeName, a brand-new empty Map has nothing to infer
@@ -642,9 +750,22 @@ struct IrFunction
     int registerCount = 0;
 };
 
+// `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md)
+// - no `body`/`registerCount`, unlike IrFunction: an extern declaration is
+// never lowered itself, only *registered* so a call site resolves its
+// signature; LlvmIrEmitter emits a `declare`, not a `define`, for each one.
+struct IrExtern
+{
+    std::string name;
+    std::vector<std::string> paramTypes; // declared type names only - no names needed,
+                                         // extern params are never referenced by name
+    std::optional<std::string> returnType;
+};
+
 struct IrProgram
 {
     std::vector<IrFunction> functions;
+    std::vector<IrExtern> externs;
     std::vector<std::unique_ptr<IrInst>> topLevel;
     // (name, final register) for each top-level assignment, in source order -
     // mirrors how `ax run` reports top-level bindings, and is what a

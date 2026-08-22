@@ -1,5 +1,7 @@
 #include "parser/Parser.hpp"
 
+#include "lexer/Lexer.hpp"
+
 #include <stdexcept>
 
 Parser::Parser(std::vector<Token> tokens)
@@ -61,12 +63,19 @@ std::string Parser::parseTypeName()
 {
     if (match(TokenKind::LeftBracket))
     {
-        const auto& element = expect(TokenKind::Identifier, "expected element type in array type");
+        // A full recursive parseTypeName() call, not a single Identifier
+        // token - the element type can itself be a nested generic shape
+        // (e.g. `[List<i32>;3]`, `[Optional<i32>;2]`), which a single
+        // token can't parse (see docs/language/0052-optional.md's own
+        // follow-up, which moved every single-type-parameter kind onto a
+        // genuinely recursive representation - mirrors List<elem>()'s own
+        // identical "full parseTypeName(), not one token" reasoning).
+        const std::string elementType = parseTypeName();
         expect(TokenKind::Semicolon, "expected ';' in array type");
         const auto& size = expect(TokenKind::Integer, "expected array size in array type");
         expect(TokenKind::RightBracket, "expected ']' after array type");
 
-        return "[" + element.text + ";" + size.text + "]";
+        return "[" + elementType + ";" + size.text + "]";
     }
 
     const auto& name = expect(TokenKind::Identifier, "expected type name");
@@ -83,13 +92,14 @@ std::string Parser::parseTypeName()
     // expression position).
     if ((name.text == "slice" || name.text == "List" || name.text == "Set" ||
          name.text == "Stack" || name.text == "LinkedList" || name.text == "Deque" ||
-         name.text == "Queue" || name.text == "PriorityQueue" || name.text == "SortedSet") &&
+         name.text == "Queue" || name.text == "PriorityQueue" || name.text == "SortedSet" ||
+         name.text == "Optional") &&
         match(TokenKind::Less))
     {
         const std::string elementType = parseTypeName();
         expect(TokenKind::Greater,
                "expected '>' after slice/List/Set/Stack/LinkedList/Deque/Queue/PriorityQueue/"
-               "SortedSet element type");
+               "SortedSet/Optional element type");
         return name.text + "<" + elementType + ">";
     }
 
@@ -128,12 +138,71 @@ std::unique_ptr<Stmt> Parser::parseItem()
         return parseStructDecl();
     }
 
+    if (current().kind == TokenKind::Extern)
+    {
+        return parseExternDecl();
+    }
+
     if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::LeftParen)
     {
-        return parseFunctionDecl();
+        if (looksLikeFunctionDecl())
+        {
+            return parseFunctionDecl();
+        }
+        // A bare top-level call (e.g. `print("hi")`), kept for its side
+        // effect and its result discarded - mirrors parseBlock's own
+        // identical "non-trailing expression" ExprStmt case. The only
+        // top-level statement shape that isn't struct/extern/function-
+        // decl or an assignment: `Identifier '('` can never start a valid
+        // assignment target either way (`name = ...`/`name: Type = ...`
+        // both require '='/':' immediately after the name, never '('),
+        // so this is unambiguous once looksLikeFunctionDecl() has already
+        // ruled out a declaration.
+        auto expr = parseExpression();
+        return std::make_unique<ExprStmt>(std::move(expr));
+    }
+
+    // `write(...)` at the top level - "write" is the `TokenKind::Write`
+    // keyword (a parameter capability prefix), not `TokenKind::Identifier`,
+    // so the branch above never sees it (mirrors parsePrimary's own
+    // identical `TokenKind::Write` special case for expression position,
+    // just one level up - a top-level `write(...)` never reaches
+    // parsePrimary via parseAssignment, since parseAssignment always
+    // expects an Identifier first). Always a bare call, never a
+    // declaration attempt: "write" can't be a function name either
+    // (it's a keyword, not an Identifier), so there's no ambiguity to
+    // resolve the way looksLikeFunctionDecl() does above.
+    if (current().kind == TokenKind::Write && peek().kind == TokenKind::LeftParen)
+    {
+        auto expr = parseExpression();
+        return std::make_unique<ExprStmt>(std::move(expr));
     }
 
     return parseAssignment();
+}
+
+bool Parser::looksLikeFunctionDecl() const
+{
+    // Empty parens ('()') - ambiguous by themselves ('foo()' could be a
+    // call or the start of 'foo() -> i32 { ... }'/'foo() { ... }'/
+    // 'foo() => expr'), so look past the ')' at what follows the
+    // signature.
+    if (peek(2).kind == TokenKind::RightParen)
+    {
+        return peek(3).kind == TokenKind::Arrow || peek(3).kind == TokenKind::LeftBrace ||
+               peek(3).kind == TokenKind::FatArrow;
+    }
+    // A capability keyword can only start a Param (see parseParam) -
+    // never a call argument, which is an ordinary expression.
+    if (peek(2).kind == TokenKind::Read || peek(2).kind == TokenKind::Write ||
+        peek(2).kind == TokenKind::Take)
+    {
+        return true;
+    }
+    // 'Identifier :' is a Param's own 'name: type' shape - a call
+    // argument that happens to be a bare name (`foo(x)`) is never
+    // followed by ':', so this stays unambiguous.
+    return peek(2).kind == TokenKind::Identifier && peek(3).kind == TokenKind::Colon;
 }
 
 Param Parser::parseParam()
@@ -206,6 +275,56 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
 
     return std::make_unique<FunctionDecl>(
         name.text, std::move(params), returnType, std::move(body));
+}
+
+Param Parser::parseExternParam()
+{
+    const auto& name = expect(TokenKind::Identifier, "expected extern parameter name");
+    expect(TokenKind::Colon, "expected ':' after extern parameter name");
+    return Param{name.text, parseTypeName(), std::nullopt};
+}
+
+std::unique_ptr<Stmt> Parser::parseExternDecl()
+{
+    expect(TokenKind::Extern, "expected 'extern'");
+    // Only the "c" calling convention is recognized this phase (see
+    // docs/language/0048-ffi.md) - a bare identifier check, not its own
+    // keyword, mirroring how "String"/"Buffer" are recognized by their
+    // own literal text.
+    const auto& convention =
+        expect(TokenKind::Identifier, "expected calling convention after 'extern'");
+    if (convention.text != "c")
+    {
+        throw std::runtime_error("unsupported extern calling convention '" + convention.text +
+                                 "' - only 'c' is supported this phase");
+    }
+
+    const auto& name =
+        expect(TokenKind::Identifier, "expected function name after calling convention");
+    expect(TokenKind::LeftParen, "expected '(' after extern function name");
+
+    std::vector<Param> params;
+    if (current().kind != TokenKind::RightParen)
+    {
+        params.push_back(parseExternParam());
+        while (match(TokenKind::Comma))
+        {
+            if (current().kind == TokenKind::RightParen)
+            {
+                break;
+            }
+            params.push_back(parseExternParam());
+        }
+    }
+    expect(TokenKind::RightParen, "expected ')' after extern parameters");
+
+    std::optional<std::string> returnType;
+    if (match(TokenKind::Arrow))
+    {
+        returnType = parseTypeName();
+    }
+
+    return std::make_unique<ExternDecl>(name.text, std::move(params), returnType);
 }
 
 std::unique_ptr<Stmt> Parser::parseStructDecl()
@@ -675,7 +794,28 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
             continue;
         }
 
+        // `<expr>?` (see docs/language/0052-optional.md) - inside the same
+        // Dot/LeftBracket loop (not the separate `as` loop below) so it
+        // chains naturally both ways: `opt?.field` unwraps then accesses a
+        // field, and `foo().bar<T>()?` unwraps a method call's own result.
+        if (match(TokenKind::Question))
+        {
+            expr = std::make_unique<TryExpr>(std::move(expr));
+            continue;
+        }
+
         break;
+    }
+
+    // `<expr> as <targetType>` (see docs/language/0005-type-system.md) -
+    // deliberately outside the Dot/LeftBracket loop above (applies to the
+    // whole postfix expression built so far, e.g. `foo.bar() as i64`, not
+    // just a bare primary), and its own `while` to allow chaining
+    // (`x as i64 as f64`).
+    while (match(TokenKind::As))
+    {
+        std::string targetType = parseTypeName();
+        expr = std::make_unique<CastExpr>(std::move(expr), std::move(targetType));
     }
 
     return expr;
@@ -753,6 +893,120 @@ std::int32_t Parser::decodeCharLiteral(const std::string& bytes)
     return codepoint;
 }
 
+std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
+{
+    std::vector<InterpolatedStringExpr::Piece> pieces;
+    std::string literal;
+    std::size_t i = 0;
+    bool hasInterpolation = false;
+
+    while (i < text.size())
+    {
+        const char c = text[i];
+
+        if (c == '{')
+        {
+            if (i + 1 < text.size() && text[i + 1] == '{')
+            {
+                literal += '{';
+                i += 2;
+                continue;
+            }
+
+            hasInterpolation = true;
+
+            // Depth-tracked so an expression segment may itself contain
+            // nested braces (a struct literal, a block expression) - only
+            // the top-level literal-text scan applies '{{'/'}}' escaping;
+            // once inside an active expression span, every brace is a
+            // real Axea token.
+            std::size_t j = i + 1;
+            int depth = 1;
+            while (j < text.size() && depth > 0)
+            {
+                if (text[j] == '{')
+                {
+                    ++depth;
+                }
+                else if (text[j] == '}')
+                {
+                    --depth;
+                    if (depth == 0)
+                    {
+                        break;
+                    }
+                }
+                ++j;
+            }
+            if (depth != 0)
+            {
+                throw std::runtime_error("unterminated interpolation expression in string literal");
+            }
+
+            const std::string exprText = text.substr(i + 1, j - i - 1);
+            if (exprText.empty())
+            {
+                throw std::runtime_error("empty interpolation expression '{}' in string literal");
+            }
+
+            if (!literal.empty())
+            {
+                pieces.push_back(InterpolatedStringExpr::Piece{literal, nullptr});
+                literal.clear();
+            }
+
+            // A fresh, nested Lexer+Parser over just the expression
+            // segment's own text - legal to call a private method
+            // (parseExpression/current) on another Parser instance
+            // directly, since C++ access control is per-class, not
+            // per-object.
+            Lexer nestedLexer(exprText);
+            Parser nestedParser(nestedLexer.lex());
+            auto exprAst = nestedParser.parseExpression();
+            if (nestedParser.current().kind != TokenKind::EndOfFile)
+            {
+                throw std::runtime_error("unexpected token after interpolation expression '{" +
+                                         exprText + "}'");
+            }
+            pieces.push_back(InterpolatedStringExpr::Piece{"", std::move(exprAst)});
+
+            i = j + 1;
+            continue;
+        }
+
+        if (c == '}')
+        {
+            if (i + 1 < text.size() && text[i + 1] == '}')
+            {
+                literal += '}';
+                i += 2;
+                continue;
+            }
+            throw std::runtime_error(
+                "unmatched '}' in string literal - use '}}' for a literal '}'");
+        }
+
+        literal += c;
+        ++i;
+    }
+
+    // No interpolation span found at all - every pre-existing string
+    // literal in this codebase takes this path unchanged, with `literal`
+    // holding only its own already-unescaped ('{{' -> '{', '}}' -> '}')
+    // content (see docs/language/Axea_Printing_Formatting.md).
+    if (!hasInterpolation)
+    {
+        return std::make_unique<StringExpr>(literal);
+    }
+
+    if (!literal.empty())
+    {
+        pieces.push_back(InterpolatedStringExpr::Piece{literal, nullptr});
+    }
+
+    return std::make_unique<InterpolatedStringExpr>(std::move(pieces));
+}
+
 std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
 {
     if (match(TokenKind::LeftParen))
@@ -768,10 +1022,32 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
         return std::make_unique<IntegerExpr>(std::stoll(token.text));
     }
 
+    // "100i64" - Token.text keeps the lexer's own "i64" suffix (see
+    // Lexer::lexNumber), stripped back off here before parsing the digits.
+    if (current().kind == TokenKind::Int64)
+    {
+        const auto token = advance();
+        return std::make_unique<Int64Expr>(std::stoll(token.text.substr(0, token.text.size() - 3)));
+    }
+
+    // "1.5"/"1.5f64"/"100f64" - the "f64" suffix, if present, is stripped
+    // the same way Int64's own "i64" suffix is above; if absent (a bare
+    // "1.5"), the text is already exactly what std::stod expects.
+    if (current().kind == TokenKind::Float)
+    {
+        const auto token = advance();
+        std::string text = token.text;
+        if (text.size() >= 3 && text.substr(text.size() - 3) == "f64")
+        {
+            text.resize(text.size() - 3);
+        }
+        return std::make_unique<FloatExpr>(std::stod(text));
+    }
+
     if (current().kind == TokenKind::String)
     {
         const auto token = advance();
-        return std::make_unique<StringExpr>(token.text.substr(1, token.text.size() - 2));
+        return parseStringLiteral(token.text.substr(1, token.text.size() - 2));
     }
 
     if (current().kind == TokenKind::Char)
@@ -818,6 +1094,23 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     if (current().kind == TokenKind::Loop)
     {
         return parseLoopExpr();
+    }
+
+    // `write(...)` (see docs/language/Axea_Printing_Formatting.md) - "write"
+    // is already the `TokenKind::Write` keyword (a parameter capability
+    // prefix, e.g. `write user: User`), so it never reaches the ordinary
+    // Identifier-then-'(' call branch below at all; this is the one place
+    // that matters, since "write" has no other legal appearance in
+    // expression position. "print" needs no equivalent special-casing -
+    // it was never a keyword to begin with, so it already parses as a
+    // plain identifier call.
+    if (current().kind == TokenKind::Write && peek().kind == TokenKind::LeftParen)
+    {
+        advance();
+        expect(TokenKind::LeftParen, "expected '(' after 'write'");
+        auto args = parseArgumentList();
+        expect(TokenKind::RightParen, "expected ')' after arguments");
+        return std::make_unique<CallExpr>("write", std::move(args));
     }
 
     if (current().kind == TokenKind::Identifier)
@@ -968,6 +1261,36 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
                                          std::to_string(args.size()));
             }
             return std::make_unique<StringNewExpr>(std::move(args.front()));
+        }
+
+        // `Some(value)` construction (see docs/language/0052-optional.md) -
+        // same one-runtime-argument shape as String(text) above, special-
+        // cased only to validate the exactly-one-argument arity at parse
+        // time.
+        if (current().text == "Some" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'Some'");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after Some(...) argument");
+            if (args.size() != 1)
+            {
+                throw std::runtime_error("Some(...) expects exactly 1 argument, got " +
+                                         std::to_string(args.size()));
+            }
+            return std::make_unique<SomeExpr>(std::move(args.front()));
+        }
+
+        // `None` (see docs/language/0052-optional.md) - a bare identifier,
+        // never followed by '(' (unlike every constructor above) since it
+        // carries no value; mirrors `true`/`false`'s own bare-keyword shape
+        // even though None isn't a reserved token, just a special-cased
+        // identifier (consistent with String/Buffer/Some being special-cased
+        // identifiers rather than reserved keywords too).
+        if (current().text == "None" && peek().kind != TokenKind::LeftParen)
+        {
+            advance();
+            return std::make_unique<NoneExpr>();
         }
 
         // `Buffer()` construction - always empty parens, like every

@@ -498,3 +498,42 @@ TEST("IrGenerator records a break's own carried snapshot")
     EXPECT_TRUE(breakInst->value != -1);
     EXPECT_EQ(breakInst->carried.size(), static_cast<std::size_t>(1));
 }
+
+TEST("IrGenerator lowers .join(separator) into an IrJoin with object/separator wired to the "
+     "right registers - see docs/language/0050-collection-join-and-slicing.md")
+{
+    auto program = generateIr("f() -> String { numbers = [1, 2, 3] return numbers.join(\",\") }");
+    const auto& f = functionNamed(program, "f");
+
+    const IrJoin* join = nullptr;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* j = dynamic_cast<const IrJoin*>(inst.get()))
+        {
+            join = j;
+        }
+    }
+    EXPECT_TRUE(join != nullptr);
+    EXPECT_TRUE(join->object != -1);
+    EXPECT_TRUE(join->separator != -1);
+    EXPECT_TRUE(join->object != join->separator);
+}
+
+TEST("IrGenerator lowers Array/List slicing into the same IrStrSlice instruction str slicing "
+     "already uses, with a -1 start when the low bound is omitted")
+{
+    auto program = generateIr("f() -> List<i32> { numbers = [1, 2, 3] return numbers[..2] }");
+    const auto& f = functionNamed(program, "f");
+
+    const IrStrSlice* slice = nullptr;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* s = dynamic_cast<const IrStrSlice*>(inst.get()))
+        {
+            slice = s;
+        }
+    }
+    EXPECT_TRUE(slice != nullptr);
+    EXPECT_EQ(slice->start, -1);
+    EXPECT_TRUE(slice->end != -1);
+}

@@ -23,6 +23,17 @@ private:
     Token lexNumber();
     Token lexIdentifierOrKeyword();
     Token lexString();
+    // Scans from an opening '"' to that string literal's own real closing
+    // '"', consuming '{...}' interpolation spans as real Axea code (so a
+    // quote inside one doesn't end the string early) and recursively
+    // skipping any string literal nested inside an active span, to
+    // arbitrary depth (see docs/language/Axea_Printing_Formatting.md's
+    // own "nested string literals inside interpolation expressions"
+    // requirement, and docs/language/0049-printing-formatting.md's
+    // follow-up that implemented it). Returns false if input runs out
+    // before a real closing quote is found (lexString then reports
+    // Invalid, exactly as it always has for an unterminated string).
+    bool scanStringSpan();
     Token lexChar();
     Token makeToken(TokenKind kind, std::size_t start, std::size_t line, std::size_t column) const;
 

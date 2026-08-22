@@ -29,9 +29,38 @@ namespace
             return;
         }
 
+        if (const auto* int64Expr = dynamic_cast<const Int64Expr*>(&expr))
+        {
+            std::cout << pad << "Int64(" << int64Expr->value << ")\n";
+            return;
+        }
+
+        if (const auto* floatExpr = dynamic_cast<const FloatExpr*>(&expr))
+        {
+            std::cout << pad << "Float(" << floatExpr->value << ")\n";
+            return;
+        }
+
         if (const auto* character = dynamic_cast<const CharExpr*>(&expr))
         {
             std::cout << pad << "Char(" << character->codepoint << ")\n";
+            return;
+        }
+
+        if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+        {
+            std::cout << pad << "InterpolatedString\n";
+            for (const auto& piece : interpolated->pieces)
+            {
+                if (piece.expr)
+                {
+                    printExpr(*piece.expr, indent + 2);
+                }
+                else
+                {
+                    std::cout << pad << "  Literal(" << piece.literalText << ")\n";
+                }
+            }
             return;
         }
 
@@ -46,6 +75,13 @@ namespace
             std::cout << pad << "Binary(" << tokenKindName(binary->op) << ")\n";
             printExpr(*binary->left, indent + 2);
             printExpr(*binary->right, indent + 2);
+            return;
+        }
+
+        if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+        {
+            std::cout << pad << "Cast(" << cast->targetType << ")\n";
+            printExpr(*cast->operand, indent + 2);
             return;
         }
 
@@ -345,6 +381,20 @@ namespace
             for (const auto& field : structDecl->fields)
             {
                 std::cout << pad << "  Field(" << field.name << ": " << field.type << ")\n";
+            }
+            return;
+        }
+
+        if (const auto* externDecl = dynamic_cast<const ExternDecl*>(&stmt))
+        {
+            std::cout << pad << "Extern(" << externDecl->name << ")\n";
+            for (const auto& param : externDecl->params)
+            {
+                std::cout << pad << "  Param(" << param.name << ": " << param.type << ")\n";
+            }
+            if (externDecl->returnType)
+            {
+                std::cout << pad << "  Returns(" << *externDecl->returnType << ")\n";
             }
             return;
         }
@@ -804,6 +854,34 @@ namespace
             return;
         }
 
+        if (const auto* toCstr = dynamic_cast<const IrToCstr*>(&inst))
+        {
+            std::cout << pad << "%" << toCstr->dest << " = to_cstr %" << toCstr->object << "\n";
+            return;
+        }
+
+        if (const auto* print = dynamic_cast<const IrPrint*>(&inst))
+        {
+            std::cout << pad << (print->addNewline ? "print(" : "write(");
+            for (std::size_t i = 0; i < print->args.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    std::cout << ", ";
+                }
+                std::cout << "%" << print->args[i];
+            }
+            std::cout << ")\n";
+            return;
+        }
+
+        if (const auto* appendValue = dynamic_cast<const IrBufferAppendValue*>(&inst))
+        {
+            std::cout << pad << "buffer.append_value %" << appendValue->buffer << ", %"
+                      << appendValue->value << "\n";
+            return;
+        }
+
         if (const auto* setAdd = dynamic_cast<const IrSetAdd*>(&inst))
         {
             std::cout << pad << "%" << setAdd->dest << " = set.add %" << setAdd->set << ", %"
@@ -1141,6 +1219,11 @@ int main(int argc, char** argv)
             IrGenerator irGenerator;
             auto irProgram = irGenerator.generate(
                 program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+
+            for (const auto& externDecl : irProgram.externs)
+            {
+                std::cout << "Extern(" << externDecl.name << ")\n";
+            }
 
             for (const auto& function : irProgram.functions)
             {
