@@ -1,8 +1,16 @@
 # Axea Printing & Formatting
 
-> **Status:** Partially implemented - see `docs/language/0049-printing-formatting.md`,
-> `docs/language/0050-collection-join-and-slicing.md`, and
-> `docs/language/0054-collection-printing.md`.
+> **Status:** Implemented - see `docs/language/0049-printing-formatting.md`,
+> `docs/language/0050-collection-join-and-slicing.md`,
+> `docs/language/0054-collection-printing.md`,
+> `docs/language/0055-numeric-format-specs.md`,
+> `docs/language/0056-slice-printing.md`,
+> `docs/language/0057-alignment.md`,
+> `docs/language/0058-debug-formatting.md`,
+> `docs/language/0059-raw-strings.md`,
+> `docs/language/0060-multiline-strings.md`,
+> `docs/language/0061-buffer-write.md`, and
+> `docs/language/0062-display-trait.md`.
 > `print()`/`write()` (both usable bare at the top level, no assignment
 > required, matching this doc's own examples - see 0049's own Parsing
 > section follow-up), basic `{expr}` string interpolation (the "Printing"
@@ -16,10 +24,35 @@
 > implemented. `print()`/`write()`/interpolation now also accept a
 > struct, `Optional<T>`, or any collection value (`Array`/`List`/`Map`/
 > `Set`/`Deque`/`Queue`/`PriorityQueue`/`LinkedList`/`SortedMap`/
-> `SortedSet`/`Stack`) directly - see `0054-collection-printing.md`;
-> `slice<T>` is the one remaining unsupported type. Numeric formatting,
-> alignment, debug formatting, `Buffer.write()`, traits/`Display`, and
-> raw/multiline string literals remain Draft - not yet implemented.
+> `SortedSet`/`Stack`/`slice<T>`) directly - see `0054-collection-printing.md`
+> and `0056-slice-printing.md`; `slice<T>`'s own `.join()` is supported
+> too, same as Array/List. The "Numeric Formatting" section below (`:.2`,
+> `:05`, `:x`, `:X`, `:b`, `:o`) is now implemented too - see
+> `0055-numeric-format-specs.md`. The "Alignment" section below (`:<20`,
+> `:>20`, `:^20`) is implemented too - see `0057-alignment.md`; unlike
+> numeric format specs, alignment applies to any text-representable type,
+> not just i32/i64/f64. The "Debug Formatting" section below (`{x=}`,
+> `{value:?}`) is implemented too - see `0058-debug-formatting.md`;
+> `{value:?}` is identical to `{value}` except for `str`/`String`, which
+> get quoted, since Axea has no Display/Debug trait distinction beyond
+> `Display` itself (see below) for anything else to differ on. Raw strings
+> (`r"..."`) and multiline strings (`"""..."""`, `r"""..."""`) are now
+> implemented too - see `0059-raw-strings.md` and
+> `0060-multiline-strings.md`; note that ordinary (non-raw) string
+> literals have no escape-sequence processing at all, a pre-existing gap
+> those two docs' own Motivation sections explain rather than silently
+> work around. `Buffer.write()` is implemented too - see
+> `0061-buffer-write.md`, a same-behavior alias of `.append()` rather
+> than a genuinely distinct operation, since interpolation already lowers
+> at parse time for any string literal argument regardless of which
+> method receives it. The "Formatting Traits" section below is
+> implemented too, narrowly - see `0062-display-trait.md`: a real
+> `trait`/`impl` mechanism (the first user-defined struct methods in the
+> language), but the only trait that drives any runtime dispatch is
+> `Display` itself, resolved entirely at compile time (no vtables/dynamic
+> dispatch - every stringification call site already knows a struct
+> value's exact concrete type). No `Debug` trait exists separately from
+> `{value:?}`'s own pre-existing str/String-only quoting.
 
 This document defines Axea's proposed printing, string interpolation,
 formatting, debug formatting, raw strings, multiline strings, and

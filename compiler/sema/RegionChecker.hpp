@@ -83,5 +83,11 @@ private:
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;
+    // `enum` declarations (see docs/language/0064-enums.md) - registered purely so
+    // regionOfExpr's MethodCallExpr/FieldExpr cases can recognize `EnumName.Variant(args)`/
+    // `EnumName.Variant` construction *before* recursing into `object` as an ordinary value
+    // expression, which would otherwise throw "undefined variable" trying to look up a bare
+    // enum type name in `env`.
+    std::unordered_map<std::string, const EnumDecl*> enums_;
     std::unordered_map<std::string, std::vector<Region>> regions_;
 };

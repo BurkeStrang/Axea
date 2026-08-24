@@ -1311,6 +1311,21 @@ TEST("Interpreter Buffer.append mutates in place and grows .length")
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 13);
 }
 
+TEST("Interpreter Buffer.write behaves identically to Buffer.append, including interpolated "
+     "arguments (see docs/language/0061-buffer-write.md)")
+{
+    const std::string source = "f() -> String { "
+                               "  name = \"Ada\" "
+                               "  age = 30 "
+                               "  b = Buffer() "
+                               "  b.write(\"Name: {name}\\n\") "
+                               "  b.write(\"Age: {age}\\n\") "
+                               "  return b.finish() "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(toString(run(source)), "Name: Ada\\nAge: 30\\n");
+}
+
 TEST("Interpreter Buffer.append_line appends its text plus a trailing newline")
 {
     const std::string source = "f() -> String { "
@@ -1711,6 +1726,142 @@ TEST("Interpreter parses str to bool, requiring an exact 'true'/'false' match, e
     EXPECT_EQ(std::get<bool>(run("x = \"\".parse<bool>().is_none()")), true);
 }
 
+TEST("Interpreter's enum construction (both payload and bare no-payload variants) and 'match' "
+     "work end to end, including real exhaustiveness (see docs/language/0064-enums.md)")
+{
+    const std::string source = "enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+                               "area(s: Shape) -> f64 { "
+                               "  return match s { "
+                               "    Circle(r) => 3.14159 * r * r "
+                               "    Rectangle(w, h) => w * h "
+                               "    Point => 0.0 "
+                               "  } "
+                               "} "
+                               "c = Shape.Circle(5.0) "
+                               "r = Shape.Rectangle(3.0, 4.0) "
+                               "p = Shape.Point "
+                               "cArea = area(c) "
+                               "rArea = area(r) "
+                               "pArea = area(p) "
+                               "x = cArea";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("c")), "Circle(5)");
+    EXPECT_EQ(toString(results.at("r")), "Rectangle(3, 4)");
+    EXPECT_EQ(toString(results.at("p")), "Point");
+    const double cArea = std::get<double>(results.at("cArea"));
+    EXPECT_TRUE(cArea > 78.53 && cArea < 78.55);
+    EXPECT_EQ(std::get<double>(results.at("rArea")), 12.0);
+    EXPECT_EQ(std::get<double>(results.at("pArea")), 0.0);
+}
+
+TEST("Interpreter's 'match' dispatches via a wildcard arm for every variant it doesn't name")
+{
+    const std::string source = "enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+                               "describe(s: Shape) -> str { "
+                               "  return match s { Circle(r) => \"circle\"  _ => \"other\" } "
+                               "} "
+                               "a = describe(Shape.Circle(1.0)) "
+                               "b = describe(Shape.Point) "
+                               "x = a";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("a")), "circle");
+    EXPECT_EQ(toString(results.at("b")), "other");
+}
+
+TEST("Interpreter's enum value nested inside a collection and inside a struct field prints "
+     "correctly, and print()/interpolation both accept an enum value directly")
+{
+    const std::string source = "enum Shape { Circle(f64)  Point } "
+                               "struct Wrapper { s: Shape } "
+                               "shapes = [Shape.Circle(1.0), Shape.Point] "
+                               "w = Wrapper { s: Shape.Circle(2.0) } "
+                               "interp = \"{Shape.Circle(3.0)}\" "
+                               "x = shapes";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("shapes")), "[Circle(1), Point]");
+    EXPECT_EQ(toString(results.at("w")), "Wrapper { s: Circle(2) }");
+    EXPECT_EQ(toString(results.at("interp")), "Circle(3)");
+}
+
+TEST("Interpreter's Ok(x)/Err(e)/unwrap_or/is_ok/is_err work end to end, mirroring "
+     "Optional<T>'s own toString/unwrap_or/is_some/is_none precedent (see "
+     "docs/language/0063-result.md)")
+{
+    const std::string source = "divide(a: i32, b: i32) -> Result<i32, str> { "
+                               "  if b == 0 { return Err(\"division by zero\") } "
+                               "  return Ok(a / b) "
+                               "} "
+                               "good = divide(10, 2) "
+                               "bad = divide(10, 0) "
+                               "goodVal = good.unwrap_or(0 - 1) "
+                               "badVal = bad.unwrap_or(0 - 1) "
+                               "goodIsOk = good.is_ok() "
+                               "badIsErr = bad.is_err() "
+                               "x = goodVal";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("good")), "Ok(5)");
+    EXPECT_EQ(toString(results.at("bad")), "Err(division by zero)");
+    EXPECT_EQ(std::get<std::int64_t>(results.at("goodVal")), 5);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("badVal")), -1);
+    EXPECT_EQ(std::get<bool>(results.at("goodIsOk")), true);
+    EXPECT_EQ(std::get<bool>(results.at("badIsErr")), true);
+}
+
+TEST("Interpreter's '?' propagates Err(e) out of the enclosing function, preserving the exact "
+     "error value, and never evaluates code after the failing '?' - mirrors "
+     "docs/language/0052-optional.md's own None-propagation precedent for Optional<T>")
+{
+    const std::string source = "parseDigit(a: i32, b: i32) -> Result<i32, i32> { "
+                               "  if b == 0 { return Err(0 - 1) } "
+                               "  return Ok(a / b) "
+                               "} "
+                               "sumTwo(a: i32, b: i32, c: i32, d: i32) -> Result<i32, i32> { "
+                               "  x = parseDigit(a, b)? "
+                               "  y = parseDigit(c, d)? "
+                               "  return Ok(x + y) "
+                               "} "
+                               "good = sumTwo(10, 2, 20, 4) "
+                               "bad = sumTwo(10, 2, 20, 0) "
+                               "x = good";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("good")), "Ok(10)");
+    EXPECT_EQ(toString(results.at("bad")), "Err(-1)");
+}
+
+TEST("Interpreter dispatches '?' correctly between Optional<T> and Result<T,E> based on the "
+     "operand's own runtime shape, inside functions returning each kind respectively")
+{
+    const std::string source = "asOptional(s: str) -> Optional<i32> { return s.parse<i32>() } "
+                               "useOptional(s: str) -> Optional<i32> { x = asOptional(s)?  return "
+                               "Some(x + 1) } "
+                               "asResult(a: i32, b: i32) -> Result<i32, i32> { "
+                               "  if b == 0 { return Err(0 - 1) } return Ok(a / b) "
+                               "} "
+                               "useResult(a: i32, b: i32) -> Result<i32, i32> { "
+                               "  x = asResult(a, b)?  return Ok(x + 1) "
+                               "} "
+                               "o = useOptional(\"5\") "
+                               "r = useResult(10, 2) "
+                               "x = o";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("o")), "Some(6)");
+    EXPECT_EQ(toString(results.at("r")), "Ok(6)");
+}
+
+TEST("Interpreter's Result<T,E> value nested inside a collection and inside a struct field "
+     "prints correctly via the default field/element printer")
+{
+    const std::string source = "struct Wrapper { r: Result<i32, i32> } "
+                               "good = Ok(1) "
+                               "bad = Err(0 - 1) "
+                               "results = [good, bad] "
+                               "w = Wrapper { r: good } "
+                               "x = results";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("results")), "[Ok(1), Err(-1)]");
+    EXPECT_EQ(toString(results.at("w")), "Wrapper { r: Ok(1) }");
+}
+
 TEST("Interpreter parses a str slice result directly - date[..4].parse<i32>()")
 {
     const std::string source = "date = \"2026-08-18\" "
@@ -2020,4 +2171,310 @@ TEST("Interpreter's .join() works on a List<str>, joining each string with the s
                                "} "
                                "x = f()";
     EXPECT_EQ(toString(run(source)), "ada, grace");
+}
+
+TEST("Interpreter applies a numeric format spec's zero-padded width to an i32 interpolation "
+     "span (see docs/language/0055-numeric-format-specs.md)")
+{
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:05}\"")), "00042");
+}
+
+TEST("Interpreter applies a precision format spec to an f64 interpolation span, rounding like "
+     "printf's own %.Nf")
+{
+    EXPECT_EQ(toString(run("pi = 3.14159 x = \"{pi:.2}\"")), "3.14");
+}
+
+TEST("Interpreter applies x/X/b/o radix format specs to an i32 interpolation span")
+{
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:x}\"")), "2a");
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:X}\"")), "2A");
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:b}\"")), "101010");
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:o}\"")), "52");
+}
+
+TEST("Interpreter formats a negative i32 radix conversion by reinterpreting its full 64-bit "
+     "two's-complement bit pattern, matching the compiled backend's own choice (see "
+     "LlvmIrEmitter.hpp's registerFormatRuntime comment)")
+{
+    EXPECT_EQ(toString(run("n = 100 - 142 x = \"{n:x}\"")), "ffffffffffffffd6");
+}
+
+TEST("Interpreter's binary format spec floors the digit count at 1 for a zero value, rather "
+     "than printing an empty string")
+{
+    EXPECT_EQ(toString(run("n = 0 x = \"{n:b}\"")), "0");
+    EXPECT_EQ(toString(run("n = 0 x = \"{n:08b}\"")), "00000000");
+}
+
+TEST("Interpreter's plain width format spec (no zero-pad, no type char) space-pads an i32 "
+     "interpolation span")
+{
+    EXPECT_EQ(toString(run("n = 5 x = \"[{n:10}]\"")), "[         5]");
+}
+
+TEST("Interpreter applies a numeric format spec to an i64 interpolation span the same way it "
+     "does for i32")
+{
+    EXPECT_EQ(toString(run("n: i64 = 123456789012i64 x = \"{n:015}\"")), "000123456789012");
+    EXPECT_EQ(toString(run("n: i64 = 123456789012i64 x = \"{n:x}\"")), "1cbe991a14");
+}
+
+TEST("Interpreter's print() prints a slice<T>-typed parameter with the same bracket format as "
+     "an Array (see docs/language/0056-slice-printing.md)")
+{
+    const std::string source =
+        "f(s: slice<i32>) -> i32 { print(s) return 0 } arr = [1, 2, 3] r = f(arr)";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "[1, 2, 3]\n");
+}
+
+TEST("Interpreter interpolates a slice<T>-typed parameter into a string, same bracket format "
+     "as print()")
+{
+    const std::string source = "f(s: slice<i32>) -> String { return \"vals: {s}\" } "
+                               "arr = [4, 5] x = f(arr)";
+    EXPECT_EQ(toString(run(source)), "vals: [4, 5]");
+}
+
+TEST("Interpreter's .join() works on a slice<T>-typed parameter, same as Array/List")
+{
+    const std::string source = "f(s: slice<i32>) -> String { return s.join(\"-\") } "
+                               "arr = [1, 2, 3] x = f(arr)";
+    EXPECT_EQ(toString(run(source)), "1-2-3");
+}
+
+TEST("Interpreter prints/joins a slice<T> of struct elements, each stringified via the same "
+     "@axea.tostring.<Name>-equivalent toString() print()/join() already use for Array")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "f(s: slice<Point>) -> String { return s.join(\", \") } "
+                               "pts = [Point{x:1}, Point{x:2}] x = f(pts)";
+    EXPECT_EQ(toString(run(source)), "Point { x: 1 }, Point { x: 2 }");
+}
+
+TEST("Interpreter left/right/center-aligns a str interpolation span to a given width, padding "
+     "with spaces (see docs/language/0057-alignment.md)")
+{
+    EXPECT_EQ(toString(run("name = \"hi\" x = \"[{name:<10}]\"")), "[hi        ]");
+    EXPECT_EQ(toString(run("name = \"hi\" x = \"[{name:>10}]\"")), "[        hi]");
+    EXPECT_EQ(toString(run("name = \"hi\" x = \"[{name:^10}]\"")), "[    hi    ]");
+}
+
+TEST("Interpreter's center alignment puts the extra space on the right for an odd padding "
+     "amount")
+{
+    EXPECT_EQ(toString(run("name = \"hi\" x = \"[{name:^11}]\"")), "[    hi     ]");
+}
+
+TEST("Interpreter's alignment never truncates - a value already at least as wide as the "
+     "target width passes through unchanged")
+{
+    EXPECT_EQ(toString(run("name = \"hello world\" x = \"[{name:<5}]\"")), "[hello world]");
+}
+
+TEST("Interpreter aligns a numeric interpolation span (bool/i32), not just str - alignment "
+     "applies to any text-representable type")
+{
+    EXPECT_EQ(toString(run("ok = true x = \"[{ok:<10}]\"")), "[true      ]");
+    EXPECT_EQ(toString(run("n = 5 x = \"[{n:>6}]\"")), "[     5]");
+}
+
+TEST("Interpreter combines alignment with a radix conversion, padding the resulting hex text "
+     "(the core-text-then-pad path reuses formatValue's own hex conversion unchanged)")
+{
+    EXPECT_EQ(toString(run("n = 255 x = \"[{n:>10x}]\"")), "[        ff]");
+    EXPECT_EQ(toString(run("n = 255 x = \"[{n:<10x}]\"")), "[ff        ]");
+}
+
+TEST("Interpreter combines alignment with a float precision, matching the source doc's own "
+     "{user.score:>8.2} example")
+{
+    EXPECT_EQ(toString(run("pi = 3.14159 x = \"[{pi:>8.2}]\"")), "[    3.14]");
+}
+
+TEST("Interpreter's self-documenting '{expr=}' prints the raw source text, '=', then the "
+     "value's own normal representation, matching the source doc's own worked example (see "
+     "docs/language/0058-debug-formatting.md)")
+{
+    EXPECT_EQ(toString(run("n = 42 x = \"{n=}\"")), "n=42");
+}
+
+TEST("Interpreter's self-doc marker echoes the raw expression source text verbatim, not a "
+     "re-rendering of the parsed AST - e.g. 'age + 1', not '(age + 1)' or similar")
+{
+    EXPECT_EQ(toString(run("age = 30 x = \"{age + 1=}\"")), "age + 1=31");
+}
+
+TEST("Interpreter's debug format '{value:?}' is identical to the unformatted case for every "
+     "type except str/String, which get wrapped in quotes")
+{
+    EXPECT_EQ(toString(run("n = 42 x = \"{n:?}\"")), "42");
+    EXPECT_EQ(toString(run("ok = true x = \"{ok:?}\"")), "true");
+    EXPECT_EQ(toString(run("name = \"Ada\" x = \"{name:?}\"")), "\"Ada\"");
+}
+
+TEST("Interpreter's debug format quotes an owned String the same way it quotes a bare str")
+{
+    const std::string source = "f() -> String { "
+                               "  greeting: String = \"hi\" "
+                               "  return \"{greeting:?}\" "
+                               "} "
+                               "x = f()";
+    EXPECT_EQ(toString(run(source)), "\"hi\"");
+}
+
+TEST("Interpreter's debug format on a struct is identical to the unformatted case - no "
+     "Display/Debug distinction exists yet for struct printing (see "
+     "docs/language/0058-debug-formatting.md's own Known Imprecision)")
+{
+    const std::string source = "struct Point { x: i32 } "
+                               "p = Point { x: 1 } "
+                               "normal = \"{p}\" "
+                               "debug = \"{p:?}\"";
+    auto bindings = runProgram(source);
+    EXPECT_EQ(toString(bindings.at("normal")), toString(bindings.at("debug")));
+}
+
+TEST("Interpreter combines a self-doc prefix with a debug spec: '{s=:?}' prints the raw "
+     "source text, '=', then the quoted debug representation")
+{
+    EXPECT_EQ(toString(run("s = \"hi\" x = \"{s=:?}\"")), "s=\"hi\"");
+}
+
+TEST("Interpreter dispatches to a user's impl Display for a struct interpolated inside a "
+     "string, instead of the default per-field printer (see "
+     "docs/language/0062-display-trait.md)")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "p = Point { x: 10, y: 20 } "
+        "x = \"Position: {p}\"";
+    EXPECT_EQ(toString(run(source)), "Position: (10, 20)");
+}
+
+TEST("Interpreter dispatches to a user's impl Display for a bare print() struct argument")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "run() -> i32 { p = Point { x: 1, y: 2 }  print(p)  return 0 } "
+        "r = run()";
+
+    std::ostringstream captured;
+    std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
+    runProgram(source);
+    std::cout.rdbuf(originalCout);
+
+    EXPECT_EQ(captured.str(), "(1, 2)\n");
+}
+
+TEST("Interpreter dispatches to a user's impl Display for a struct nested inside another "
+     "struct's own default field printer")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "struct Line { a: Point  b: Point } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "line = Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 } } "
+        "x = \"{line}\"";
+    EXPECT_EQ(toString(run(source)), "Line { a: (1, 2), b: (3, 4) }");
+}
+
+TEST("Interpreter dispatches to a user's impl Display for a struct nested inside an array")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] "
+        "x = \"{points}\"";
+    EXPECT_EQ(toString(run(source)), "[(1, 2), (3, 4)]");
+}
+
+TEST("Interpreter dispatches to Display for a struct's top-level auto-printed binding - the "
+     "one call site that happens *after* Interpreter::run() has already returned, still while "
+     "the Interpreter instance itself is alive")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "p = Point { x: 7, y: 8 }";
+
+    Lexer lexer(source);
+    Parser parser(lexer.lex());
+    auto program = parser.parseProgram();
+    Interpreter interpreter;
+    interpreter.run(program);
+    EXPECT_EQ(toString(interpreter.variables().at("p")), "(7, 8)");
+}
+
+TEST("Interpreter falls back to the default per-field printer for a struct type with no "
+     "registered impl Display, even when other structs in the same program have one")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "struct Other { n: i32 } "
+        "impl Display for Point { "
+        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+        "} "
+        "x = Other { n: 5 }";
+    EXPECT_EQ(toString(run(source)), "Other { n: 5 }");
+}
+
+TEST("Interpreter implicitly wraps a plain value into a union-typed call argument, declared "
+     "local, and return, with no wrapper syntax, and 'match' dispatches on it by each "
+     "alternative's own type name (see docs/language/0065-unions.md)")
+{
+    const std::string source = "f(x: i32 | str) -> str { "
+                               "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
+                               "} "
+                               "a = f(5) "
+                               "b = f(\"hi\") "
+                               "w: i32 | str = 5";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("a")), "number");
+    EXPECT_EQ(toString(results.at("b")), "string");
+    EXPECT_EQ(toString(results.at("w")), "i32(5)");
+}
+
+TEST("Interpreter forwards an already-union-typed value through another union-typed boundary "
+     "without re-wrapping it")
+{
+    const std::string source = "f(x: i32 | str) -> i32 | str { return x } "
+                               "g(x: i32 | str) -> i32 | str { return f(x) } "
+                               "a = g(5) "
+                               "b = g(\"hi\")";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("a")), "i32(5)");
+    EXPECT_EQ(toString(results.at("b")), "str(hi)");
+}
+
+TEST("Interpreter's union value wraps a struct alternative by its own type name")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "f(v: Point | i32) -> str { "
+                               "  return match v { Point(p) => \"point\"  i32(n) => \"number\" } "
+                               "} "
+                               "p = Point { x: 1, y: 2 } "
+                               "a = f(p) "
+                               "b = f(5)";
+    auto results = runProgram(source);
+    EXPECT_EQ(toString(results.at("a")), "point");
+    EXPECT_EQ(toString(results.at("b")), "number");
 }

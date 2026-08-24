@@ -40,6 +40,39 @@ private:
     std::unique_ptr<Stmt> parseExternDecl();
     Param parseExternParam();
     std::unique_ptr<Stmt> parseStructDecl();
+    // `trait Name { format(self, buf: Buffer)  ... }` (see
+    // docs/language/0062-display-trait.md) - a method signature has no
+    // body, just a name/params/optional return type, and its own first
+    // param may be a bare `self` (parseSelfAwareParam) instead of an
+    // ordinary parseParam-shaped one.
+    std::unique_ptr<Stmt> parseTraitDecl();
+    // `impl TraitName for TypeName { method bodies }` - each method
+    // desugars into a real FunctionDecl, mangled name
+    // `typeName + "." + methodName`, via parseImplMethod.
+    std::unique_ptr<Stmt> parseImplDecl();
+    // One parameter inside a trait method signature or an impl method's
+    // own param list, where the first parameter may be a bare `self` (no
+    // ':type', no capability prefix) instead of parseParam's ordinary
+    // `[read|write|take]? name: Type` shape. `selfType` is what a bare
+    // `self` resolves to - the impl's own concrete target type for an
+    // impl method, or the literal placeholder text "Self" for a trait
+    // signature (never type-checked - see TraitDecl's own comment).
+    Param parseSelfAwareParam(const std::string& selfType);
+    // One method body inside an `impl` block - same shape as
+    // parseFunctionDecl (params/optional return type/body), except the
+    // name is mangled to `typeName + "." + methodName` and the first
+    // param may be a bare `self`.
+    std::unique_ptr<FunctionDecl> parseImplMethod(const std::string& typeName);
+    // `enum Name { Variant(T1, T2)  Other  ... }` (see docs/language/0064-enums.md) - variants
+    // are whitespace-separated (no commas between them, same convention struct fields already
+    // use), each optionally followed by a parenthesized, comma-separated positional payload
+    // type list.
+    std::unique_ptr<Stmt> parseEnumDecl();
+    // `match scrutinee { Variant(a, b) => expr  _ => expr }` - arms are whitespace-separated
+    // (same convention as struct fields/enum variants); each arm's `variantName` is a bare
+    // identifier or the literal text "_", optionally followed by a parenthesized,
+    // comma-separated binding-name list, then `=>`, then the arm's own single-expression body.
+    std::unique_ptr<Expr> parseMatchExpr();
     std::unique_ptr<Stmt> parseAssignment();
     std::unique_ptr<Stmt> parseReturn();
     std::unique_ptr<Stmt> parseWhile();
@@ -58,6 +91,11 @@ private:
     // LlvmIrEmitter::llvmType) can parse the same fixed shape. Replaces every
     // former `expect(TokenKind::Identifier, "expected ... type")` call site.
     std::string parseTypeName();
+    // The single-alternative shape parseTypeName's old body was, before "T1 | T2 | ..."
+    // union types (see docs/language/0065-unions.md) - parseTypeName itself now wraps this,
+    // collecting one or more Pipe-separated atoms into a canonical, sorted-and-deduplicated
+    // union string when more than one is present.
+    std::string parseTypeNameAtom();
 
     std::unique_ptr<Expr> parseBlock();
     std::unique_ptr<Expr> parseIfExpr();
@@ -92,6 +130,16 @@ private:
     // legal to call `.parseExpression()` on another Parser instance
     // directly since C++ access control is per-class, not per-object.
     std::unique_ptr<Expr> parseStringLiteral(const std::string& text);
+    // Decodes a raw String token's full captured text (still carrying its
+    // optional 'r' prefix and its 1- or 3-quote delimiters - see
+    // docs/language/0059-raw-strings.md and
+    // docs/language/0060-multiline-strings.md) into either a plain
+    // StringExpr (raw: zero processing of the inner content at all, not
+    // even '{{'/'}}' escaping) or a call into parseStringLiteral (non-raw:
+    // identical interpolation handling for both 1- and 3-quote literals,
+    // since parseStringLiteral's own char-by-char scan doesn't care
+    // whether an embedded byte happens to be a real newline).
+    std::unique_ptr<Expr> parseRawOrInterpolatedString(const std::string& tokenText);
 
     std::vector<Token> tokens_;
     std::size_t index_{0};

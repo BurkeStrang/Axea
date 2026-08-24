@@ -7,6 +7,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -31,6 +32,8 @@ struct SortedSetInstance;
 struct StringInstance;
 struct BufferInstance;
 struct OptionalInstance;
+struct ResultInstance;
+struct EnumInstance;
 
 using Value =
     std::variant<std::int64_t, // i32 and i64 both (see docs/language/0005-type-system.md) -
@@ -62,6 +65,8 @@ using Value =
                  std::shared_ptr<StringInstance>,
                  std::shared_ptr<BufferInstance>,
                  std::shared_ptr<OptionalInstance>,
+                 std::shared_ptr<ResultInstance>,
+                 std::shared_ptr<EnumInstance>,
                  std::monostate>;
 
 struct StructInstance
@@ -69,6 +74,18 @@ struct StructInstance
     std::string typeName;
     std::vector<std::pair<std::string, Value>>
         fields; // declared field order, for deterministic printing
+};
+
+// Reference semantics (shared_ptr), mirroring StructInstance - see
+// docs/language/0064-enums.md. `fields` holds the active variant's own positional payload
+// values only (empty for a no-payload variant) - unlike Result<T,E>'s own always-both-slots
+// convention, there's no fixed slot count to keep in sync across variants, so this just stores
+// exactly what the active variant actually carries.
+struct EnumInstance
+{
+    std::string typeName;
+    std::string variantName;
+    std::vector<Value> fields;
 };
 
 // Reference semantics (always accessed via shared_ptr), mirroring
@@ -294,6 +311,19 @@ struct OptionalInstance
     Value value;
 };
 
+// Reference semantics (shared_ptr), mirroring OptionalInstance above - see
+// docs/language/0063-result.md. Unlike OptionalInstance, both `okValue` and
+// `errValue` are stored unconditionally (only the one matching `isOk` is
+// ever meaningfully populated - the other holds a default-constructed
+// Value); every consumer (`?`, .unwrap_or/.is_ok/.is_err) checks `isOk`
+// before reading either.
+struct ResultInstance
+{
+    bool isOk;
+    Value okValue;
+    Value errValue;
+};
+
 std::string toString(const Value& value);
 
 class Environment
@@ -317,12 +347,30 @@ private:
 class Interpreter
 {
 public:
+    // Clears the file-local active-interpreter pointer (see
+    // g_activeInterpreter's own comment in Interpreter.cpp) if it still
+    // points at this instance - guards against a dangling read from
+    // toString after this Interpreter is destroyed, e.g. the common test
+    // pattern `toString(runProgram(source).at("x"))` where the
+    // Interpreter itself goes out of scope (and is destroyed) before
+    // toString is ever called on the value it produced.
+    ~Interpreter();
+
     void run(const Program& program);
 
     Value evaluate(const Expr& expr, Environment& env);
     void execute(const Stmt& stmt, Environment& env);
 
     const std::unordered_map<std::string, Value>& variables() const;
+
+    // Display trait dispatch (see docs/language/0062-display-trait.md) -
+    // called from the free `toString` function below via a file-local
+    // active-interpreter pointer (toString has no Interpreter of its own
+    // to call `callFunction` through). Returns nullopt when `typeName`
+    // has no registered `impl Display for <typeName>`, so the caller
+    // falls back to the default per-field printer.
+    std::optional<std::string>
+    tryFormatStructWithDisplay(const std::shared_ptr<StructInstance>& instance);
 
 private:
     Value callFunction(const FunctionDecl& decl, std::vector<Value> args);
@@ -332,8 +380,28 @@ private:
     // arbitrary C symbols the way the compiled backend's own `declare`+
     // `call` genuinely does. Any other name throws.
     Value callExtern(const std::string& name, const std::vector<Value>& args);
+    // Implicit union wrapping (see docs/language/0065-unions.md) - if `declaredTypeName` is a
+    // union ("|"-joined, e.g. "i32|str") and `value`'s own runtime shape matches exactly one of
+    // its alternatives, wraps it into that alternative's own EnumInstance (typeName =
+    // declaredTypeName, variantName = the matching alternative). A value that's already this
+    // exact union (typeName == declaredTypeName - e.g. forwarding an existing union value
+    // through another union-typed boundary) or a plain non-union declaredTypeName passes
+    // through unchanged. Called independently at each of the three boundaries TypeChecker's own
+    // isUnionMember gates (assignment, return, call argument) - mirrors this whole codebase's
+    // "each pass re-derives what it needs, no shared resolved-type state" convention (see
+    // TypeChecker::resolveUnionType's own comment for why the interpreter needs no registry at
+    // all to do this, unlike TypeChecker/IrGenerator).
+    Value wrapForUnion(Value value, const std::string& declaredTypeName) const;
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;
+    std::unordered_map<std::string, const EnumDecl*> enums_;
+    // struct name -> its `impl Display for <name>`'s own "format" method
+    // (see docs/language/0062-display-trait.md) - only ever populated for
+    // "Display" specifically, mirroring IrGenerator's own
+    // IrProgram::displayImpls (kept as two independent maps, per this
+    // codebase's "separate over shared" convention between the
+    // interpreter and the compiled backend).
+    std::unordered_map<std::string, const FunctionDecl*> displayImpls_;
     Environment globalEnv_;
 };

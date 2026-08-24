@@ -120,10 +120,44 @@ struct NoneExpr final : Expr
 {
 };
 
-// `<expr>?` (see docs/language/0052-optional.md) - postfix, valid only
-// inside a function whose own declared return type is Optional<U> for some
-// U. On Some(v), evaluates to v; on None, immediately returns None from the
-// enclosing function - the language's only expression-context early return.
+// `Ok(value)`/`Err(value)` (see docs/language/0063-result.md) - wrap `value`
+// into a `Result<T,E>`, structurally identical to SomeExpr above (one
+// bottom-up-typed payload expression). Unlike SomeExpr, though, *neither*
+// constructor alone can fully synthesize `Result<T,E>` - `Ok(x)` gives T but
+// not E, `Err(e)` gives E but not T - so both need the identical
+// "surrounding context supplies the other half" treatment NoneExpr's own
+// comment describes, just for one type parameter instead of both (see
+// TypeChecker::checkStmt's AssignmentStmt/ReturnStmt cases).
+struct OkExpr final : Expr
+{
+    explicit OkExpr(std::unique_ptr<Expr> value)
+        : value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> value;
+};
+
+struct ErrExpr final : Expr
+{
+    explicit ErrExpr(std::unique_ptr<Expr> value)
+        : value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> value;
+};
+
+// `<expr>?` (see docs/language/0052-optional.md, generalized to Result<T,E>
+// by docs/language/0063-result.md) - postfix, valid only inside a function
+// whose own declared return type is Optional<U> or Result<U,E> (matching
+// the operand's own kind - no automatic error-type conversion between a
+// differently-`E`-typed operand and the enclosing function, see
+// 0063-result.md's own Known Imprecision). On the success case (Some(v)/
+// Ok(v)), evaluates to v; on the failure case (None/Err(e)), immediately
+// returns the failure (None, or a fresh Err(e) carrying the same `e`) from
+// the enclosing function - the language's only expression-context early
+// return.
 struct TryExpr final : Expr
 {
     explicit TryExpr(std::unique_ptr<Expr> operand)
@@ -161,15 +195,41 @@ struct StringExpr final : Expr
 // string literal in this codebase is unaffected. Each Piece is either a
 // literal span (`expr == nullptr`, `literalText` used) or a parsed
 // sub-expression (`expr` set, `literalText` unused) - alternating in
-// source order. No format specifiers (`:05`, `:.2`, `:<20`, ...) or
-// debug (`{x=}`) forms this phase - see that same doc's own Known
-// Imprecision section once written.
+// source order.
 struct InterpolatedStringExpr final : Expr
 {
     struct Piece
     {
         std::string literalText;    // used when expr == nullptr
         std::unique_ptr<Expr> expr; // used when non-null; literalText then unused
+        // The raw text after a top-level ':' inside this piece's own
+        // `{expr:spec}` span (see docs/language/0055-numeric-format-specs.md
+        // and docs/language/0057-alignment.md) - e.g. "05", ".2", "08b",
+        // "<20". Empty when the piece has no format spec, OR when `debug`
+        // below is set (`{expr:?}`'s own "?" is never itself a FormatSpec-
+        // grammar string - see docs/language/0058-debug-formatting.md).
+        // Only meaningful when `expr` is non-null; parsed once,
+        // structurally, by parseFormatSpec (shared by TypeChecker/
+        // Interpreter/LlvmIrEmitter - pure syntax, not a runtime
+        // computation, so unlike genuine value-formatting logic there's no
+        // "separate over shared" reason to duplicate it).
+        std::string formatSpec;
+        // `{expr=}` (see docs/language/0058-debug-formatting.md) - the raw
+        // source text of `expr` exactly as written between `{` and `=`,
+        // captured verbatim (not re-rendered from the parsed AST), printed
+        // followed by '=' immediately before the expression's own value.
+        // Empty when the piece has no self-doc marker - never legitimately
+        // empty when it does, since an empty expression before '=' is
+        // rejected at parse time, so emptiness alone is an unambiguous
+        // "not self-doc" sentinel, the same convention `formatSpec` above
+        // already uses.
+        std::string selfDocPrefix;
+        // `{expr:?}` (see docs/language/0058-debug-formatting.md) - the
+        // "debug representation": identical to the unformatted case for
+        // every type except str/String, where it additionally wraps the
+        // text in double quotes. Mutually exclusive with `formatSpec`
+        // being non-empty (the parser sets one or the other, never both).
+        bool debug = false;
     };
 
     explicit InterpolatedStringExpr(std::vector<Piece> pieces)
@@ -211,6 +271,35 @@ struct IfExpr final : Expr
     std::unique_ptr<Expr> thenBranch;
     std::unique_ptr<Expr>
         elseBranch; // BlockExpr, or a nested IfExpr for `else if`; null if no else
+};
+
+// `match scrutinee { Variant(a, b) => expr  Other => expr  _ => expr }` (see
+// docs/language/0064-enums.md) - `variantName` is a real declared variant name on the
+// scrutinee's own enum type, or the literal text "_" for a wildcard catch-all (parsed the same
+// "special-cased identifier text" way None/Some/Ok/Err already are - no reserved token needed).
+// `bindingNames` has one entry per the variant's own declared positional payload type (empty for
+// a no-payload variant or a wildcard arm) - each bound, in the arm's own body only, to that
+// payload slot's value. A wildcard arm, if present, must be the last arm (enforced by
+// TypeChecker, not the parser - see that check's own comment for why): every arm after it would
+// otherwise be unreachable dead code, a real correctness footgun worth rejecting outright rather
+// than silently allowing.
+struct MatchArm
+{
+    std::string variantName;
+    std::vector<std::string> bindingNames;
+    std::unique_ptr<Expr> body;
+};
+
+struct MatchExpr final : Expr
+{
+    MatchExpr(std::unique_ptr<Expr> scrutinee, std::vector<MatchArm> arms)
+        : scrutinee(std::move(scrutinee)),
+          arms(std::move(arms))
+    {
+    }
+
+    std::unique_ptr<Expr> scrutinee;
+    std::vector<MatchArm> arms;
 };
 
 // Infinite loop, always an expression - unlike `while`, every exit is a

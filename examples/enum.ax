@@ -1,0 +1,50 @@
+enum Shape
+{
+    Circle(f64)
+    Rectangle(f64, f64)
+    Point
+}
+
+area(s: Shape) -> f64
+{
+    return match s
+    {
+        Circle(r) => 3.14159 * r * r
+        Rectangle(w, h) => w * h
+        Point => 0.0
+    }
+}
+
+describe(s: Shape) -> str
+{
+    return match s
+    {
+        Circle(r) => "a circle"
+        _ => "not a circle"
+    }
+}
+
+run() -> i32
+{
+    c = Shape.Circle(5.0)
+    r = Shape.Rectangle(3.0, 4.0)
+    p = Shape.Point
+
+    print(c)
+    print(r)
+    print(p)
+
+    print("Circle area: {area(c)}")
+    print("Rectangle area: {area(r)}")
+    print("Point area: {area(p)}")
+
+    print(describe(c))
+    print(describe(p))
+
+    shapes = [c, r, p]
+    print(shapes)
+
+    return 0
+}
+
+x = run()

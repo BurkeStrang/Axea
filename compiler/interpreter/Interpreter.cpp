@@ -1,5 +1,7 @@
 #include "interpreter/Interpreter.hpp"
 
+#include "sema/FormatSpec.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -276,6 +278,190 @@ namespace
         }
         throw std::runtime_error("string index out of range");
     }
+
+    // `{expr:spec}` (see docs/language/0055-numeric-format-specs.md) -
+    // real value formatting, mirroring the compiled backend's own
+    // sprintf-based/hand-rolled-binary logic (registerFormatRuntime)
+    // exactly, verified byte-for-byte via the usual diff-against-
+    // compiled-output discipline. A radix conversion (x/X/b/o) always
+    // operates on the full 64-bit bit pattern, regardless of whether the
+    // piece's own checked type was i32 or i64 - TypeChecker::checkExpr's
+    // own result is never persisted onto the AST anywhere in this
+    // codebase (every pass re-derives what it needs independently - see
+    // IrGenerator's own isListType/isSetType etc.), and the interpreter's
+    // `Value` itself has no i32-vs-i64 distinction at runtime either (the
+    // established "TypeChecker distinguishes width, the interpreter
+    // doesn't" convention - see docs/language/0051-numeric-widening.md).
+    // Threading that distinction through just for this one case wasn't
+    // worth it: a documented, deliberate simplification, not a bug -
+    // `{i32Value:x}` on a negative i32 renders its full 64-bit
+    // sign-extended pattern (16 hex digits), not the narrower 8 a real
+    // 32-bit-only reinterpretation would give. The compiled backend
+    // matches this exactly (see registerFormatRuntime's own identical
+    // choice), so the two backends still agree byte-for-byte, which is
+    // what actually matters.
+    std::string formatValue(const Value& value, const FormatSpec& spec)
+    {
+        char buf[128];
+        std::string fmt = "%";
+        if (spec.zeroPad)
+        {
+            fmt += '0';
+        }
+        if (spec.width > 0)
+        {
+            fmt += std::to_string(spec.width);
+        }
+
+        if (spec.type == 'b')
+        {
+            // No printf specifier for binary - hand-rolled, mirroring
+            // registerFormatRuntime's own identical bit-extraction loop.
+            const auto bits = static_cast<std::uint64_t>(std::get<std::int64_t>(value));
+            std::string digits;
+            if (bits == 0)
+            {
+                digits = "0";
+            }
+            else
+            {
+                std::uint64_t remaining = bits;
+                while (remaining > 0)
+                {
+                    digits = static_cast<char>('0' + (remaining & 1)) + digits;
+                    remaining >>= 1;
+                }
+            }
+            if (static_cast<int>(digits.size()) < spec.width)
+            {
+                const char pad = spec.zeroPad ? '0' : ' ';
+                digits = std::string(spec.width - digits.size(), pad) + digits;
+            }
+            return digits;
+        }
+
+        if (spec.type == 'x' || spec.type == 'X' || spec.type == 'o')
+        {
+            fmt += "ll";
+            fmt += spec.type == 'x' ? 'x' : spec.type == 'X' ? 'X' : 'o';
+            const auto bits = static_cast<unsigned long long>(std::get<std::int64_t>(value));
+            std::snprintf(buf, sizeof(buf), fmt.c_str(), bits);
+            return std::string(buf);
+        }
+
+        if (spec.precision.has_value())
+        {
+            fmt += '.';
+            fmt += std::to_string(*spec.precision);
+            fmt += 'f';
+            std::snprintf(buf, sizeof(buf), fmt.c_str(), std::get<double>(value));
+            return std::string(buf);
+        }
+
+        // Plain width/zero-pad, decimal (TypeChecker already guarantees
+        // an i32/i64 value here).
+        fmt += "lld";
+        std::snprintf(
+            buf, sizeof(buf), fmt.c_str(), static_cast<long long>(std::get<std::int64_t>(value)));
+        return std::string(buf);
+    }
+
+    // `{expr:spec}` with an explicit alignment char (see
+    // docs/language/0057-alignment.md) - the piece's own *unpadded* text,
+    // width/zero-pad stripped out of `spec` first (padToWidth applies
+    // width separately, as a generic post-processing step over the
+    // resulting text - see its own comment for why that has to be a
+    // second step here, unlike formatValue's single-pass sprintf above).
+    // A radix conversion or precision still delegates to formatValue
+    // itself (reusing its existing hex/octal/binary/precision text
+    // computation exactly, just with width/zeroPad zeroed out first, so
+    // there's no second copy of that conversion logic); a bare value with
+    // neither (the case formatValue's own "plain" branch can't handle at
+    // all, since it assumes a numeric Value) falls back to the same
+    // generic toString() every unformatted interpolation piece already
+    // uses - alignment, unlike the rest of this file's numeric-only
+    // formatting, applies to any text-representable type (see
+    // TypeChecker's own identical relaxation).
+    std::string formatValueCore(const Value& value, const FormatSpec& spec)
+    {
+        if (spec.type != '\0' || spec.precision.has_value())
+        {
+            FormatSpec unpadded = spec;
+            unpadded.width = 0;
+            unpadded.zeroPad = false;
+            return formatValue(value, unpadded);
+        }
+        return toString(value);
+    }
+
+    // Pads `text` to `width` with spaces per `align` ('<' left, '>'
+    // right, '^' center) - a no-op if `text` is already at least `width`
+    // long (see docs/language/0057-alignment.md; no truncation is ever
+    // performed, matching every other width-related format spec in this
+    // file). For '^' with an odd amount of padding, the extra space goes
+    // on the right - an arbitrary but consistent tie-break, matched
+    // exactly by LlvmIrEmitter's own identical choice so the two backends
+    // never disagree on it.
+    std::string padToWidth(const std::string& text, char align, int width)
+    {
+        const int deficit = width - static_cast<int>(text.size());
+        if (deficit <= 0)
+        {
+            return text;
+        }
+        if (align == '<')
+        {
+            return text + std::string(deficit, ' ');
+        }
+        if (align == '>')
+        {
+            return std::string(deficit, ' ') + text;
+        }
+        const int left = deficit / 2;
+        const int right = deficit - left;
+        return std::string(left, ' ') + text + std::string(right, ' ');
+    }
+
+    // `{expr:?}` (see docs/language/0058-debug-formatting.md) - identical
+    // to the unformatted `toString` for every type except str/String,
+    // which get wrapped in double quotes (no internal escaping of
+    // embedded quotes/backslashes - real further work, not built this
+    // phase, since nothing in the source doc's own example asks for it).
+    std::string toStringDebug(const Value& value)
+    {
+        if (const auto* string = std::get_if<std::string>(&value))
+        {
+            return "\"" + *string + "\"";
+        }
+        if (const auto* ownedString = std::get_if<std::shared_ptr<StringInstance>>(&value))
+        {
+            return "\"" + (*ownedString)->data + "\"";
+        }
+        return toString(value);
+    }
+} // namespace
+
+namespace
+{
+    // The most recently run Interpreter still alive, if any (see
+    // docs/language/0062-display-trait.md's own Design section) - the
+    // free `toString` function below has no Interpreter of its own to
+    // call `callFunction` through, so it reaches one via this pointer
+    // instead. Set unconditionally at the top of Interpreter::run()
+    // (never reset there - `main.cpp`'s own top-level auto-print of a
+    // struct binding calls toString *after* run() has already returned,
+    // while the Interpreter instance itself is still alive, and needs
+    // Display dispatch to work there too, not just for print/
+    // interpolation evaluated during run() itself). Reset instead by
+    // `~Interpreter()`, and only if it still points at *this* instance -
+    // which is what actually makes a dangling read structurally
+    // impossible: the one real risk (a test harness pattern like
+    // `toString(runProgram(source).at("x"))`, where the Interpreter goes
+    // out of scope and is destroyed before toString is ever called on
+    // the value it produced) is exactly the case the destructor guards
+    // against, on every return path including an exception unwind out of
+    // run() itself.
+    Interpreter* g_activeInterpreter = nullptr;
 } // namespace
 
 std::string toString(const Value& value)
@@ -328,8 +514,52 @@ std::string toString(const Value& value)
         // backend.
         return (*optional)->hasValue ? "Some(" + toString((*optional)->value) + ")" : "None";
     }
+    if (const auto* result = std::get_if<std::shared_ptr<ResultInstance>>(&value))
+    {
+        // "Ok(<payload>)"/"Err(<payload>)" (see docs/language/0063-result.md) -
+        // matches LlvmIrEmitter's own @axea.result.<id>.to_str exactly, the
+        // same "verified byte-for-byte against the compiled backend" doc
+        // convention Optional's own toString case already established.
+        return (*result)->isOk ? "Ok(" + toString((*result)->okValue) + ")"
+                               : "Err(" + toString((*result)->errValue) + ")";
+    }
+    if (const auto* enumInstance = std::get_if<std::shared_ptr<EnumInstance>>(&value))
+    {
+        // "VariantName(field0, field1, ...)", bare "VariantName" for a no-payload variant (see
+        // docs/language/0064-enums.md) - matches LlvmIrEmitter's own @axea.tostring.<name>
+        // exactly, the same byte-for-byte-verified convention Optional/Result's own toString
+        // cases already established. Unlike Result<T,E>'s own printing, no payload-type
+        // restriction: every field is stringified recursively via this same toString, so any
+        // printable type works as a variant's own payload.
+        std::string result = (*enumInstance)->variantName;
+        if (!(*enumInstance)->fields.empty())
+        {
+            result += "(";
+            for (std::size_t i = 0; i < (*enumInstance)->fields.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    result += ", ";
+                }
+                result += toString((*enumInstance)->fields[i]);
+            }
+            result += ")";
+        }
+        return result;
+    }
     if (const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&value))
     {
+        // Display trait dispatch (see docs/language/0062-display-trait.md) -
+        // checked first, before the default per-field printer built
+        // below; a struct with no registered `impl Display` (the common
+        // case) falls straight through unchanged.
+        if (g_activeInterpreter)
+        {
+            if (auto formatted = g_activeInterpreter->tryFormatStructWithDisplay(*instance))
+            {
+                return *formatted;
+            }
+        }
         std::string result = (*instance)->typeName + " { ";
         for (std::size_t i = 0; i < (*instance)->fields.size(); ++i)
         {
@@ -358,11 +588,11 @@ std::string toString(const Value& value)
     }
     if (const auto* slice = std::get_if<std::shared_ptr<SliceInstance>>(&value))
     {
-        // Provably unreachable in a well-typed program (slice<T> can never
-        // be a function return type - see docs/language/0032-slices.md), so
-        // a slice value can never actually surface here. Handled anyway,
-        // identically to an array, rather than silently falling through to
-        // the "()" case below if that invariant were ever violated by a bug.
+        // Reachable for real now (see docs/language/0056-slice-printing.md)
+        // via print/write/interpolation of a slice<T>-typed parameter,
+        // identically to an array - this branch existed since
+        // docs/language/0032-slices.md and needed no change at all, only
+        // TypeChecker::isTextRepresentable's own gate did.
         std::string result = "[";
         for (std::size_t i = 0; i < (*slice)->length; ++i)
         {
@@ -720,8 +950,19 @@ bool Environment::contains(const std::string& name) const
     return parent_ && parent_->contains(name);
 }
 
+Interpreter::~Interpreter()
+{
+    // See g_activeInterpreter's own comment above toString.
+    if (g_activeInterpreter == this)
+    {
+        g_activeInterpreter = nullptr;
+    }
+}
+
 void Interpreter::run(const Program& program)
 {
+    g_activeInterpreter = this;
+
     for (const auto& item : program.items)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
@@ -731,6 +972,30 @@ void Interpreter::run(const Program& program)
         else if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
             structs_[structDecl->name] = structDecl;
+        }
+        else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
+        {
+            enums_[enumDecl->name] = enumDecl;
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // See docs/language/0062-display-trait.md - each impl method
+            // is registered exactly like a top-level FunctionDecl;
+            // "Display"'s own "format" additionally populates
+            // displayImpls_, the one map toString's dispatch above
+            // actually consults.
+            for (const auto& method : implDecl->methods)
+            {
+                functions_[method->name] = method.get();
+            }
+            if (implDecl->traitName == "Display")
+            {
+                const std::string formatName = implDecl->typeName + ".format";
+                if (const auto it = functions_.find(formatName); it != functions_.end())
+                {
+                    displayImpls_[implDecl->typeName] = it->second;
+                }
+            }
         }
     }
 
@@ -762,6 +1027,10 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         // checks, not shadow a throwaway per-iteration copy (see
         // docs/language/0028-loops.md).
         Value value = evaluate(*assignment->value, env);
+        if (assignment->declaredType)
+        {
+            value = wrapForUnion(std::move(value), *assignment->declaredType);
+        }
         if (!assignment->forceDefine && env.contains(assignment->name))
         {
             env.assign(assignment->name, std::move(value));
@@ -953,7 +1222,32 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         std::string content;
         for (const auto& piece : interpolated->pieces)
         {
-            content += piece.expr ? toString(evaluate(*piece.expr, env)) : piece.literalText;
+            if (!piece.expr)
+            {
+                content += piece.literalText;
+                continue;
+            }
+            if (!piece.selfDocPrefix.empty())
+            {
+                content += piece.selfDocPrefix + "=";
+            }
+            const Value pieceValue = evaluate(*piece.expr, env);
+            if (piece.debug)
+            {
+                content += toStringDebug(pieceValue);
+            }
+            else if (piece.formatSpec.empty())
+            {
+                content += toString(pieceValue);
+            }
+            else
+            {
+                const FormatSpec spec = parseFormatSpec(piece.formatSpec);
+                content +=
+                    spec.align == '\0'
+                        ? formatValue(pieceValue, spec)
+                        : padToWidth(formatValueCore(pieceValue, spec), spec.align, spec.width);
+            }
         }
         return std::make_shared<StringInstance>(StringInstance{std::move(content)});
     }
@@ -1108,6 +1402,13 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                     argValue = (*ownedString)->data;
                 }
             }
+            // Implicit union wrapping (see docs/language/0065-unions.md) -
+            // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
+            // syntax.
+            if (i < it->second->params.size())
+            {
+                argValue = wrapForUnion(std::move(argValue), it->second->params[i].type);
+            }
             args.push_back(std::move(argValue));
         }
 
@@ -1116,6 +1417,26 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
     {
+        // `EnumName.Variant(args)` construction (see docs/language/0064-enums.md) - checked
+        // before evaluating `methodCall->object` as an ordinary value just below, which would
+        // otherwise throw "undefined variable" trying to look up a bare enum type name in the
+        // environment. TypeChecker already guarantees this is well-formed (real variant, right
+        // arity/types) whenever it's reached, so no further validation happens here.
+        if (const auto* name = dynamic_cast<const NameExpr*>(methodCall->object.get()))
+        {
+            if (const auto enumIt = enums_.find(name->name); enumIt != enums_.end())
+            {
+                std::vector<Value> fields;
+                fields.reserve(methodCall->arguments.size());
+                for (const auto& argument : methodCall->arguments)
+                {
+                    fields.push_back(evaluate(*argument, env));
+                }
+                return std::make_shared<EnumInstance>(
+                    EnumInstance{enumIt->second->name, methodCall->method, std::move(fields)});
+            }
+        }
+
         auto objectValue = evaluate(*methodCall->object, env);
 
         // `.parse<T>()` (see docs/language/0046-generic-methods.md and
@@ -1207,17 +1528,31 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // docs/language/0052-optional.md) - the non-propagating half of
         // Optional<T>'s API, checked here for the same reason "parse"/
         // "to_cstr" above are (TypeChecker checks them before the
-        // per-kind dispatch chain too).
+        // per-kind dispatch chain too). `unwrap_or` is shared with
+        // Result<T,E> (see docs/language/0063-result.md) - TypeChecker
+        // already guarantees `objectValue` is one or the other, so a
+        // `get_if` check on the runtime shape (rather than a static
+        // "which kind" flag threaded through, which the interpreter has
+        // no equivalent of) is all that's needed to dispatch correctly.
         if (methodCall->method == "unwrap_or")
         {
-            const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(objectValue);
-            return optional->hasValue ? optional->value
-                                      : evaluate(*methodCall->arguments.front(), env);
+            if (const auto* optional = std::get_if<std::shared_ptr<OptionalInstance>>(&objectValue))
+            {
+                return (*optional)->hasValue ? (*optional)->value
+                                             : evaluate(*methodCall->arguments.front(), env);
+            }
+            const auto& result = std::get<std::shared_ptr<ResultInstance>>(objectValue);
+            return result->isOk ? result->okValue : evaluate(*methodCall->arguments.front(), env);
         }
         if (methodCall->method == "is_some" || methodCall->method == "is_none")
         {
             const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(objectValue);
             return methodCall->method == "is_some" ? optional->hasValue : !optional->hasValue;
+        }
+        if (methodCall->method == "is_ok" || methodCall->method == "is_err")
+        {
+            const auto& result = std::get<std::shared_ptr<ResultInstance>>(objectValue);
+            return methodCall->method == "is_ok" ? result->isOk : !result->isOk;
         }
 
         // `.join(separator)` (see
@@ -1614,7 +1949,12 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // BufferInstance::capacity's own comment for why).
         if (const auto* buffer = std::get_if<std::shared_ptr<BufferInstance>>(&objectValue))
         {
-            if (methodCall->method == "append")
+            // "write" (see docs/language/0061-buffer-write.md) is a plain
+            // alias of "append" - string interpolation already lowers at
+            // parse time for any string literal argument, regardless of
+            // which method receives it, so there is no runtime behavior
+            // for "write" to add beyond the naming convention.
+            if (methodCall->method == "append" || methodCall->method == "write")
             {
                 const std::string text =
                     asStrContent(evaluate(*methodCall->arguments.front(), env));
@@ -1680,6 +2020,17 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
+        // `EnumName.Variant` (no parens - a no-payload variant, see
+        // docs/language/0064-enums.md and MethodCallExpr's own identical check just above).
+        if (const auto* name = dynamic_cast<const NameExpr*>(field->object.get()))
+        {
+            if (const auto enumIt = enums_.find(name->name); enumIt != enums_.end())
+            {
+                return std::make_shared<EnumInstance>(
+                    EnumInstance{enumIt->second->name, field->field, {}});
+            }
+        }
+
         auto objectValue = evaluate(*field->object, env);
 
         if (auto indexable = asIndexable(objectValue))
@@ -2161,26 +2512,161 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return std::make_shared<OptionalInstance>(OptionalInstance{false, Value{std::monostate{}}});
     }
 
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        // See docs/language/0063-result.md. errValue stays a default-
+        // constructed Value (never read - every consumer checks isOk
+        // first, mirroring OptionalInstance's own "never read in that
+        // state" convention).
+        return std::make_shared<ResultInstance>(
+            ResultInstance{true, evaluate(*okExpr->value, env), Value{std::monostate{}}});
+    }
+
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        return std::make_shared<ResultInstance>(
+            ResultInstance{false, Value{std::monostate{}}, evaluate(*errExpr->value, env)});
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
-        const Value optionalValue = evaluate(*tryExpr->operand, env);
-        const auto& optional = std::get<std::shared_ptr<OptionalInstance>>(optionalValue);
-        if (optional->hasValue)
+        // Generalized to Result<T,E> (see docs/language/0063-result.md) -
+        // the interpreter's Value is dynamically typed, so (unlike
+        // IrGenerator, which has to decide Optional-vs-Result from the
+        // enclosing function's own declared return type string) this just
+        // inspects which shape `operandValue` actually is at runtime.
+        const Value operandValue = evaluate(*tryExpr->operand, env);
+        if (const auto* optional = std::get_if<std::shared_ptr<OptionalInstance>>(&operandValue))
         {
-            return optional->value;
+            if ((*optional)->hasValue)
+            {
+                return (*optional)->value;
+            }
+            // Propagates None out of the enclosing function - the
+            // language's only expression-context early return (see
+            // docs/language/0052-optional.md). Reuses the exact same
+            // ReturnSignal `return` itself throws; TypeChecker already
+            // guarantees `?` only appears inside a function whose own
+            // return type is Optional<U>, so this is always caught at
+            // that function's own call boundary, never escaping to
+            // top-level code.
+            throw ReturnSignal{Value{std::make_shared<OptionalInstance>(
+                OptionalInstance{false, Value{std::monostate{}}})}};
         }
-        // Propagates None out of the enclosing function - the language's
-        // only expression-context early return (see
-        // docs/language/0052-optional.md). Reuses the exact same
-        // ReturnSignal `return` itself throws; TypeChecker already
-        // guarantees `?` only appears inside a function whose own return
-        // type is Optional<U>, so this is always caught at that function's
-        // own call boundary, never escaping to top-level code.
-        throw ReturnSignal{Value{
-            std::make_shared<OptionalInstance>(OptionalInstance{false, Value{std::monostate{}}})}};
+        const auto& result = std::get<std::shared_ptr<ResultInstance>>(operandValue);
+        if (result->isOk)
+        {
+            return result->okValue;
+        }
+        // Propagates the *same* Err(e) out of the enclosing function,
+        // preserving `e` itself (unlike None, which carries no payload to
+        // preserve) - TypeChecker already guarantees the enclosing
+        // function's own Err type matches the operand's, so no conversion
+        // is needed here either.
+        throw ReturnSignal{Value{std::make_shared<ResultInstance>(
+            ResultInstance{false, Value{std::monostate{}}, result->errValue})}};
+    }
+
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        // See docs/language/0064-enums.md. TypeChecker already guarantees exhaustiveness, a
+        // real variant per named arm, and the right binding count, so this just scans arms in
+        // written order for the first match (a wildcard "_" always matches) - no further
+        // validation needed.
+        const Value scrutineeValue = evaluate(*matchExpr->scrutinee, env);
+        const auto& scrutinee = std::get<std::shared_ptr<EnumInstance>>(scrutineeValue);
+        for (const auto& arm : matchExpr->arms)
+        {
+            if (arm.variantName != "_" && arm.variantName != scrutinee->variantName)
+            {
+                continue;
+            }
+            Environment armEnv(&env);
+            for (std::size_t i = 0; i < arm.bindingNames.size(); ++i)
+            {
+                armEnv.define(arm.bindingNames[i], scrutinee->fields[i]);
+            }
+            return evaluate(*arm.body, armEnv);
+        }
+        throw std::runtime_error("no match arm for variant '" + scrutinee->variantName + "'");
     }
 
     throw std::runtime_error("unsupported expression");
+}
+
+Value Interpreter::wrapForUnion(Value value, const std::string& declaredTypeName) const
+{
+    if (declaredTypeName.find('|') == std::string::npos)
+    {
+        return value;
+    }
+    if (const auto* alreadyUnion = std::get_if<std::shared_ptr<EnumInstance>>(&value);
+        alreadyUnion && (*alreadyUnion)->typeName == declaredTypeName)
+    {
+        return value;
+    }
+
+    const auto matchesAlternative = [&value](const std::string& alternative)
+    {
+        if (alternative == "i32" || alternative == "i64")
+        {
+            return std::holds_alternative<std::int64_t>(value);
+        }
+        if (alternative == "f64")
+        {
+            return std::holds_alternative<double>(value);
+        }
+        if (alternative == "bool")
+        {
+            return std::holds_alternative<bool>(value);
+        }
+        if (alternative == "char")
+        {
+            return std::holds_alternative<char32_t>(value);
+        }
+        if (alternative == "str" || alternative == "cstr")
+        {
+            return std::holds_alternative<std::string>(value);
+        }
+        if (alternative == "String")
+        {
+            return std::holds_alternative<std::shared_ptr<StringInstance>>(value);
+        }
+        if (const auto* structValue = std::get_if<std::shared_ptr<StructInstance>>(&value))
+        {
+            return (*structValue)->typeName == alternative;
+        }
+        if (const auto* enumValue = std::get_if<std::shared_ptr<EnumInstance>>(&value))
+        {
+            return (*enumValue)->typeName == alternative;
+        }
+        return false;
+    };
+
+    std::size_t start = 0;
+    while (true)
+    {
+        const auto bar = declaredTypeName.find('|', start);
+        const std::string alternative = declaredTypeName.substr(
+            start, bar == std::string::npos ? std::string::npos : bar - start);
+        if (matchesAlternative(alternative))
+        {
+            return Value{std::make_shared<EnumInstance>(
+                EnumInstance{declaredTypeName, alternative, {std::move(value)}})};
+        }
+        if (bar == std::string::npos)
+        {
+            break;
+        }
+        start = bar + 1;
+    }
+    // Unreachable once TypeChecker has validated the program (its own
+    // isUnionMember already guarantees the value's static type is one of
+    // this union's alternatives) - a defensive error, not a real user-facing
+    // one, for the same reason every other interpreter-trusts-TypeChecker
+    // call site in this file has none either.
+    throw std::runtime_error("internal error: value doesn't match any alternative of union " +
+                             declaredTypeName);
 }
 
 Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> args)
@@ -2216,9 +2702,39 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
     }
     catch (ReturnSignal& signal)
     {
+        // Implicit union wrapping (see docs/language/0065-unions.md) - `return 5` from a
+        // function declared `-> i32 | str` needs no wrapper syntax.
+        if (decl.returnType)
+        {
+            return wrapForUnion(std::move(signal.value), *decl.returnType);
+        }
         return std::move(signal.value);
     }
     return Value{std::monostate{}};
+}
+
+std::optional<std::string>
+Interpreter::tryFormatStructWithDisplay(const std::shared_ptr<StructInstance>& instance)
+{
+    const auto it = displayImpls_.find(instance->typeName);
+    if (it == displayImpls_.end())
+    {
+        return std::nullopt;
+    }
+    // A fresh Buffer, exactly like a real `Buffer()` construction (see
+    // BufferNewExpr's own evaluation just above in this file) - `format`
+    // writes into it via ordinary `buf.write`/`.append` calls, then this
+    // reads the result straight back out, the same "call a function,
+    // inspect what it left behind" shape a real Axea caller of
+    // `format(point, buf)` would use manually (see this doc's own
+    // Design section for why this reuses callFunction wholesale rather
+    // than any bespoke dispatch mechanism).
+    auto buffer = std::make_shared<BufferInstance>();
+    std::vector<Value> args;
+    args.push_back(Value{instance});
+    args.push_back(Value{buffer});
+    callFunction(*it->second, std::move(args));
+    return buffer->data;
 }
 
 Value Interpreter::callExtern(const std::string& name, const std::vector<Value>& args)

@@ -1072,6 +1072,33 @@ TEST("TypeChecker rejects indexing into a Buffer")
     EXPECT_THROWS(check("f() -> i32 { b = Buffer()  return b[0] }"));
 }
 
+TEST("TypeChecker accepts Buffer.write as a str-coercible-argument alias of append (see "
+     "docs/language/0061-buffer-write.md)")
+{
+    check("f() -> String { "
+          "  b = Buffer() "
+          "  b.write(\"Axea\") "
+          "  return b.finish() "
+          "} "
+          "x = f()");
+}
+
+TEST("TypeChecker rejects Buffer.write with a non-str-coercible argument")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.write(5) }"));
+}
+
+TEST("TypeChecker rejects Buffer.write with the wrong argument count")
+{
+    EXPECT_THROWS(check("f() { b = Buffer()  b.write() }"));
+    EXPECT_THROWS(check("f() { b = Buffer()  b.write(\"a\", \"b\") }"));
+}
+
+TEST("TypeChecker rejects 'write' on a String - only Buffer has it")
+{
+    EXPECT_THROWS(check("f() { s = String(\"a\")  s.write(\"b\") }"));
+}
+
 TEST("TypeChecker distinguishes Buffer.append from String.append despite the shared method name")
 {
     check("f() { "
@@ -1079,6 +1106,56 @@ TEST("TypeChecker distinguishes Buffer.append from String.append despite the sha
           "  buf.append(\"a\") "
           "  s = String(\"b\") "
           "  s.append(\"c\") "
+          "}");
+}
+
+TEST("TypeChecker accepts a well-formed impl Display for a struct, typechecking format's own "
+     "body with self bound to the struct type (see docs/language/0062-display-trait.md)")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "trait Display { format(self, buf: Buffer) } "
+          "impl Display for Point { "
+          "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+          "}");
+}
+
+TEST("TypeChecker rejects impl Display for a struct with no 'format' method at all")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "impl Display for Point { render(self, buf: Buffer) { } }"));
+}
+
+TEST("TypeChecker rejects impl Display for a struct whose 'format' has the wrong parameter count")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "impl Display for Point { format(self) { } }"));
+}
+
+TEST("TypeChecker rejects impl for an unknown (non-struct) type")
+{
+    EXPECT_THROWS(check("impl Display for Ghost { format(self, buf: Buffer) { } }"));
+}
+
+TEST("TypeChecker rejects an impl missing a method its own matching trait declares")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "trait Display { format(self, buf: Buffer)  extra(self) } "
+                        "impl Display for Point { format(self, buf: Buffer) { } }"));
+}
+
+TEST("TypeChecker rejects an impl method whose arity disagrees with its matching trait's "
+     "declared signature")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "trait Display { format(self, buf: Buffer) } "
+                        "impl Display for Point { format(self) { } }"));
+}
+
+TEST("TypeChecker accepts a real field access on self inside an impl method body")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "impl Display for Point { "
+          "  format(self, buf: Buffer) -> i32 { return self.x + self.y } "
           "}");
 }
 
@@ -1310,6 +1387,176 @@ TEST("TypeChecker still rejects indexed assignment into a str - single-character
     EXPECT_THROWS(check("f() { s = \"hello\"  s[0] = 'x' }"));
 }
 
+TEST("TypeChecker accepts enum variant construction (both payload and bare no-payload forms) "
+     "and a real match with full exhaustiveness (see docs/language/0064-enums.md)")
+{
+    check("enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+          "area(s: Shape) -> f64 { "
+          "  return match s { "
+          "    Circle(r) => 3.14159 * r * r "
+          "    Rectangle(w, h) => w * h "
+          "    Point => 0.0 "
+          "  } "
+          "} "
+          "c = Shape.Circle(5.0) "
+          "p = Shape.Point "
+          "x = area(c)");
+}
+
+TEST("TypeChecker accepts a wildcard arm covering the remaining variants")
+{
+    check("enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+          "f(s: Shape) -> str { return match s { Circle(r) => \"c\"  _ => \"other\" } } "
+          "x = f(Shape.Point)");
+}
+
+TEST("TypeChecker rejects a non-exhaustive match with no wildcard arm")
+{
+    EXPECT_THROWS(check("enum Shape { Circle(f64)  Point } "
+                        "f(s: Shape) -> f64 { return match s { Circle(r) => r } } "
+                        "x = f(Shape.Point)"));
+}
+
+TEST("TypeChecker rejects a wildcard arm that isn't the last arm")
+{
+    EXPECT_THROWS(check("enum Shape { Circle(f64)  Point } "
+                        "f(s: Shape) -> str { return match s { _ => \"w\"  Circle(r) => \"c\" } } "
+                        "x = f(Shape.Point)"));
+}
+
+TEST("TypeChecker rejects a variant matched more than once in the same match expression")
+{
+    EXPECT_THROWS(
+        check("enum Shape { Circle(f64)  Point } "
+              "f(s: Shape) -> str { "
+              "  return match s { Circle(r) => \"a\"  Circle(x) => \"b\"  Point => \"p\" } "
+              "} "
+              "x = f(Shape.Point)"));
+}
+
+TEST("TypeChecker rejects a match arm whose binding count doesn't match its variant's own "
+     "payload arity")
+{
+    EXPECT_THROWS(check("enum Shape { Circle(f64)  Point } "
+                        "f(s: Shape) -> str { "
+                        "  return match s { Circle(r, extra) => \"c\"  Point => \"p\" } "
+                        "} "
+                        "x = f(Shape.Point)"));
+}
+
+TEST("TypeChecker rejects match arms with incompatible result types")
+{
+    EXPECT_THROWS(check("enum Shape { Circle(f64)  Point } "
+                        "f(s: Shape) { "
+                        "  return match s { Circle(r) => 1  Point => \"p\" } "
+                        "} "
+                        "x = 1"));
+}
+
+TEST("TypeChecker rejects 'match' on a non-enum value")
+{
+    EXPECT_THROWS(check("f() { return match 5 { Circle(r) => r } } x = 1"));
+}
+
+TEST("TypeChecker rejects a variant construction with the wrong argument count or type")
+{
+    EXPECT_THROWS(check("enum Shape { Circle(f64) } x = Shape.Circle(5.0, 6.0)"));
+    EXPECT_THROWS(check("enum Shape { Circle(f64) } x = Shape.Circle(\"wrong\")"));
+    EXPECT_THROWS(check("enum Shape { Circle(f64) } x = Shape.Point"));
+}
+
+TEST("TypeChecker rejects a no-payload variant referenced with an explicit argument, and a "
+     "payload variant referenced with no arguments via the bare-field form")
+{
+    EXPECT_THROWS(check("enum Shape { Point } x = Shape.Point(5)"));
+    EXPECT_THROWS(check("enum Shape { Circle(f64) } x = Shape.Circle"));
+}
+
+TEST("TypeChecker resolves a nested enum type used as another enum's own variant payload")
+{
+    check("enum Inner { A  B } "
+          "enum Outer { Wrap(Inner) } "
+          "x = Outer.Wrap(Inner.A)");
+}
+
+TEST("TypeChecker accepts Ok(x)/Err(e) against a declared Result<T,E> type, and typechecks "
+     "'?' propagation through a Result<T,E>-returning function (see docs/language/0063-result.md)")
+{
+    check("divide(a: i32, b: i32) -> Result<i32, str> { "
+          "  if b == 0 { return Err(\"division by zero\") } "
+          "  return Ok(a / b) "
+          "} "
+          "x: Result<i32, str> = divide(10, 2)");
+}
+
+TEST("TypeChecker propagates '?' through a Result<T,E>-returning function, unwrapping Ok and "
+     "requiring the operand's own Err type to match the enclosing function's")
+{
+    check("inner(a: i32) -> Result<i32, str> { return Ok(a) } "
+          "outer(a: i32) -> Result<i32, str> { x = inner(a)?  return Ok(x) } "
+          "y = outer(1)");
+}
+
+TEST("TypeChecker rejects '?' when the operand's Err type doesn't match the enclosing "
+     "function's own Err type - no automatic error-type conversion this phase")
+{
+    EXPECT_THROWS(check("inner(a: i32) -> Result<i32, str> { return Ok(a) } "
+                        "outer(a: i32) -> Result<i32, i32> { x = inner(a)?  return Ok(x) } "
+                        "y = outer(1)"));
+}
+
+TEST("TypeChecker rejects '?' used inside a function whose own return type is neither "
+     "Optional<T> nor Result<T,E>")
+{
+    EXPECT_THROWS(check("f(a: i32) -> Result<i32, str> { return Ok(a) } "
+                        "g(a: i32) -> i32 { return f(a)? } "
+                        "y = g(1)"));
+}
+
+TEST("TypeChecker rejects a bare Ok(...)/Err(...) with no declared Result<T,E> context")
+{
+    EXPECT_THROWS(check("x = Ok(5)"));
+    EXPECT_THROWS(check("x = Err(5)"));
+}
+
+TEST("TypeChecker rejects Ok(...)/Err(...) whose value doesn't match the declared type's own "
+     "Ok/Err type")
+{
+    EXPECT_THROWS(check("x: Result<i32, str> = Ok(\"wrong\")"));
+    EXPECT_THROWS(check("x: Result<i32, str> = Err(5)"));
+}
+
+TEST("TypeChecker's unwrap_or/is_ok/is_err accept a Result<T,E>, unwrap_or's default must "
+     "match the Ok type")
+{
+    check("f() -> Result<i32, str> { return Ok(5) } "
+          "r = f() "
+          "v = r.unwrap_or(0) "
+          "ok = r.is_ok() "
+          "err = r.is_err()");
+    EXPECT_THROWS(check("f() -> Result<i32, str> { return Ok(5) } "
+                        "r = f() "
+                        "v = r.unwrap_or(\"wrong\")"));
+}
+
+TEST("TypeChecker rejects is_ok/is_err on an Optional<T>, and unwrap_or/is_some/is_none on a "
+     "Result<T,E> - the two APIs stay distinct by name despite sharing unwrap_or")
+{
+    EXPECT_THROWS(check("f() -> Optional<i32> { return Some(5) } "
+                        "o = f() "
+                        "x = o.is_ok()"));
+    EXPECT_THROWS(check("f() -> Result<i32, str> { return Ok(5) } "
+                        "r = f() "
+                        "x = r.is_some()"));
+}
+
+TEST("TypeChecker resolves a nested Result<T,E> type - E itself a Result, and T itself a "
+     "Map<K,V> - via bracket-depth-aware comma splitting")
+{
+    check("x: Result<i32, Result<i32, str>> = Ok(1) "
+          "y: Result<Map<i32,i32>, str> = Err(\"e\")");
+}
+
 TEST("TypeChecker accepts parse<i32>() and parse<bool>(), typing the result as "
      "Optional<i32>/Optional<bool> respectively (see docs/language/0052-optional.md)")
 {
@@ -1479,11 +1726,11 @@ TEST("TypeChecker accepts an Array/List argument to print(...)/write(...) - stri
     check("run() -> i32 { arr = [1, 2, 3] print(arr) return 0 } r = run()");
 }
 
-TEST("TypeChecker rejects print/write with a slice<T> argument - the one type "
-     "isTextRepresentable still excludes")
+TEST("TypeChecker accepts print/write with a slice<T> argument (see "
+     "docs/language/0056-slice-printing.md)")
 {
-    EXPECT_THROWS(check("f(s: slice<i32>) -> i32 { print(s) return 0 } "
-                        "arr = [1, 2, 3] r = f(arr)"));
+    check("f(s: slice<i32>) -> i32 { print(s) return 0 } "
+          "arr = [1, 2, 3] r = f(arr)");
 }
 
 TEST("TypeChecker rejects redefining 'print' or 'write' as a real function")
@@ -1524,12 +1771,12 @@ TEST("TypeChecker types an interpolated string literal as String, matching the I
     check("run() -> i32 { name = \"Ada\" s = \"hi {name}\" t = s.length return 0 } r = run()");
 }
 
-TEST("TypeChecker accepts an Array/List value inside an interpolation span (see "
-     "docs/language/0054-collection-printing.md); rejects a slice<T> one")
+TEST("TypeChecker accepts an Array/List/slice<T> value inside an interpolation span (see "
+     "docs/language/0054-collection-printing.md and docs/language/0056-slice-printing.md)")
 {
     check("run() -> i32 { arr = [1, 2, 3] s = \"arr is {arr}\" return 0 } r = run()");
-    EXPECT_THROWS(check("f(sl: slice<i32>) -> i32 { s = \"sl is {sl}\" return 0 } "
-                        "arr = [1, 2, 3] r = f(arr)"));
+    check("f(sl: slice<i32>) -> i32 { s = \"sl is {sl}\" return 0 } "
+          "arr = [1, 2, 3] r = f(arr)");
 }
 
 TEST("TypeChecker accepts i32/bool/char/str/String interpolation spans")
@@ -1612,4 +1859,149 @@ TEST("TypeChecker rejects .join with the wrong argument count")
 {
     EXPECT_THROWS(
         check("run() -> i32 { numbers = [1, 2, 3] joined = numbers.join() return 0 } r = run()"));
+}
+
+TEST("TypeChecker accepts .join on a slice<T> receiver, same as Array/List (see "
+     "docs/language/0056-slice-printing.md)")
+{
+    check("f(s: slice<i32>) -> String { return s.join(\",\") } "
+          "arr = [1, 2, 3] r = f(arr)");
+}
+
+TEST("TypeChecker accepts numeric format specs on i32/i64/f64 interpolation spans (see "
+     "docs/language/0055-numeric-format-specs.md)")
+{
+    check("run() -> i32 { n = 42 out = \"{n:05}\" return 0 } r = run()");
+    check("run() -> i32 { n: i64 = 42i64 out = \"{n:x}\" return 0 } r = run()");
+    check("run() -> i32 { pi = 3.14159 out = \"{pi:.2}\" return 0 } r = run()");
+    check("run() -> i32 { n = 42 out = \"{n:X} {n:b} {n:o}\" return 0 } r = run()");
+}
+
+TEST("TypeChecker rejects a radix format spec (x/X/b/o) on a non-integer interpolation span")
+{
+    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:x}\" return 0 } r = run()"));
+    EXPECT_THROWS(check("run() -> i32 { s = \"hi\" out = \"{s:b}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects a precision format spec ('.N') on a non-float interpolation span")
+{
+    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:.2}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects a plain width format spec (no type char) on a non-integer "
+     "interpolation span")
+{
+    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:05}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects combining a radix type char with a precision in one format spec")
+{
+    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:.2x}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker accepts an alignment format spec ('<'/'>'/'^' + width) on any "
+     "isTextRepresentable type, not just i32/i64 - unlike bare width, which stays "
+     "numeric-only (see docs/language/0057-alignment.md)")
+{
+    check("run() -> i32 { name = \"Ada\" out = \"{name:<20}\" return 0 } r = run()");
+    check("run() -> i32 { ok = true out = \"{ok:^10}\" return 0 } r = run()");
+    check("run() -> i32 { n = 42 out = \"{n:>10}\" return 0 } r = run()");
+}
+
+TEST("TypeChecker accepts an alignment format spec combined with a precision on an f64 "
+     "interpolation span, matching the source doc's own {user.score:>8.2} example")
+{
+    check("run() -> i32 { pi = 3.14159 out = \"{pi:>8.2}\" return 0 } r = run()");
+}
+
+TEST("TypeChecker still rejects a radix conversion on a non-integer even when an alignment "
+     "char is also present - alignment doesn't relax the radix/precision type restrictions")
+{
+    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:>10x}\" return 0 } r = run()"));
+    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:>10.2}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects an alignment char with no width to align within")
+{
+    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:<}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker rejects combining zero-padding with an explicit alignment char - the two "
+     "are mutually exclusive fill strategies")
+{
+    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:<010}\" return 0 } r = run()"));
+}
+
+TEST("TypeChecker accepts self-doc '{expr=}' and debug '{expr:?}' on any isTextRepresentable "
+     "type, including struct/collection - neither narrows the allowed type set (see "
+     "docs/language/0058-debug-formatting.md)")
+{
+    check("run() -> i32 { n = 42 out = \"{n=}\" return 0 } r = run()");
+    check("run() -> i32 { name = \"Ada\" out = \"{name=}\" return 0 } r = run()");
+    check("struct Point { x: i32 } "
+          "run() -> i32 { p = Point{x:1} out = \"{p:?}\" return 0 } r = run()");
+    check("run() -> i32 { arr = [1, 2] out = \"{arr:?}\" return 0 } r = run()");
+}
+
+TEST("TypeChecker accepts a self-doc prefix combined with a numeric format spec, matching the "
+     "source doc's own Python-style expression-debugging framing extended with a spec")
+{
+    check("run() -> i32 { pi = 3.14 out = \"{pi=:.2}\" return 0 } r = run()");
+}
+
+TEST("TypeChecker implicitly wraps a plain value into a union-typed call argument, declared "
+     "local, and return, with no wrapper syntax (see docs/language/0065-unions.md)")
+{
+    check("f(x: i32 | str) -> i32 | str { return x } "
+          "run() -> i32 { "
+          "  y = f(5) "
+          "  z = f(\"hi\") "
+          "  w: i32 | str = 5 "
+          "  return 0 "
+          "} "
+          "r = run()");
+}
+
+TEST("TypeChecker canonicalizes a union's alternatives - order doesn't affect its identity, so "
+     "'str | i32' is assignable wherever 'i32 | str' is expected")
+{
+    check("f(x: i32 | str) -> i32 { return 0 } "
+          "g(x: str | i32) -> i32 { return f(x) } "
+          "y = g(5)");
+}
+
+TEST("TypeChecker resolves a union's own match arms by each alternative's own canonical type "
+     "name, with full exhaustiveness checking exactly like a real enum")
+{
+    check("f(x: i32 | str) -> str { "
+          "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
+          "} "
+          "y = f(5)");
+}
+
+TEST("TypeChecker rejects a non-exhaustive match on a union with no wildcard arm")
+{
+    EXPECT_THROWS(check("f(x: i32 | str) -> str { return match x { i32(n) => \"n\" } } y = f(5)"));
+}
+
+TEST("TypeChecker rejects a value whose type isn't any alternative of the declared union")
+{
+    EXPECT_THROWS(check("x: i32 | str = true"));
+}
+
+TEST("TypeChecker rejects a compound type (List<T>) as a union alternative - its own canonical "
+     "name can't be spelled as a single match-arm-pattern identifier")
+{
+    EXPECT_THROWS(check("f(x: List<i32> | i32) -> i32 { return 0 } y = f(5)"));
+}
+
+TEST("TypeChecker accepts a struct as a union alternative, matched by its own type name")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "f(v: Point | i32) -> str { "
+          "  return match v { Point(p) => \"point\"  i32(n) => \"number\" } "
+          "} "
+          "p = Point{x: 1, y: 2} "
+          "a = f(p) "
+          "b = f(5)");
 }

@@ -330,9 +330,17 @@ $ ax llvm-ir examples/print_interpolation.ax | clang -x ir -O1 - -o out && ./out
 
 Deferred to future, separate phases - all present in the source doc:
 
-- **No numeric format specs** (`:05`, `:x`, `:X`, `:b`, `:o`, `:.2`).
-- **No alignment** (`:<20`, `:>20`, `:^20`).
-- **No debug formatting** (`{x=}`, `{value:?}`).
+- **Numeric format specs (`:05`, `:x`, `:X`, `:b`, `:o`, `:.2`) are now
+  supported** - see `docs/language/0055-numeric-format-specs.md`.
+- **Alignment (`:<20`, `:>20`, `:^20`) is now supported too** - see
+  `docs/language/0057-alignment.md`, unlike numeric format specs, applies
+  to any text-representable type (`str`/struct/collection included, not
+  just i32/i64/f64).
+- **Debug formatting (`{x=}`, `{value:?}`) is now supported too** - see
+  `docs/language/0058-debug-formatting.md`. `{value:?}` is identical to
+  `{value}` for every type except `str`/`String`, which get quoted - Axea
+  has no Display/Debug trait distinction yet, so there's nothing else for
+  a generic "debug" form to differ on.
 - **No `Buffer.write()`** - only `Buffer.append()`/`.append_line()` exist.
 - **No traits/`Display`** - a custom type cannot participate in
   printing/interpolation by implementing an interface.

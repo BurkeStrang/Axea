@@ -1,5 +1,8 @@
 #include "sema/TypeChecker.hpp"
 
+#include "sema/FormatSpec.hpp"
+
+#include <algorithm>
 #include <stdexcept>
 
 namespace
@@ -139,13 +142,15 @@ namespace
     // emitStructToStringHelpers/registerCollectionToStrRuntime give each
     // one a real "stringify to a heap string" runtime function, not just
     // a "print directly" one - the distinction that blocked interpolation
-    // specifically from supporting them before), with one deliberate
-    // exception: `slice<T>` - a by-value fat pointer (`{T*, i32}`),
-    // structurally unlike every other collection's own heap-header
-    // convention, and (unlike them) already forbidden as a collection
-    // element type almost everywhere via rejectSliceOutsideParameter, so
-    // stringifying a bare slice specifically is real further work, not
-    // yet built.
+    // specifically from supporting them before). `slice<T>` - a by-value
+    // fat pointer (`{T*, i32}`), structurally unlike every other
+    // collection's own heap-header convention - is included too as of
+    // docs/language/0056-slice-printing.md: registerCollectionToStrRuntime
+    // gained a dedicated by-value branch (extractvalue instead of
+    // GEP+load), the one piece that was still missing. It remains
+    // forbidden as a collection element type almost everywhere via
+    // rejectSliceOutsideParameter, so this only ever fires for a
+    // slice<T>-typed function parameter used directly, never a nested one.
     bool isTextRepresentable(const Type& type)
     {
         if (type == kI32 || type == kI64 || type == kF64 || type == kBool || type == kChar ||
@@ -156,8 +161,11 @@ namespace
         switch (type.kind)
         {
             case TypeKind::Optional:
+            case TypeKind::Result:
+            case TypeKind::Enum:
             case TypeKind::Struct:
             case TypeKind::Array:
+            case TypeKind::Slice:
             case TypeKind::List:
             case TypeKind::Stack:
             case TypeKind::LinkedList:
@@ -405,6 +413,7 @@ std::string typeName(const Type& type)
         case TypeKind::String: return "str";
         case TypeKind::Unit: return "unit";
         case TypeKind::Struct: return type.structName;
+        case TypeKind::Enum: return type.structName;
         // elementTypeName/valueTypeName are always already-canonical strings
         // (see Type::elementTypeName's own comment), so reconstruction is
         // trivial string concatenation - no nested Type to recurse into
@@ -417,6 +426,8 @@ std::string typeName(const Type& type)
             return "[" + type.elementTypeName + "; " + std::to_string(type.arraySize) + "]";
         case TypeKind::Slice: return "slice<" + type.elementTypeName + ">";
         case TypeKind::Optional: return "Optional<" + type.elementTypeName + ">";
+        case TypeKind::Result:
+            return "Result<" + type.elementTypeName + "," + type.valueTypeName + ">";
         case TypeKind::List: return "List<" + type.elementTypeName + ">";
         case TypeKind::Stack: return "Stack<" + type.elementTypeName + ">";
         case TypeKind::LinkedList: return "LinkedList<" + type.elementTypeName + ">";
@@ -456,6 +467,84 @@ Type TypeEnv::get(const std::string& name) const
         return parent_->get(name);
     }
     throw std::runtime_error("undefined variable: " + name);
+}
+
+const EnumDecl* TypeChecker::asEnumTypeName(const Expr& objectExpr) const
+{
+    const auto* name = dynamic_cast<const NameExpr*>(&objectExpr);
+    if (!name)
+    {
+        return nullptr;
+    }
+    const auto it = enums_.find(name->name);
+    return it != enums_.end() ? it->second : nullptr;
+}
+
+Type TypeChecker::resolveUnionType(const std::string& canonicalName) const
+{
+    if (!enums_.contains(canonicalName))
+    {
+        std::vector<EnumVariant> variants;
+        std::size_t start = 0;
+        while (true)
+        {
+            const auto bar = canonicalName.find('|', start);
+            const std::string alternative = canonicalName.substr(
+                start, bar == std::string::npos ? std::string::npos : bar - start);
+            // Union alternatives are restricted to "simple" types - a
+            // primitive, or a plain struct/enum name - because a match arm's
+            // own variant pattern (e.g. `i32(n) => ...`) is always a single
+            // Identifier token (see Parser::parseMatchExpr); "List<i32>" or
+            // "[i32;3]" can never be spelled as one, so allowing them as an
+            // alternative would make the resulting union's own variants
+            // permanently unmatchable. Detected syntactically (any of these
+            // characters means "not a single identifier"), not by resolving
+            // and inspecting the TypeKind, since that would also have to
+            // special-case String/Buffer's own bare-word-but-still-simple
+            // shape for no benefit.
+            if (alternative.find_first_of("<>[];,|") != std::string::npos)
+            {
+                throw std::runtime_error(
+                    "union type alternative '" + alternative +
+                    "' must be a simple type (a primitive, struct, or enum name) - "
+                    "compound types (List<T>, Map<K,V>, arrays, nested unions, ...) aren't "
+                    "supported as union alternatives");
+            }
+            resolveType(alternative); // throws if the alternative itself isn't a real type
+            variants.push_back(EnumVariant{alternative, {alternative}});
+            if (bar == std::string::npos)
+            {
+                break;
+            }
+            start = bar + 1;
+        }
+        auto decl = std::make_unique<EnumDecl>(canonicalName, std::move(variants));
+        enums_[canonicalName] = decl.get();
+        unionDecls_.push_back(std::move(decl));
+    }
+    return simpleType(TypeKind::Enum, canonicalName);
+}
+
+bool TypeChecker::isUnionMember(const Type& valueType, const Type& targetType) const
+{
+    if (targetType.kind != TypeKind::Enum || targetType.structName.find('|') == std::string::npos)
+    {
+        return false;
+    }
+    const auto it = enums_.find(targetType.structName);
+    if (it == enums_.end())
+    {
+        return false;
+    }
+    const std::string valueTypeName = typeName(valueType);
+    for (const EnumVariant& variant : it->second->variants)
+    {
+        if (variant.fieldTypes.size() == 1 && variant.fieldTypes.front() == valueTypeName)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 Type TypeChecker::resolveType(const std::string& name) const
@@ -507,6 +596,34 @@ Type TypeChecker::resolveType(const std::string& name) const
         const Type elementType = resolveType(elementName);
 
         return arrayLikeType(TypeKind::Optional, typeName(elementType));
+    }
+
+    // "Result<T,E>" - the canonical form Parser::parseTypeName always
+    // produces (see docs/language/0063-result.md). Same two-type-argument
+    // shape as Map<K,V> below (bracket-depth-aware comma split via
+    // findTopLevelComma, so Result<i32,Map<i32,i32>> splits correctly),
+    // but with no isHashable/isOrderableKind gate on either T or E -
+    // unlike Map's key, neither is ever hashed or compared, only stored
+    // and propagated (mirrors V's own lack of restriction there).
+    if (name.starts_with("Result<") && name.back() == '>')
+    {
+        const std::string args = name.substr(7, name.size() - 8);
+        const auto comma = findTopLevelComma(args);
+        if (comma == std::string::npos)
+        {
+            throw std::runtime_error("malformed Result type: " + name);
+        }
+        const std::string okName = args.substr(0, comma);
+        const std::string errName = args.substr(comma + 1);
+        const Type okType = resolveType(okName);
+        const Type errType = resolveType(errName);
+        rejectSliceOutsideParameter(okType, "a Result Ok type");
+        rejectSliceOutsideParameter(errType, "a Result Err type");
+        Type result{};
+        result.kind = TypeKind::Result;
+        result.elementTypeName = typeName(okType);
+        result.valueTypeName = typeName(errType);
+        return result;
     }
 
     // "List<elem>" - the canonical form Parser::parseTypeName always
@@ -726,6 +843,15 @@ Type TypeChecker::resolveType(const std::string& name) const
         return simpleType(TypeKind::Buffer);
     }
 
+    // "i32|str" - the canonical ("|"-joined, sorted, deduplicated) form
+    // Parser::parseTypeName always produces for a "T1 | T2 | ..." union
+    // type (see docs/language/0065-unions.md). A real struct/enum/
+    // primitive name can never itself contain '|' (not a valid identifier
+    // character), so this check is unambiguous.
+    if (name.find('|') != std::string::npos)
+    {
+        return resolveUnionType(name);
+    }
     if (const auto it = primitives.find(name); it != primitives.end())
     {
         return simpleType(it->second);
@@ -733,6 +859,10 @@ Type TypeChecker::resolveType(const std::string& name) const
     if (structs_.contains(name))
     {
         return simpleType(TypeKind::Struct, name);
+    }
+    if (enums_.contains(name))
+    {
+        return simpleType(TypeKind::Enum, name);
     }
     throw std::runtime_error("unsupported type: " + name);
 }
@@ -814,6 +944,10 @@ void TypeChecker::registerSignatures(const Program& program)
         {
             structs_[structDecl->name] = structDecl;
         }
+        else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
+        {
+            enums_[enumDecl->name] = enumDecl;
+        }
         else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
         {
             if (externDecl->name == "print" || externDecl->name == "write")
@@ -832,6 +966,38 @@ void TypeChecker::registerSignatures(const Program& program)
                                          "' is declared both as a function and as an extern");
             }
             externs_[externDecl->name] = externDecl;
+        }
+        else if (const auto* traitDecl = dynamic_cast<const TraitDecl*>(item.get()))
+        {
+            traits_[traitDecl->name] = traitDecl;
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // Each method is already a real FunctionDecl with a mangled,
+            // permanently call-syntax-unreachable name (see ImplDecl's
+            // own comment) - folded straight into functions_ exactly
+            // like a top-level FunctionDecl, no reserved-name or
+            // extern-collision check needed (those only guard against a
+            // *user-typed* identifier colliding with a builtin/extern,
+            // which a mangled '.'-containing name can never do).
+            for (const auto& method : implDecl->methods)
+            {
+                functions_[method->name] = method.get();
+            }
+        }
+    }
+
+    // Checked before the generic per-function param-type resolution pass
+    // just below, so an impl targeting an unknown type reports this
+    // specific, friendlier message rather than the generic "unsupported
+    // type" a bare resolveType(self's type) would otherwise throw first.
+    for (const auto& item : program.items)
+    {
+        if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get());
+            implDecl && !structs_.contains(implDecl->typeName))
+        {
+            throw std::runtime_error("impl target '" + implDecl->typeName +
+                                     "' is not a known struct");
         }
     }
 
@@ -898,6 +1064,71 @@ void TypeChecker::registerSignatures(const Program& program)
             rejectBufferAsFieldType(fieldType);
         }
     }
+
+    // `impl TraitName for TypeName` conformance (see
+    // docs/language/0062-display-trait.md) - validated in this same
+    // second pass, once every struct/trait name is known. Two checks,
+    // both real but deliberately minimal:
+    //  1. `typeName` must be a known struct - an impl for an unknown or
+    //     non-struct type is always a mistake.
+    //  2. If `traitName` matches a real `TraitDecl`, every one of its
+    //     declared methods must be implemented with the same name and
+    //     parameter count (not full per-parameter type conformance -
+    //     see that doc's own Known Imprecision section). `Display`
+    //     specifically is additionally required to define a "format"
+    //     method with exactly 2 parameters (self, buf) even when no
+    //     matching `TraitDecl` was written in source - this is the one
+    //     compiler-recognized trait whose shape actually drives runtime
+    //     dispatch (print/interpolation), so an `impl Display` with no
+    //     usable `format` is always a mistake worth catching here rather
+    //     than silently falling back to default struct printing later.
+    for (const auto& item : program.items)
+    {
+        const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get());
+        if (!implDecl)
+        {
+            continue;
+        }
+        // implDecl->typeName's own "is this a known struct" check already
+        // ran above, before the generic per-function param-type
+        // resolution pass.
+        if (const auto it = traits_.find(implDecl->traitName); it != traits_.end())
+        {
+            for (const auto& sig : it->second->methods)
+            {
+                const auto methodIt = std::find_if(
+                    implDecl->methods.begin(),
+                    implDecl->methods.end(),
+                    [&](const auto& m) { return m->name == implDecl->typeName + "." + sig.name; });
+                if (methodIt == implDecl->methods.end())
+                {
+                    throw std::runtime_error("impl " + implDecl->traitName + " for " +
+                                             implDecl->typeName + " is missing method '" +
+                                             sig.name + "'");
+                }
+                if ((*methodIt)->params.size() != sig.paramCount)
+                {
+                    throw std::runtime_error("impl " + implDecl->traitName + " for " +
+                                             implDecl->typeName + "'s '" + sig.name + "' has " +
+                                             std::to_string((*methodIt)->params.size()) +
+                                             " parameter(s), trait '" + implDecl->traitName +
+                                             "' declares " + std::to_string(sig.paramCount));
+                }
+            }
+        }
+        if (implDecl->traitName == "Display")
+        {
+            const auto formatIt = std::find_if(
+                implDecl->methods.begin(),
+                implDecl->methods.end(),
+                [&](const auto& m) { return m->name == implDecl->typeName + ".format"; });
+            if (formatIt == implDecl->methods.end() || (*formatIt)->params.size() != 2)
+            {
+                throw std::runtime_error("impl Display for " + implDecl->typeName +
+                                         " must define 'format(self, buf: Buffer)'");
+            }
+        }
+    }
 }
 
 void TypeChecker::check(const Program& program)
@@ -910,6 +1141,16 @@ void TypeChecker::check(const Program& program)
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
             checkFunction(*function);
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // Each method is checked exactly like a top-level function -
+            // `self`'s type already resolved to a real struct name by the
+            // parser, so checkFunction needs no impl-awareness at all.
+            for (const auto& method : implDecl->methods)
+            {
+                checkFunction(*method);
+            }
         }
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
@@ -1010,6 +1251,16 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         // type is taken directly from the declared type here rather than
         // through the generic checkExpr(NoneExpr) path (which always
         // throws "cannot infer", since it has no such context available).
+        // `x: Result<T,E> = Ok(value)`/`Err(value)` (see
+        // docs/language/0063-result.md) - unlike NoneExpr just above,
+        // Ok(value)/Err(value) each carry a real expression, but still need
+        // this exact same "borrow the *other* type parameter from context"
+        // treatment: Ok(value) synthesizes T bottom-up from `value` but has
+        // no E to synthesize; Err(value) has the reverse gap. Both are only
+        // resolvable here, against a declared Result<T,E> type - anywhere
+        // else falls through to checkExpr(OkExpr)/(ErrExpr) below, which
+        // always throws "cannot infer" (mirrors NoneExpr's own identical
+        // fallback).
         Type valueType;
         if (dynamic_cast<const NoneExpr*>(assignment->value.get()) && assignment->declaredType)
         {
@@ -1018,6 +1269,43 @@ void TypeChecker::checkStmt(const Stmt& stmt,
             {
                 throw std::runtime_error("'None' requires a declared Optional<T> type, found " +
                                          typeName(declared));
+            }
+            valueType = declared;
+        }
+        else if (const auto* okExpr = dynamic_cast<const OkExpr*>(assignment->value.get());
+                 okExpr && assignment->declaredType)
+        {
+            const Type declared = resolveType(*assignment->declaredType);
+            if (declared.kind != TypeKind::Result)
+            {
+                throw std::runtime_error("'Ok' requires a declared Result<T,E> type, found " +
+                                         typeName(declared));
+            }
+            const Type okType =
+                checkExpr(*okExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(okType == resolveType(declared.elementTypeName)))
+            {
+                throw std::runtime_error("'Ok' value has type " + typeName(okType) +
+                                         " but Result's own Ok type is " +
+                                         declared.elementTypeName);
+            }
+            valueType = declared;
+        }
+        else if (const auto* errExpr = dynamic_cast<const ErrExpr*>(assignment->value.get());
+                 errExpr && assignment->declaredType)
+        {
+            const Type declared = resolveType(*assignment->declaredType);
+            if (declared.kind != TypeKind::Result)
+            {
+                throw std::runtime_error("'Err' requires a declared Result<T,E> type, found " +
+                                         typeName(declared));
+            }
+            const Type errType =
+                checkExpr(*errExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(errType == resolveType(declared.valueTypeName)))
+            {
+                throw std::runtime_error("'Err' value has type " + typeName(errType) +
+                                         " but Result's own Err type is " + declared.valueTypeName);
             }
             valueType = declared;
         }
@@ -1032,9 +1320,18 @@ void TypeChecker::checkStmt(const Stmt& stmt,
             rejectSliceOutsideParameter(declared, "a local variable's declared type");
             if (!(declared == valueType))
             {
-                throw std::runtime_error("variable '" + assignment->name + "' declared as " +
-                                         typeName(declared) + " but initialized with " +
-                                         typeName(valueType));
+                // Implicit union wrapping (see docs/language/0065-unions.md) -
+                // `x: i32 | str = 5` needs no wrapper syntax; the variable is
+                // tracked at the declared union type from here on (not the
+                // bare alternative's own type), so a later `match x { ... }`
+                // sees the union it was actually declared as.
+                if (!isUnionMember(valueType, declared))
+                {
+                    throw std::runtime_error("variable '" + assignment->name + "' declared as " +
+                                             typeName(declared) + " but initialized with " +
+                                             typeName(valueType));
+                }
+                valueType = declared;
             }
         }
         env.define(assignment->name, valueType);
@@ -1054,10 +1351,48 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         // this time. If expectedReturnType isn't itself Optional<U>, this
         // deliberately falls through to the generic checkExpr(NoneExpr)
         // path below, whose "cannot infer" error is the right message.
+        // `return Ok(value)`/`Err(value)` (see docs/language/0063-result.md) -
+        // same "borrow the missing type parameter from context" treatment
+        // AssignmentStmt's own Ok/Err handling above needs, sourced from
+        // the enclosing function's own declared return type instead of a
+        // local's declared type. Falls through to the generic
+        // checkExpr(OkExpr)/(ErrExpr) "cannot infer" error when
+        // expectedReturnType isn't itself Result<T,E>, same as None's own
+        // fallback just below.
         Type valueType;
         if (returnStmt->value && dynamic_cast<const NoneExpr*>(returnStmt->value.get()) &&
             expectedReturnType->kind == TypeKind::Optional)
         {
+            valueType = *expectedReturnType;
+        }
+        else if (const auto* okExpr = returnStmt->value
+                                          ? dynamic_cast<const OkExpr*>(returnStmt->value.get())
+                                          : nullptr;
+                 okExpr && expectedReturnType->kind == TypeKind::Result)
+        {
+            const Type okType =
+                checkExpr(*okExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(okType == resolveType(expectedReturnType->elementTypeName)))
+            {
+                throw std::runtime_error("'Ok' value has type " + typeName(okType) +
+                                         " but function's own Result Ok type is " +
+                                         expectedReturnType->elementTypeName);
+            }
+            valueType = *expectedReturnType;
+        }
+        else if (const auto* errExpr = returnStmt->value
+                                           ? dynamic_cast<const ErrExpr*>(returnStmt->value.get())
+                                           : nullptr;
+                 errExpr && expectedReturnType->kind == TypeKind::Result)
+        {
+            const Type errType =
+                checkExpr(*errExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+            if (!(errType == resolveType(expectedReturnType->valueTypeName)))
+            {
+                throw std::runtime_error("'Err' value has type " + typeName(errType) +
+                                         " but function's own Result Err type is " +
+                                         expectedReturnType->valueTypeName);
+            }
             valueType = *expectedReturnType;
         }
         else
@@ -1069,8 +1404,14 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         }
         if (!(valueType == *expectedReturnType))
         {
-            throw std::runtime_error("'return' produces " + typeName(valueType) +
-                                     " but function declares " + typeName(*expectedReturnType));
+            // Implicit union wrapping (see docs/language/0065-unions.md) -
+            // `return 5` from a function declared `-> i32 | str` needs no
+            // wrapper syntax.
+            if (!isUnionMember(valueType, *expectedReturnType))
+            {
+                throw std::runtime_error("'return' produces " + typeName(valueType) +
+                                         " but function declares " + typeName(*expectedReturnType));
+            }
         }
         return;
     }
@@ -1430,6 +1771,65 @@ Type TypeChecker::checkExpr(const Expr& expr,
                     " (only i32, i64, f64, bool, char, str, and String are supported this "
                     "phase)");
             }
+            // `{expr=}` and `{expr:?}` (see
+            // docs/language/0058-debug-formatting.md) need no further
+            // validation here beyond the isTextRepresentable check just
+            // above: self-doc only prepends a compile-time-known literal
+            // prefix (no type dependency at all), and debug mode is
+            // defined for every text-representable type identically to
+            // the unformatted case (str/String alone differ, by adding
+            // quotes) - unlike a numeric format spec, neither narrows
+            // which types are legal.
+            // `{expr:spec}` (see docs/language/0055-numeric-format-specs.md
+            // and docs/language/0057-alignment.md) - a radix conversion
+            // (x/X/b/o) requires an integer and forbids a precision; a
+            // precision (.N) requires f64; a bare width/zero-pad with no
+            // alignment char requires an integer, matching the source
+            // doc's own "Numeric Formatting" examples exactly (`{value:05}`
+            // on an i32, `{pi:.2}` on an f64). An explicit alignment char
+            // (`<`/`>`/`^`) relaxes that last restriction: alignment pads
+            // the piece's own already-computed text representation
+            // (numeric or not - `{name:<20}` in the source doc's own
+            // "Alignment" section aligns a `str`), so it's valid on any
+            // isTextRepresentable type - already checked above - not just
+            // i32/i64. Radix/precision keep their own type restrictions
+            // regardless of whether alignment is also present.
+            if (!piece.formatSpec.empty())
+            {
+                const FormatSpec spec = parseFormatSpec(piece.formatSpec);
+                const bool isInt = pieceType == kI32 || pieceType == kI64;
+                if (spec.type != '\0')
+                {
+                    if (!isInt)
+                    {
+                        throw std::runtime_error("format spec '" + piece.formatSpec +
+                                                 "' (radix conversion) requires an i32 or i64 "
+                                                 "value, found " +
+                                                 typeName(pieceType));
+                    }
+                    if (spec.precision.has_value())
+                    {
+                        throw std::runtime_error(
+                            "format spec '" + piece.formatSpec +
+                            "' cannot combine a radix conversion (x/X/b/o) with a precision");
+                    }
+                }
+                else if (spec.precision.has_value())
+                {
+                    if (!(pieceType == kF64))
+                    {
+                        throw std::runtime_error("format spec '" + piece.formatSpec +
+                                                 "' (precision) requires an f64 value, found " +
+                                                 typeName(pieceType));
+                    }
+                }
+                else if (spec.align == '\0' && !isInt)
+                {
+                    throw std::runtime_error("format spec '" + piece.formatSpec +
+                                             "' (width) requires an i32 or i64 value, found " +
+                                             typeName(pieceType));
+                }
+            }
         }
         return simpleType(TypeKind::OwnedString);
     }
@@ -1583,7 +1983,12 @@ Type TypeChecker::checkExpr(const Expr& expr,
             // and docs/std/strings/0001-str.md).
             const bool stringToStrCoercion =
                 paramType == kStr && argType.kind == TypeKind::OwnedString;
-            if (!(argType == paramType) && !arrayToSliceCoercion && !stringToStrCoercion)
+            // Implicit union wrapping (see docs/language/0065-unions.md) -
+            // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
+            // syntax, the actual ergonomic point of the feature.
+            const bool unionWrapCoercion = isUnionMember(argType, paramType);
+            if (!(argType == paramType) && !arrayToSliceCoercion && !stringToStrCoercion &&
+                !unionWrapCoercion)
             {
                 throw std::runtime_error("argument " + std::to_string(i + 1) + " to '" +
                                          call->callee + "' expects " + typeName(paramType) +
@@ -1596,6 +2001,48 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
     {
+        // `EnumName.Variant(args)` construction (see docs/language/0064-enums.md) - checked
+        // before the generic `checkExpr(*methodCall->object, ...)` call just below, which would
+        // otherwise throw "undefined variable" trying to resolve a bare enum type name as if it
+        // were bound to a value. Reuses the ordinary `object.method(args)` postfix shape
+        // (see Parser::parsePostfix) with no new grammar - `EnumName` parses as a plain
+        // NameExpr, `Variant(...)` as an ordinary method-call tail; only TypeChecker (here),
+        // Interpreter, and IrGenerator ever distinguish it from a real method call, each by the
+        // identical "is `object` a bare name matching a known enum type" check.
+        if (const auto* enumDecl = asEnumTypeName(*methodCall->object))
+        {
+            const auto variantIt =
+                std::find_if(enumDecl->variants.begin(),
+                             enumDecl->variants.end(),
+                             [&](const EnumVariant& v) { return v.name == methodCall->method; });
+            if (variantIt == enumDecl->variants.end())
+            {
+                throw std::runtime_error("enum '" + enumDecl->name + "' has no variant '" +
+                                         methodCall->method + "'");
+            }
+            if (methodCall->arguments.size() != variantIt->fieldTypes.size())
+            {
+                throw std::runtime_error(
+                    "variant '" + enumDecl->name + "." + methodCall->method + "' expects " +
+                    std::to_string(variantIt->fieldTypes.size()) + " argument(s), got " +
+                    std::to_string(methodCall->arguments.size()));
+            }
+            for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
+            {
+                const Type argType = checkExpr(
+                    *methodCall->arguments[i], env, expectedReturnType, currentLoopBreakTypes);
+                const Type fieldType = resolveType(variantIt->fieldTypes[i]);
+                if (!(argType == fieldType))
+                {
+                    throw std::runtime_error("variant '" + enumDecl->name + "." +
+                                             methodCall->method + "' argument " +
+                                             std::to_string(i) + " has type " + typeName(argType) +
+                                             ", expected " + typeName(fieldType));
+                }
+            }
+            return simpleType(TypeKind::Enum, enumDecl->name);
+        }
+
         const Type objectType =
             checkExpr(*methodCall->object, env, expectedReturnType, currentLoopBreakTypes);
 
@@ -1682,10 +2129,16 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // a `.method()` call, only Some(x)/None/`.parse<T>()`).
         if (methodCall->method == "unwrap_or")
         {
-            if (objectType.kind != TypeKind::Optional)
+            // Shared by Optional<T> and Result<T,E> (see
+            // docs/language/0063-result.md) - `elementTypeName` means "the
+            // success-case payload" for both (T for Optional, T/Ok for
+            // Result), so the rest of this check is identical either way,
+            // no branching needed beyond the initial kind gate.
+            if (objectType.kind != TypeKind::Optional && objectType.kind != TypeKind::Result)
             {
-                throw std::runtime_error("'unwrap_or' requires an Optional<T>, got " +
-                                         typeName(objectType));
+                throw std::runtime_error(
+                    "'unwrap_or' requires an Optional<T> or Result<T,E>, got " +
+                    typeName(objectType));
             }
             if (methodCall->arguments.size() != 1)
             {
@@ -1698,9 +2151,30 @@ Type TypeChecker::checkExpr(const Expr& expr,
             if (!(defaultType == payloadType))
             {
                 throw std::runtime_error("'unwrap_or' default has type " + typeName(defaultType) +
-                                         " but Optional payload is " + typeName(payloadType));
+                                         " but the success payload is " + typeName(payloadType));
             }
             return payloadType;
+        }
+
+        if (methodCall->method == "is_ok" || methodCall->method == "is_err")
+        {
+            // Result<T,E>'s own non-propagating check (see
+            // docs/language/0063-result.md) - deliberately a distinct
+            // method name from Optional's `is_some`/`is_none` (mirrors
+            // Rust's own naming split) rather than reusing them, even
+            // though the underlying check (field 0) is structurally
+            // identical either way.
+            if (objectType.kind != TypeKind::Result)
+            {
+                throw std::runtime_error("'" + methodCall->method +
+                                         "' requires a Result<T,E>, got " + typeName(objectType));
+            }
+            if (!methodCall->arguments.empty())
+            {
+                throw std::runtime_error("'" + methodCall->method + "' expects 0 arguments, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            return kBool;
         }
 
         if (methodCall->method == "is_some" || methodCall->method == "is_none")
@@ -1722,16 +2196,22 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
         // `.join(separator)` (see
         // docs/language/0050-collection-join-and-slicing.md) - applies
-        // across both Array and List<T> (mirrors `.parse`/`.to_cstr`'s own
-        // placement here, before the per-kind dispatch chain below, since
-        // it too applies across more than one TypeKind), T restricted to
-        // isTextRepresentable. Always returns a fresh, owned String, built
+        // across Array, List<T>, and slice<T> alike (mirrors `.parse`/
+        // `.to_cstr`'s own placement here, before the per-kind dispatch
+        // chain below, since it too applies across more than one
+        // TypeKind), T restricted to isTextRepresentable. slice<T> joined
+        // docs/language/0056-slice-printing.md - the interpreter's own
+        // asIndexable already handled SliceInstance, and
+        // resolveIndexableView gained a matching by-value branch, so this
+        // was purely a TypeChecker-level restriction, not a missing
+        // runtime capability. Always returns a fresh, owned String, built
         // the same way interpolation builds one.
         if (methodCall->method == "join")
         {
-            if (objectType.kind != TypeKind::Array && objectType.kind != TypeKind::List)
+            if (objectType.kind != TypeKind::Array && objectType.kind != TypeKind::List &&
+                objectType.kind != TypeKind::Slice)
             {
-                throw std::runtime_error("'join' requires an Array or List, got " +
+                throw std::runtime_error("'join' requires an Array, List, or slice<T>, got " +
                                          typeName(objectType));
             }
             const Type elementType = resolveType(objectType.elementTypeName);
@@ -2212,10 +2692,19 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // reimplemented). `clear`/`reserve` mutate and return unit;
         // `reserve` additionally requires an i32 target capacity.
         // `finish` takes ownership of the buffer's own content and
-        // returns it as a String.
+        // returns it as a String. `write` (see
+        // docs/language/0061-buffer-write.md) is a plain same-behavior
+        // alias of `append` - Axea's string interpolation already lowers
+        // at parse time, for *any* string literal argument regardless of
+        // which method receives it, so there is no runtime difference
+        // between `buf.append("Age: {age}")` and a hypothetical distinct
+        // "formatted write" - `write` exists purely so callers can use
+        // the source doc's own naming convention (`append` = direct,
+        // `write` = formatted) without it meaning anything different.
         if (objectType.kind == TypeKind::Buffer)
         {
-            if (methodCall->method == "append" || methodCall->method == "append_line")
+            if (methodCall->method == "append" || methodCall->method == "append_line" ||
+                methodCall->method == "write")
             {
                 if (methodCall->arguments.size() != 1)
                 {
@@ -2279,6 +2768,31 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
+        // `EnumName.Variant` (no parens - a no-payload variant, see
+        // docs/language/0064-enums.md and MethodCallExpr's own identical check just above) -
+        // `object.field` with no trailing `(` parses as FieldExpr, not MethodCallExpr (see
+        // Parser::parsePostfix's own `isCall` decision), so a no-payload variant reached this
+        // way needs its own interception here.
+        if (const auto* enumDecl = asEnumTypeName(*field->object))
+        {
+            const auto variantIt =
+                std::find_if(enumDecl->variants.begin(),
+                             enumDecl->variants.end(),
+                             [&](const EnumVariant& v) { return v.name == field->field; });
+            if (variantIt == enumDecl->variants.end())
+            {
+                throw std::runtime_error("enum '" + enumDecl->name + "' has no variant '" +
+                                         field->field + "'");
+            }
+            if (!variantIt->fieldTypes.empty())
+            {
+                throw std::runtime_error(
+                    "variant '" + enumDecl->name + "." + field->field + "' requires " +
+                    std::to_string(variantIt->fieldTypes.size()) + " argument(s) - use " +
+                    enumDecl->name + "." + field->field + "(...)");
+            }
+            return simpleType(TypeKind::Enum, enumDecl->name);
+        }
         return checkFieldType(
             *field->object, field->field, env, expectedReturnType, currentLoopBreakTypes);
     }
@@ -2623,20 +3137,169 @@ Type TypeChecker::checkExpr(const Expr& expr,
             "return Optional<T>");
     }
 
+    if (dynamic_cast<const OkExpr*>(&expr) || dynamic_cast<const ErrExpr*>(&expr))
+    {
+        // Same "cannot infer standalone" fallback NoneExpr above has, for
+        // the same structural reason (see docs/language/0063-result.md and
+        // OkExpr/ErrExpr's own comment in Expr.hpp): only reachable here
+        // when checkStmt's AssignmentStmt/ReturnStmt cases don't already
+        // intercept it against a declared Result<T,E> context.
+        const bool isOk = dynamic_cast<const OkExpr*>(&expr) != nullptr;
+        throw std::runtime_error(
+            std::string("cannot infer the type of '") + (isOk ? "Ok" : "Err") +
+            "' here - use it in a declared-type assignment (x: Result<T,E> = " +
+            (isOk ? "Ok" : "Err") + "(...)) or a bare 'return " + (isOk ? "Ok" : "Err") +
+            "(...)' inside a function declared to return Result<T,E>");
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
-        if (!expectedReturnType || expectedReturnType->kind != TypeKind::Optional)
+        // Generalized to Result<T,E> (see docs/language/0063-result.md) -
+        // `?` is legal inside a function returning Optional<U> (operand
+        // must be Optional<T>) or Result<U,E> (operand must be
+        // Result<T,E>, with T,E's own E matching the function's own E
+        // exactly - no automatic error-type conversion this phase, see
+        // that doc's own Known Imprecision).
+        if (!expectedReturnType || (expectedReturnType->kind != TypeKind::Optional &&
+                                    expectedReturnType->kind != TypeKind::Result))
         {
-            throw std::runtime_error(
-                "'?' can only be used inside a function whose own return type is Optional<T>");
+            throw std::runtime_error("'?' can only be used inside a function whose own return "
+                                     "type is Optional<T> or Result<T,E>");
         }
         const Type operandType =
             checkExpr(*tryExpr->operand, env, expectedReturnType, currentLoopBreakTypes);
-        if (operandType.kind != TypeKind::Optional)
+        if (operandType.kind == TypeKind::Optional)
         {
-            throw std::runtime_error("'?' requires an Optional<T>, got " + typeName(operandType));
+            if (expectedReturnType->kind != TypeKind::Optional)
+            {
+                throw std::runtime_error("'?' operand is " + typeName(operandType) +
+                                         " but the enclosing function returns " +
+                                         typeName(*expectedReturnType));
+            }
+            return resolveType(operandType.elementTypeName);
         }
-        return resolveType(operandType.elementTypeName);
+        if (operandType.kind == TypeKind::Result)
+        {
+            if (expectedReturnType->kind != TypeKind::Result)
+            {
+                throw std::runtime_error("'?' operand is " + typeName(operandType) +
+                                         " but the enclosing function returns " +
+                                         typeName(*expectedReturnType));
+            }
+            if (operandType.valueTypeName != expectedReturnType->valueTypeName)
+            {
+                throw std::runtime_error("'?' operand's Err type (" + operandType.valueTypeName +
+                                         ") doesn't match the enclosing function's own Err type (" +
+                                         expectedReturnType->valueTypeName +
+                                         ") - no automatic error-type conversion this phase");
+            }
+            return resolveType(operandType.elementTypeName);
+        }
+        throw std::runtime_error("'?' requires an Optional<T> or Result<T,E>, got " +
+                                 typeName(operandType));
+    }
+
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        // See docs/language/0064-enums.md. A real, if simple, exhaustiveness check: every
+        // arm's variant name must be a real variant of the scrutinee's own enum, matched at
+        // most once, and either every variant is covered by name or a wildcard ('_') arm - which
+        // must be the last arm, since anything after it would be unreachable dead code - covers
+        // the rest. All arm bodies must produce exactly the same type (no implicit widening,
+        // matching this codebase's existing stance on every other branch-shaped construct).
+        const Type scrutineeType =
+            checkExpr(*matchExpr->scrutinee, env, expectedReturnType, currentLoopBreakTypes);
+        if (scrutineeType.kind != TypeKind::Enum)
+        {
+            throw std::runtime_error("'match' requires an enum value, got " +
+                                     typeName(scrutineeType));
+        }
+        if (matchExpr->arms.empty())
+        {
+            throw std::runtime_error("'match' expression must have at least one arm");
+        }
+        const EnumDecl& enumDecl = *enums_.at(scrutineeType.structName);
+
+        bool haveResultType = false;
+        Type resultType{};
+        std::unordered_set<std::string> coveredVariants;
+        bool sawWildcard = false;
+        for (const auto& arm : matchExpr->arms)
+        {
+            if (sawWildcard)
+            {
+                throw std::runtime_error(
+                    "wildcard arm '_' must be the last arm in a 'match' expression");
+            }
+            TypeEnv armEnv(&env);
+            if (arm.variantName == "_")
+            {
+                sawWildcard = true;
+                if (!arm.bindingNames.empty())
+                {
+                    throw std::runtime_error("wildcard arm '_' cannot bind any names");
+                }
+            }
+            else
+            {
+                const auto variantIt =
+                    std::find_if(enumDecl.variants.begin(),
+                                 enumDecl.variants.end(),
+                                 [&](const EnumVariant& v) { return v.name == arm.variantName; });
+                if (variantIt == enumDecl.variants.end())
+                {
+                    throw std::runtime_error("enum '" + enumDecl.name + "' has no variant '" +
+                                             arm.variantName + "'");
+                }
+                if (!coveredVariants.insert(arm.variantName).second)
+                {
+                    throw std::runtime_error("variant '" + arm.variantName +
+                                             "' matched more than once in this 'match' "
+                                             "expression");
+                }
+                if (arm.bindingNames.size() != variantIt->fieldTypes.size())
+                {
+                    throw std::runtime_error("match arm '" + arm.variantName + "' expects " +
+                                             std::to_string(variantIt->fieldTypes.size()) +
+                                             " binding(s), got " +
+                                             std::to_string(arm.bindingNames.size()));
+                }
+                for (std::size_t i = 0; i < arm.bindingNames.size(); ++i)
+                {
+                    armEnv.define(arm.bindingNames[i], resolveType(variantIt->fieldTypes[i]));
+                }
+            }
+            const Type armType =
+                checkExpr(*arm.body, armEnv, expectedReturnType, currentLoopBreakTypes);
+            if (!haveResultType)
+            {
+                resultType = armType;
+                haveResultType = true;
+            }
+            else if (!(armType == resultType))
+            {
+                throw std::runtime_error("match arms have incompatible types: " +
+                                         typeName(resultType) + " vs " + typeName(armType));
+            }
+        }
+        if (!sawWildcard && coveredVariants.size() != enumDecl.variants.size())
+        {
+            std::string missing;
+            for (const auto& variant : enumDecl.variants)
+            {
+                if (!coveredVariants.contains(variant.name))
+                {
+                    if (!missing.empty())
+                    {
+                        missing += ", ";
+                    }
+                    missing += variant.name;
+                }
+            }
+            throw std::runtime_error("non-exhaustive match on '" + enumDecl.name +
+                                     "' - missing variant(s): " + missing);
+        }
+        return resultType;
     }
 
     throw std::runtime_error("unsupported expression");

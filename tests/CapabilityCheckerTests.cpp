@@ -35,6 +35,59 @@ TEST("CapabilityChecker infers read for a parameter that is only read")
     EXPECT_TRUE(capabilities.at("get")[0] == Capability::Read);
 }
 
+TEST("CapabilityChecker infers 'self' as read and 'buf' as write for an impl Display method - "
+     "neither has an explicit capability prefix in source (see "
+     "docs/language/0062-display-trait.md)")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Point { x: i32  y: i32 } "
+                       "impl Display for Point { "
+                       "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+                       "}");
+    const auto& formatCaps = capabilities.at("Point.format");
+    EXPECT_TRUE(formatCaps[0] == Capability::Read);
+    EXPECT_TRUE(formatCaps[1] == Capability::Write);
+}
+
+TEST("CapabilityChecker handles enum variant construction and 'match' with no false positives "
+     "- a bare enum type name in EnumName.Variant(...)/EnumName.Variant position is never "
+     "mistaken for a real parameter reference (see docs/language/0064-enums.md)")
+{
+    const auto capabilities = capabilitiesOf("enum Shape { Circle(f64)  Point } "
+                                             "area(s: Shape) -> f64 { "
+                                             "  return match s { Circle(r) => r  Point => 0.0 } "
+                                             "} "
+                                             "c = Shape.Circle(5.0) "
+                                             "p = Shape.Point "
+                                             "x = area(c)");
+    EXPECT_TRUE(capabilities.at("area")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker handles a union-typed parameter and 'match' on it with no false "
+     "positives - needs no special-casing at all (unlike a real enum's own EnumName.Variant "
+     "construction syntax), since a union value is only ever produced by implicit wrapping, "
+     "never a bare-type-name method/field access (see docs/language/0065-unions.md)")
+{
+    const auto capabilities =
+        capabilitiesOf("f(x: i32 | str) -> str { "
+                       "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
+                       "} "
+                       "y = f(5)");
+    EXPECT_TRUE(capabilities.at("f")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker recurses into Ok(value)/Err(value)/'?' the same way it already does "
+     "for Some(value)/None (see docs/language/0063-result.md) - a moved-from name wrapped in "
+     "Ok(...) is still correctly tracked")
+{
+    const auto capabilities = capabilitiesOf("divide(a: i32, b: i32) -> Result<i32, i32> { "
+                                             "  if b == 0 { return Err(a) } "
+                                             "  return Ok(a / b) "
+                                             "} "
+                                             "x = divide(10, 2)");
+    EXPECT_TRUE(capabilities.at("divide")[0] == Capability::Read);
+}
+
 TEST("CapabilityChecker infers write for a parameter whose field is assigned")
 {
     const auto capabilities = capabilitiesOf("struct Point { x: i32 } "

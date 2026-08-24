@@ -316,6 +316,50 @@ TEST("RegionChecker accepts returning a parse<T>() result taken directly from a 
                  "a = toInt(\"42\")");
 }
 
+TEST("RegionChecker accepts enum variant construction and 'match' - a bare enum type name in "
+     "EnumName.Variant(...)/EnumName.Variant position is never mistaken for a real bound "
+     "variable and looked up in env (see docs/language/0064-enums.md) - this is the one real "
+     "bug this phase's own worked-example verification found: RegionChecker's generic "
+     "MethodCallExpr/FieldExpr handling recurses into `object` unconditionally, unlike "
+     "CapabilityChecker's own generic path, which happens to be safe for an unbound name "
+     "already")
+{
+    checkRegions("enum Shape { Circle(f64)  Point } "
+                 "area(s: Shape) -> f64 { "
+                 "  return match s { Circle(r) => r  Point => 0.0 } "
+                 "} "
+                 "c = Shape.Circle(5.0) "
+                 "p = Shape.Point "
+                 "x = area(c)");
+}
+
+TEST("RegionChecker accepts a union-typed parameter and 'match' on it - unlike a real enum's own "
+     "EnumName.Variant construction syntax, a union value is only ever produced by implicit "
+     "wrapping (see docs/language/0065-unions.md), never a bare-type-name method/field access, so "
+     "the fix above doesn't need extending for unions specifically")
+{
+    checkRegions("f(x: i32 | str) -> str { "
+                 "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
+                 "} "
+                 "y = f(5)");
+}
+
+TEST("RegionChecker accepts returning Ok(x)/Err(e) built from a borrowed parameter's own field, "
+     "and '?' propagating through a Result<T,E>-returning function (see "
+     "docs/language/0063-result.md)")
+{
+    checkRegions("divide(a: i32, b: i32) -> Result<i32, i32> { "
+                 "  if b == 0 { return Err(a) } "
+                 "  return Ok(a / b) "
+                 "} "
+                 "sumTwo(a: i32, b: i32, c: i32, d: i32) -> Result<i32, i32> { "
+                 "  x = divide(a, b)? "
+                 "  y = divide(c, d)? "
+                 "  return Ok(x + y) "
+                 "} "
+                 "z = sumTwo(10, 2, 20, 4)");
+}
+
 TEST("RegionChecker accepts an extern call through .to_cstr() on a borrowed str parameter")
 {
     checkRegions("extern c puts(text: cstr) "

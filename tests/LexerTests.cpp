@@ -221,3 +221,86 @@ TEST("Lexer tokenizes the 'as' keyword")
     EXPECT_EQ(tokens[1].kind, TokenKind::As);
     EXPECT_EQ(tokens[2].kind, TokenKind::Identifier);
 }
+
+TEST("Lexer tokenizes a raw string literal as a single String token, prefix and quotes intact "
+     "in Token.text (see docs/language/0059-raw-strings.md)")
+{
+    Lexer lexer(R"(r"C:\Users\Burke\Documents")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"(r"C:\Users\Burke\Documents")");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer does not treat '{'/'}' specially inside a raw string - a raw literal's own "
+     "'{expr}'-shaped content never opens an interpolation span")
+{
+    Lexer lexer(R"(r"literal {name} not interpolated")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"(r"literal {name} not interpolated")");
+}
+
+TEST("Lexer marks an unterminated raw string as Invalid")
+{
+    Lexer lexer(R"(r"hello)");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
+}
+
+TEST("Lexer does not treat a real identifier named 'r' followed by a separate string literal "
+     "(with whitespace between) as a raw-string prefix")
+{
+    Lexer lexer(R"(r "hello")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Identifier);
+    EXPECT_EQ(tokens[0].text, "r");
+    EXPECT_EQ(tokens[1].kind, TokenKind::String);
+    EXPECT_EQ(tokens[1].text, R"("hello")");
+}
+
+TEST("Lexer tokenizes a triple-quoted multiline string, embedded newlines included, as a "
+     "single String token (see docs/language/0060-multiline-strings.md)")
+{
+    Lexer lexer("\"\"\"\nHello {name},\n\nFiles: {count}\n\"\"\"");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, "\"\"\"\nHello {name},\n\nFiles: {count}\n\"\"\"");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer does not end a triple-quoted string at a lone embedded '\"' - only a real 3-in-a-row "
+     "closing run ends it")
+{
+    Lexer lexer(R"("""She said "hi" to me""")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, R"("""She said "hi" to me""")");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer tokenizes a raw triple-quoted string ('r\"\"\"...\"\"\"'), combining both raw and "
+     "multiline")
+{
+    Lexer lexer("r\"\"\"\n{\n    \"name\": \"{literal}\"\n}\n\"\"\"");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::String);
+    EXPECT_EQ(tokens[0].text, "r\"\"\"\n{\n    \"name\": \"{literal}\"\n}\n\"\"\"");
+    EXPECT_EQ(tokens[1].kind, TokenKind::EndOfFile);
+}
+
+TEST("Lexer marks an unterminated triple-quoted string (a doubled but not tripled closing quote) "
+     "as Invalid")
+{
+    Lexer lexer(R"("""hello"")");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
+}

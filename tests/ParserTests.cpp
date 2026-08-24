@@ -1241,6 +1241,20 @@ TEST("Parser builds Buffer append/append_line/clear/reserve/finish method-call e
     EXPECT_EQ(reserveCall->arguments.size(), static_cast<std::size_t>(1));
 }
 
+TEST("Parser builds a Buffer.write(...) method-call expression despite 'write' predating this "
+     "as a keyword token (see docs/language/0061-buffer-write.md)")
+{
+    auto program = parseOne("f() { b = Buffer()  b.write(\"hi {name}\") }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+
+    auto* writeResult = dynamic_cast<MethodCallExpr*>(body->result.get());
+    EXPECT_TRUE(writeResult != nullptr);
+    EXPECT_EQ(writeResult->method, "write");
+    EXPECT_EQ(writeResult->arguments.size(), static_cast<std::size_t>(1));
+}
+
 TEST("Parser builds a method-call expression, distinct from field access")
 {
     // A trailing expression with nothing after it becomes the block's
@@ -1572,4 +1586,385 @@ TEST("Parser builds a CastExpr for '<expr> as <targetType>', binding tighter tha
     EXPECT_TRUE(cast != nullptr);
     EXPECT_EQ(cast->targetType, "i64");
     EXPECT_TRUE(dynamic_cast<NameExpr*>(cast->operand.get()) != nullptr);
+}
+
+TEST("Parser splits an interpolation span's expression text from its ':<spec>' format spec, "
+     "leaving a plain span (no ':') with an empty formatSpec (see "
+     "docs/language/0055-numeric-format-specs.md)")
+{
+    auto program = parseOne("x = \"{value:05} plain {other}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(3));
+
+    EXPECT_TRUE(interpolated->pieces[0].expr != nullptr);
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, "05");
+    auto* valueExpr = dynamic_cast<NameExpr*>(interpolated->pieces[0].expr.get());
+    EXPECT_TRUE(valueExpr != nullptr);
+    EXPECT_EQ(valueExpr->name, "value");
+
+    EXPECT_TRUE(interpolated->pieces[2].expr != nullptr);
+    EXPECT_EQ(interpolated->pieces[2].formatSpec, "");
+}
+
+TEST("Parser keeps a ':' inside a nested string-literal argument out of the format-spec split "
+     "(e.g. `{x.join(\":\")}` has no format spec)")
+{
+    auto program = parseOne("x = \"{items.join(\":\")}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, "");
+    EXPECT_TRUE(dynamic_cast<MethodCallExpr*>(interpolated->pieces[0].expr.get()) != nullptr);
+}
+
+TEST("Parser rejects an empty format spec after ':' in an interpolation span")
+{
+    EXPECT_THROWS(parseOne("x = \"{value:}\""));
+}
+
+TEST("Parser extracts an alignment format spec ('<'/'>'/'^' + width) unchanged, same raw-text "
+     "split as any other spec (see docs/language/0057-alignment.md)")
+{
+    auto program = parseOne("x = \"{name:<20}|{name:>20}|{name:^20}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(5));
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, "<20");
+    EXPECT_EQ(interpolated->pieces[2].formatSpec, ">20");
+    EXPECT_EQ(interpolated->pieces[4].formatSpec, "^20");
+}
+
+TEST("Parser builds a self-documenting '{expr=}' piece with the raw source text captured as "
+     "selfDocPrefix, and an empty formatSpec (see docs/language/0058-debug-formatting.md)")
+{
+    auto program = parseOne("x = \"{age + 1=}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(interpolated->pieces[0].selfDocPrefix, "age + 1");
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, "");
+    EXPECT_TRUE(dynamic_cast<BinaryExpr*>(interpolated->pieces[0].expr.get()) != nullptr);
+}
+
+TEST("Parser combines '{expr=:spec}' - self-doc prefix plus a trailing format spec")
+{
+    auto program = parseOne("x = \"{pi=:.2}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces[0].selfDocPrefix, "pi");
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, ".2");
+}
+
+TEST("Parser does not misread a comparison operator ending in '=' ('==', '!=', '<=', '>=') as "
+     "a self-doc marker")
+{
+    auto program = parseOne("x = \"{a >= b}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces[0].selfDocPrefix, "");
+    auto* binary = dynamic_cast<BinaryExpr*>(interpolated->pieces[0].expr.get());
+    EXPECT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->op, TokenKind::GreaterEqual);
+}
+
+TEST("Parser rejects an empty interpolation expression before '=' in a self-doc span")
+{
+    EXPECT_THROWS(parseOne("x = \"{=}\""));
+}
+
+TEST("Parser builds a debug-format '{expr:?}' piece with debug set and an empty formatSpec "
+     "(see docs/language/0058-debug-formatting.md)")
+{
+    auto program = parseOne("x = \"{user:?}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_TRUE(interpolated->pieces[0].debug);
+    EXPECT_EQ(interpolated->pieces[0].formatSpec, "");
+}
+
+TEST("Parser combines a self-doc prefix with a debug spec: '{s=:?}'")
+{
+    auto program = parseOne("x = \"{s=:?}\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces[0].selfDocPrefix, "s");
+    EXPECT_TRUE(interpolated->pieces[0].debug);
+}
+
+TEST("Parser builds Ok(value)/Err(value) construction expressions and 'Result<T,E>' as a type "
+     "(see docs/language/0063-result.md)")
+{
+    auto program = parseOne("f(a: i32) -> Result<i32, str> { return Ok(a) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->returnType.value(), "Result<i32,str>");
+
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* okExpr = dynamic_cast<OkExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(okExpr != nullptr);
+    auto* name = dynamic_cast<NameExpr*>(okExpr->value.get());
+    EXPECT_TRUE(name != nullptr);
+    EXPECT_EQ(name->name, "a");
+}
+
+TEST("Parser builds an Err(value) construction expression")
+{
+    auto program = parseOne("x: Result<i32, str> = Err(\"oops\")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* errExpr = dynamic_cast<ErrExpr*>(assignment->value.get());
+    EXPECT_TRUE(errExpr != nullptr);
+    auto* str = dynamic_cast<StringExpr*>(errExpr->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, "oops");
+}
+
+TEST("Parser rejects Ok(...)/Err(...) with the wrong argument count")
+{
+    EXPECT_THROWS(parseOne("x = Ok()"));
+    EXPECT_THROWS(parseOne("x = Ok(1, 2)"));
+    EXPECT_THROWS(parseOne("x = Err()"));
+}
+
+TEST("Parser parses a nested Result<T,E> type via bracket-depth-aware comma splitting - E "
+     "itself a Map<K,V>")
+{
+    auto program = parseOne("f() -> Result<i32, Map<i32,i32>> { return Ok(1) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_EQ(function->returnType.value(), "Result<i32,Map<i32,i32>>");
+}
+
+TEST("Parser canonicalizes a 'T1 | T2' union type into a sorted, '|'-joined string, so 'i32 | "
+     "str' and 'str | i32' parse to the identical text (see docs/language/0065-unions.md)")
+{
+    auto a = parseOne("f(x: i32 | str) -> i32 { return 0 }");
+    auto b = parseOne("f(x: str | i32) -> i32 { return 0 }");
+
+    auto* functionA = dynamic_cast<FunctionDecl*>(a.items.at(0).get());
+    auto* functionB = dynamic_cast<FunctionDecl*>(b.items.at(0).get());
+    EXPECT_EQ(functionA->params.at(0).type, "i32|str");
+    EXPECT_EQ(functionB->params.at(0).type, "i32|str");
+}
+
+TEST("Parser deduplicates a repeated alternative in a union type")
+{
+    auto program = parseOne("f(x: i32 | str | i32) -> i32 { return 0 }");
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_EQ(function->params.at(0).type, "i32|str");
+}
+
+TEST("Parser parses a three-alternative union type, sorted alphabetically")
+{
+    auto program = parseOne("f(x: str | bool | i32) -> i32 { return 0 }");
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_EQ(function->params.at(0).type, "bool|i32|str");
+}
+
+TEST("Parser builds an EnumDecl with each variant's own name and positional payload types (see "
+     "docs/language/0064-enums.md)")
+{
+    auto program = parseOne("enum Shape { Circle(f64)  Rectangle(f64, f64)  Point }");
+
+    auto* enumDecl = dynamic_cast<EnumDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(enumDecl != nullptr);
+    EXPECT_EQ(enumDecl->name, "Shape");
+    EXPECT_EQ(enumDecl->variants.size(), static_cast<std::size_t>(3));
+    EXPECT_EQ(enumDecl->variants[0].name, "Circle");
+    EXPECT_EQ(enumDecl->variants[0].fieldTypes.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(enumDecl->variants[0].fieldTypes[0], "f64");
+    EXPECT_EQ(enumDecl->variants[1].name, "Rectangle");
+    EXPECT_EQ(enumDecl->variants[1].fieldTypes.size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(enumDecl->variants[2].name, "Point");
+    EXPECT_TRUE(enumDecl->variants[2].fieldTypes.empty());
+}
+
+TEST("Parser builds EnumName.Variant(args) as an ordinary MethodCallExpr - no new grammar, "
+     "reuses the existing object.method(args) postfix shape")
+{
+    auto program = parseOne("x = Shape.Circle(5.0)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* methodCall = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(methodCall != nullptr);
+    EXPECT_EQ(methodCall->method, "Circle");
+    auto* object = dynamic_cast<NameExpr*>(methodCall->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "Shape");
+    EXPECT_EQ(methodCall->arguments.size(), static_cast<std::size_t>(1));
+}
+
+TEST("Parser builds a no-payload EnumName.Variant (no parens) as an ordinary FieldExpr")
+{
+    auto program = parseOne("x = Shape.Point");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* field = dynamic_cast<FieldExpr*>(assignment->value.get());
+    EXPECT_TRUE(field != nullptr);
+    EXPECT_EQ(field->field, "Point");
+}
+
+TEST("Parser builds a MatchExpr with each arm's own variant name, binding names, and body")
+{
+    auto program = parseOne("f() -> f64 { return match s { "
+                            "Circle(r) => r  Rectangle(w, h) => w  _ => 0.0 } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* matchExpr = dynamic_cast<MatchExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(matchExpr != nullptr);
+    auto* scrutinee = dynamic_cast<NameExpr*>(matchExpr->scrutinee.get());
+    EXPECT_TRUE(scrutinee != nullptr);
+    EXPECT_EQ(scrutinee->name, "s");
+    EXPECT_EQ(matchExpr->arms.size(), static_cast<std::size_t>(3));
+    EXPECT_EQ(matchExpr->arms[0].variantName, "Circle");
+    EXPECT_EQ(matchExpr->arms[0].bindingNames.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(matchExpr->arms[0].bindingNames[0], "r");
+    EXPECT_EQ(matchExpr->arms[1].variantName, "Rectangle");
+    EXPECT_EQ(matchExpr->arms[1].bindingNames.size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(matchExpr->arms[2].variantName, "_");
+    EXPECT_TRUE(matchExpr->arms[2].bindingNames.empty());
+}
+
+TEST("Parser rejects a malformed match arm - missing '=>' or a trailing comma inside bindings")
+{
+    EXPECT_THROWS(parseOne("f() -> f64 { return match s { Circle(r) 0.0 } }"));
+}
+
+TEST("Parser builds a raw string literal as a plain StringExpr, backslashes and braces both "
+     "left completely untouched (see docs/language/0059-raw-strings.md)")
+{
+    auto program = parseOne(R"(x = r"C:\Users\Burke\Documents")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, R"(C:\Users\Burke\Documents)");
+}
+
+TEST("Parser never splits a raw string on '{expr}' - it stays a single literal StringExpr even "
+     "when its content looks exactly like an interpolation span")
+{
+    auto program = parseOne(R"(x = r"literal {name} not interpolated")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, "literal {name} not interpolated");
+}
+
+TEST("Parser builds a plain triple-quoted string with no interpolation spans as StringExpr, "
+     "embedded newlines preserved verbatim (see docs/language/0060-multiline-strings.md)")
+{
+    auto program = parseOne("x = \"\"\"\nHello,\n\nBuild complete.\n\"\"\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, "\nHello,\n\nBuild complete.\n");
+}
+
+TEST("Parser splits a triple-quoted string with an interpolation span into pieces exactly like "
+     "an ordinary single-quoted one - multiline strings support interpolation")
+{
+    auto program = parseOne("x = \"\"\"Hello {name},\nyou are {age}\"\"\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* interpolated = dynamic_cast<InterpolatedStringExpr*>(assignment->value.get());
+    EXPECT_TRUE(interpolated != nullptr);
+    EXPECT_EQ(interpolated->pieces.size(), static_cast<std::size_t>(4));
+    EXPECT_EQ(interpolated->pieces[0].literalText, "Hello ");
+    auto* nameExpr = dynamic_cast<NameExpr*>(interpolated->pieces[1].expr.get());
+    EXPECT_TRUE(nameExpr != nullptr);
+    EXPECT_EQ(nameExpr->name, "name");
+    EXPECT_EQ(interpolated->pieces[2].literalText, ",\nyou are ");
+    auto* ageExpr = dynamic_cast<NameExpr*>(interpolated->pieces[3].expr.get());
+    EXPECT_TRUE(ageExpr != nullptr);
+    EXPECT_EQ(ageExpr->name, "age");
+}
+
+TEST("Parser does not end a triple-quoted string at a lone embedded '\"' - only a real 3-in-a-row "
+     "closing run ends it, and the lone quote survives as literal content")
+{
+    auto program = parseOne(R"(x = """She said "hi" to me""")");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, R"(She said "hi" to me)");
+}
+
+TEST("Parser builds a raw triple-quoted string ('r\"\"\"...\"\"\"') as a plain StringExpr, "
+     "combining both raw (no interpolation) and multiline (embedded quotes/newlines survive)")
+{
+    auto program = parseOne("x = r\"\"\"\n{\n    \"name\": \"{literal}\"\n}\n\"\"\"");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* str = dynamic_cast<StringExpr*>(assignment->value.get());
+    EXPECT_TRUE(str != nullptr);
+    EXPECT_EQ(str->value, "\n{\n    \"name\": \"{literal}\"\n}\n");
+}
+
+TEST("Parser builds a TraitDecl with its own method signature's name and arity (see "
+     "docs/language/0062-display-trait.md)")
+{
+    auto program = parseOne("trait Display { format(self, buf: Buffer) }");
+
+    auto* trait = dynamic_cast<TraitDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(trait != nullptr);
+    EXPECT_EQ(trait->name, "Display");
+    EXPECT_EQ(trait->methods.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(trait->methods[0].name, "format");
+    EXPECT_EQ(trait->methods[0].paramCount, static_cast<std::size_t>(2));
+}
+
+TEST("Parser builds an ImplDecl whose methods are real FunctionDecls with mangled "
+     "'TypeName.methodName' names and self resolved to the concrete impl target type")
+{
+    auto program =
+        parseOne("impl Display for Point { format(self, buf: Buffer) { buf.write(\"hi\") } }");
+
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->traitName, "Display");
+    EXPECT_EQ(impl->typeName, "Point");
+    EXPECT_EQ(impl->methods.size(), static_cast<std::size_t>(1));
+
+    auto& method = impl->methods[0];
+    EXPECT_EQ(method->name, "Point.format");
+    EXPECT_EQ(method->params.size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(method->params[0].name, "self");
+    EXPECT_EQ(method->params[0].type, "Point");
+    EXPECT_TRUE(!method->params[0].declaredCapability.has_value());
+    EXPECT_EQ(method->params[1].name, "buf");
+    EXPECT_EQ(method->params[1].type, "Buffer");
+}
+
+TEST("Parser accepts a real parameter literally named 'self' with an explicit type, distinct "
+     "from the bare-self sugar")
+{
+    auto program = parseOne("impl Display for Point { format(self: i32) { } }");
+
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(0).get());
+    EXPECT_EQ(impl->methods[0]->params[0].type, "i32");
 }

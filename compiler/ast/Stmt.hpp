@@ -207,6 +207,47 @@ struct FunctionDecl final : Stmt
     std::unique_ptr<Expr> body; // always a BlockExpr (`=>` shorthand is normalized to one)
 };
 
+// `trait Name { format(self, buf: Buffer)  ... }` (see
+// docs/language/0062-display-trait.md) - declares a trait's required
+// method shapes. Parsing stays general (any trait name, any method
+// list), but this codebase's own single consumer is `Display`
+// (`format(self, buf: Buffer)`) - an `impl` block's own methods are
+// checked against a matching `TraitDecl`'s `MethodSig` list by name +
+// arity only (not full per-parameter type conformance - see that doc's
+// own Known Imprecision section), a real but deliberately minimal check.
+struct TraitDecl final : Stmt
+{
+    struct MethodSig
+    {
+        std::string name;
+        std::size_t paramCount; // includes the leading `self`
+    };
+
+    std::string name;
+    std::vector<MethodSig> methods;
+};
+
+// `impl TraitName for TypeName { method bodies }` - each method desugars
+// at parse time (see Parser::parseImplMethod) into an ordinary
+// FunctionDecl with a compiler-internal mangled name
+// (`typeName + "." + methodName`, e.g. "Point.format" - a '.' can never
+// appear in a real Axea identifier, so this name is permanently
+// unreachable from ordinary call syntax, the same "special internal
+// name" convention `print`/`write` already establish) and its own
+// `self` parameter resolved to the concrete `typeName` here (capability
+// left uninferred, same as `buf` - see docs/language/0062-display-
+// trait.md's own Capability Inference section). Every later pass
+// (TypeChecker/CapabilityChecker/RegionChecker/Interpreter/IrGenerator)
+// processes each of `methods` exactly like a top-level FunctionDecl,
+// just reached one level deeper - see each pass's own top-level item
+// loop.
+struct ImplDecl final : Stmt
+{
+    std::string traitName;
+    std::string typeName;
+    std::vector<std::unique_ptr<FunctionDecl>> methods;
+};
+
 // `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md) -
 // a top-level declaration with no body, unlike FunctionDecl: the actual
 // implementation is linked in externally (a real libc symbol at compiled-
@@ -240,6 +281,29 @@ struct StructDecl final : Stmt
 
     std::string name;
     std::vector<Field> fields;
+};
+
+// `enum Name { Variant(T1, T2)  Other  ... }` (see docs/language/0064-enums.md) - a genuine
+// tagged union/algebraic data type, Rust's own `enum` shape: each variant carries zero or more
+// *positional* payload types (no named fields - a variant needing named fields can carry a
+// struct as one of its positional slots instead, the same "compose, don't rebuild" answer
+// Optional<T>/Result<T,E> already gave for "more than one/two payload values").
+struct EnumVariant
+{
+    std::string name;
+    std::vector<std::string> fieldTypes; // positional; empty = a no-payload variant
+};
+
+struct EnumDecl final : Stmt
+{
+    EnumDecl(std::string name, std::vector<EnumVariant> variants)
+        : name(std::move(name)),
+          variants(std::move(variants))
+    {
+    }
+
+    std::string name;
+    std::vector<EnumVariant> variants;
 };
 
 struct Program

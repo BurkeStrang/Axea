@@ -126,12 +126,13 @@ routed through the shared, timing-sensitive `stringGlobals_` mechanism.
 str-coercible only) now also accepts `Optional<T>` (already fully
 supported by `stringifyValueOfType` since `docs/language/0052-optional.md`,
 but never actually reachable through `print`/interpolation before this -
-a small, adjacent gap closed here too), every struct, and every collection
-kind **except** `slice<T>` - a by-value fat pointer (`{T*, i32}`),
-structurally unlike every other collection's own heap-header convention,
-and (unlike them) already forbidden as a collection element type almost
-everywhere via `rejectSliceOutsideParameter`, so stringifying a bare slice
-specifically remains real further work. `print`/`write`'s own argument
+a small, adjacent gap closed here too) and every struct and collection
+kind. `slice<T>` - a by-value fat pointer (`{T*, i32}`), structurally
+unlike every other collection's own heap-header convention - was excluded
+here originally, real further work rather than an oversight; it was closed
+in a later, separate follow-up (`docs/language/0056-slice-printing.md`),
+once a dedicated by-value stringifier branch existed to handle it.
+`print`/`write`'s own argument
 check, previously a separate `isTextRepresentable(argType) ||
 argType.kind == TypeKind::Struct` carve-out (from the prior phase's own
 struct-only support), collapses back to a plain `isTextRepresentable(argType)`
@@ -199,9 +200,9 @@ collections (`List<List<i32>>`).
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **`slice<T>` still can't be printed/interpolated/joined directly.** A
-  by-value fat pointer, structurally unlike every other collection here -
-  real further work, not built out this phase (see Type Checking above).
+- **`slice<T>` can now be printed/interpolated/joined too** - see
+  `docs/language/0056-slice-printing.md`, a small later follow-up once a
+  dedicated by-value stringifier branch existed for its `{T*, i32}` shape.
 - **A struct can't have a collection-typed field at all**, independent of
   this phase entirely (a pre-existing restriction -
   `"List<T> is not supported as a struct field type in this phase"`, and

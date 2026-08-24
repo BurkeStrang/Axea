@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir/Ir.hpp"
+#include "sema/FormatSpec.hpp"
 
 #include <optional>
 #include <sstream>
@@ -172,6 +173,28 @@ private:
     // itself, since a named type's own text carries no structural
     // information to slice out).
     std::string optionalPayloadType(const std::string& type) const;
+
+    // Result<T,E> (see docs/language/0063-result.md) - the two-payload
+    // analogue of registerOptionalInstantiation/
+    // registerOptionalInstantiationForLlvmPayload/isOptionalType/
+    // optionalPayloadType just above. `registerResultInstantiation` takes
+    // two Axea type-name strings (the shape a declared `Result<T,E>` type
+    // or `?`'s own else-branch construction always has - see IrResultNew);
+    // `registerResultInstantiationForLlvmPayloads` is the actual memoized
+    // registration, keyed by both payloads' own resolved LLVM text jointly
+    // (see resultInstantiationIds_'s own comment for why a joint key, not
+    // Optional's single-LLVM-text key). Returns "%axea.Result.<id>".
+    std::string registerResultInstantiation(const std::string& okAxeaType,
+                                            const std::string& errAxeaType);
+    std::string registerResultInstantiationForLlvmPayloads(const std::string& okLlvmType,
+                                                           const std::string& errLlvmType);
+    // "%axea.Result." prefix only - same reasoning as isOptionalType.
+    bool isResultType(const std::string& type) const;
+    // The Ok/Err payload's own LLVM type, looked up by the full
+    // "%axea.Result.<id>" string - same by-ID lookup shape as
+    // optionalPayloadType.
+    std::string resultOkPayloadType(const std::string& type) const;
+    std::string resultErrPayloadType(const std::string& type) const;
 
     bool isSliceType(const std::string& type) const;
     // "{T*, i32}" -> "T".
@@ -377,6 +400,14 @@ private:
     void emitOptionalNew(const IrOptionalNew& optionalNew, FunctionContext& fctx);
     void emitOptionalIsSome(const IrOptionalIsSome& isSome, FunctionContext& fctx);
     void emitOptionalUnwrap(const IrOptionalUnwrap& unwrap, FunctionContext& fctx);
+    // `Ok(x)`/`Err(e)` (see docs/language/0063-result.md) - builds the
+    // `{i1, T, E}` literal via three insertvalues, the direct extension of
+    // emitOptionalNew's own two-insertvalue `{i1, T}` construction.
+    // IrResultIsOk/IrResultUnwrap have no emit functions of their own -
+    // `.is_ok`/`.is_err`/`?`/`.unwrap_or` all reuse emitOptionalIsSome/
+    // emitOptionalUnwrap verbatim (see IrOptionalIsSome/IrOptionalUnwrap's
+    // own comments for why that's correct, not just convenient).
+    void emitResultNew(const IrResultNew& resultNew, FunctionContext& fctx);
     // `.to_cstr()` (see docs/language/0048-ffi.md) - a representational
     // no-op (resolves `object` to a bare i8* via resolveStrPtr, then a
     // trivial self-bitcast), since cstr and str/String's own data pointer
@@ -433,6 +464,75 @@ private:
     // still accept any payload type - only rendering one to text is
     // narrower).
     std::string registerOptionalToStrRuntime(const std::string& optionalType);
+    // `@axea.result.<id>.to_str(%axea.Result.<id>) -> i8*` (see
+    // docs/language/0063-result.md) - "Ok(<payload>)"/"Err(<payload>)",
+    // the direct Result-flavored extension of
+    // registerOptionalToStrRuntime just above (same i32/i64/f64/bool
+    // payload restriction, applied independently to both the Ok and Err
+    // payload types).
+    std::string registerResultToStrRuntime(const std::string& resultType);
+    // `{expr:spec}` (see docs/language/0055-numeric-format-specs.md) -
+    // a standalone `@axea.format.<id>(<elementType>) -> i8*` per distinct
+    // (elementType, spec) pair actually used, memoized by their combined
+    // text (mirrors registerOptionalToStrRuntime's own per-payload-type
+    // memoization). Radix conversions (x/X/b/o) built as elementType==i32
+    // -> sign-extend to i64 first (see the Interpreter's own
+    // formatValue - a deliberate, documented simplification: this
+    // backend never threads i32-vs-i64 width past TypeChecker, so a
+    // radix conversion always operates on the full 64-bit pattern
+    // regardless of source width); x/X/o then reuse libc `sprintf` with
+    // a fixed, self-contained format-string global (the same "must not
+    // route through stringPtrConstant/hoistString" reasoning
+    // registerCollectionToStrRuntime's own punctuation globals needed -
+    // see docs/language/0054-collection-printing.md - since this can
+    // also first be triggered lazily from deep inside a function body);
+    // `b` has no printf specifier, so it's hand-rolled (a bit-extraction
+    // loop, mirroring encodeCharUtf8/registerParseRuntime's own
+    // alloca/load/store idioms). Plain decimal width (no type char) and
+    // precision (float) both reuse the source's own native width
+    // directly (`%d`/`%lld`/`%f`) - no ambiguity to simplify away there,
+    // since decimal formatting only cares about the signed *value*, not
+    // the bit pattern's width.
+    std::string registerFormatRuntime(const std::string& elementType, const FormatSpec& spec);
+    // `@axea.align.pad(i8* text, i32 width, i8 alignCode) -> i8*` (see
+    // docs/language/0057-alignment.md) - registered once, not per (type,
+    // spec) key like registerFormatRuntime above: alignment is a pure
+    // string operation (pad an already-computed i8* to `width` with
+    // spaces, given '<'/'>'/'^' as its raw char code), independent of
+    // what produced that text - a numeric conversion via
+    // registerFormatRuntime (called with width/zeroPad zeroed out first,
+    // reusing its existing text computation rather than duplicating it)
+    // or the fully generic stringifyValue every unformatted interpolation
+    // piece already uses (str/struct/collection/... - alignment is the
+    // one format-spec feature not restricted to numeric types, see
+    // TypeChecker's own relaxation). `alignCode` is always a compile-time
+    // constant at each call site (baked in as a literal i8 from the
+    // parsed spec), but threaded through as a runtime parameter anyway so
+    // one shared function handles all three variants via `select`, rather
+    // than emitting three near-identical specialized ones. No-ops (returns
+    // `text` unchanged) if `width` doesn't exceed the text's own length -
+    // never truncates, matching every other width-related format spec.
+    // '^' splits an odd padding amount with the extra space on the right
+    // - an arbitrary but consistent tie-break, matched exactly by the
+    // Interpreter's own identical choice in padToWidth.
+    std::string registerAlignPadRuntime();
+    // `@axea.debug.quote_str(i8* text) -> i8*` (see
+    // docs/language/0058-debug-formatting.md) - `{expr:?}`'s own debug
+    // representation for str/String: wraps `text` in double quotes (no
+    // internal escaping - real further work, not built this phase).
+    // Registered at most once, same "one shared function, no per-key
+    // memoization needed" reasoning as registerAlignPadRuntime above -
+    // quoting is independent of what produced the text. Every other
+    // type's debug representation is identical to its unformatted one
+    // (see TypeChecker's own identical framing), so this is the only new
+    // runtime piece debug mode needs; stringifyValueDebug below reuses
+    // the ordinary stringifyValue dispatch for everything else.
+    std::string registerDebugQuoteRuntime();
+    // `{expr:?}` (see docs/language/0058-debug-formatting.md) - like
+    // stringifyValue, but for a str/String value wraps the result via
+    // registerDebugQuoteRuntime first; every other type is identical to
+    // stringifyValue's own output.
+    std::string stringifyValueDebug(int reg, FunctionContext& fctx);
     // `@axea.strbuf.new() -> {i32,i32,i8*}*` / `@axea.strbuf.append(buf,
     // i8*) -> void` / `@axea.strbuf.finish(buf) -> i8*` (see
     // docs/language/0054-collection-printing.md) - a small growable-
@@ -991,6 +1091,26 @@ private:
     int nextOptionalInstantiationId_ = 0;
     std::ostringstream optionalTypeDeclsText_;
 
+    // Result<T,E> monomorphization (see docs/language/0063-result.md) -
+    // the exact same shape as Optional's own block just above (a genuinely
+    // *named*, by-value struct, for the identical isSliceType-collision
+    // reason - "%axea.Result.<id> = type { i1, T, E }" would otherwise be
+    // indistinguishable from an anonymous slice<T> for several (T,E)
+    // shapes), just with two payload slots instead of one. Keyed by both
+    // payloads' own LLVM type text jointly (okLlvmType + "|" + errLlvmType -
+    // a plain string key, avoiding a custom pair-hash, safe since neither
+    // LLVM type string can itself contain '|') rather than a single LLVM
+    // text key, since Ok(x)/Err(e) each only ever supply *one* of the two
+    // payload types from their own value register - the other always comes
+    // from surrounding context (see IrResultNew's own comment) - so unlike
+    // Optional, there's no single "the" LLVM-text key derivable from one
+    // register alone.
+    std::unordered_map<std::string, int> resultInstantiationIds_;
+    std::unordered_map<int, std::string> resultOkPayloadTypeById_;
+    std::unordered_map<int, std::string> resultErrPayloadTypeById_;
+    int nextResultInstantiationId_ = 0;
+    std::ostringstream resultTypeDeclsText_;
+
     // Key hash/equality runtime (see registerKeyRuntime): canonical Axea key
     // type string -> its (hashFnName, eqFnName) pair, memoized so a key type
     // reused across several different Map/Set instantiations only gets one
@@ -1076,6 +1196,24 @@ private:
     bool boolToStrRegistered_ = false;
     bool optionalToStrGlobalsRegistered_ = false;
     std::unordered_map<std::string, std::string> optionalToStrFnByOptionalType_;
+    // `@axea.result.<id>.to_str` (see docs/language/0063-result.md) - same
+    // "register once" pattern as optionalToStrFnByOptionalType_/
+    // optionalToStrGlobalsRegistered_ just above.
+    bool resultToStrGlobalsRegistered_ = false;
+    std::unordered_map<std::string, std::string> resultToStrFnByResultType_;
+    // `{expr:spec}` (see docs/language/0055-numeric-format-specs.md) -
+    // keyed by "<elementType>|<raw spec text>", same "register once"
+    // pattern as optionalToStrFnByOptionalType_ above.
+    std::unordered_map<std::string, std::string> formatFnByKey_;
+    int nextFormatId_ = 0;
+    // `@axea.align.pad` (see docs/language/0057-alignment.md) - registered
+    // at most once total, unlike formatFnByKey_ above (one shared
+    // function handles every alignment call site, keyed by nothing).
+    bool alignPadRegistered_ = false;
+    // `@axea.debug.quote_str` (see docs/language/0058-debug-formatting.md)
+    // - same "registered at most once total" reasoning as
+    // alignPadRegistered_ above.
+    bool debugQuoteRegistered_ = false;
     // A small growable-string-buffer trio (see
     // docs/language/0054-collection-printing.md) - `@axea.strbuf.new`/
     // `.append`/`.finish`, self-contained standalone functions (not

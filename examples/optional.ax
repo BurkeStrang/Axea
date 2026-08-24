@@ -1,0 +1,30 @@
+firstDigit(s: str) -> Optional<i32>
+{
+    return s.parse<i32>()
+}
+
+sumTwo(a: str, b: str) -> Optional<i32>
+{
+    x = a.parse<i32>()?
+    y = b.parse<i32>()?
+    return Some(x + y)
+}
+
+good = sumTwo("3", "4")
+bad = sumTwo("3", "oops")
+
+goodVal = good.unwrap_or(999)
+badVal = bad.unwrap_or(999)
+goodIsSome = good.is_some()
+badIsNone = bad.is_none()
+
+n: Optional<i32> = None
+nDefault = n.unwrap_or(42)
+
+parsed = "123".parse<i32>()
+invalid = "abc".parse<i32>()
+trailing = "123abc".parse<i32>()
+
+f = "3.14".parse<f64>()
+b1 = "true".parse<bool>()
+b2 = "garbage".parse<bool>()

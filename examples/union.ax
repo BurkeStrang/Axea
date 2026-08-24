@@ -1,0 +1,38 @@
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+describe(v: Point | i32 | str) -> str
+{
+    return match v
+    {
+        Point(p) => "a point"
+        i32(n) => "a number"
+        str(s) => "a string"
+    }
+}
+
+f(x: i32 | str) -> i32 | str
+{
+    return x
+}
+
+run() -> i32
+{
+    p = Point { x: 1, y: 2 }
+    print(describe(p))
+    print(describe(5))
+    print(describe("hi"))
+
+    w: i32 | str = 5
+    print(w)
+
+    print(f(42))
+    print(f("axea"))
+
+    return 0
+}
+
+x = run()

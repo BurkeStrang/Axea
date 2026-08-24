@@ -81,6 +81,20 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
+    // Ok(value)/Err(value) (see docs/language/0063-result.md) - same
+    // one-line recursive shape as SomeExpr above.
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        inferExpr(*okExpr->value, function, changed);
+        return;
+    }
+
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        inferExpr(*errExpr->value, function, changed);
+        return;
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
         inferExpr(*tryExpr->operand, function, changed);
@@ -94,6 +108,22 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         inferExpr(*ifExpr->condition, function, changed);
         inferExpr(*ifExpr->thenBranch, function, changed);
         inferExpr(*ifExpr->elseBranch, function, changed);
+        return;
+    }
+
+    // `match` (see docs/language/0064-enums.md) - recurses into the scrutinee and every arm's
+    // own body, the same "walk every sub-expression" shape IfExpr's own condition/branches get
+    // just above. A match-bound name (a variant's own extracted payload) is a fresh local, not
+    // a parameter reference, so it needs no capability propagation of its own - the same
+    // "extracted value, not itself tracked" treatment a struct field-get's own result already
+    // gets.
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        inferExpr(*matchExpr->scrutinee, function, changed);
+        for (const auto& arm : matchExpr->arms)
+        {
+            inferExpr(*arm.body, function, changed);
+        }
         return;
     }
 
@@ -228,22 +258,23 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         // docs/language/0036-linked-lists.md, docs/language/0037-deques.md),
         // "enqueue"/"dequeue" (Queue, docs/language/0038-queues.md),
         // "append" (String, docs/language/0042-string.md), and
-        // "append_line"/"clear"/"reserve"/"finish" (Buffer,
-        // docs/language/0043-buffer.md - "finish" mutates too, resetting
-        // the buffer's own header fields even though its main purpose is
-        // to return a value, the same "mutates *and* returns" shape
-        // List<T>.pop() already established) all mutate the receiver's own
-        // header fields in place; "get"/"contains" don't. Mirrors
-        // IndexAssignStmt/FieldAssignStmt raising Write on their own object
-        // below.
+        // "append_line"/"write"/"clear"/"reserve"/"finish" (Buffer,
+        // docs/language/0043-buffer.md, docs/language/0061-buffer-write.md -
+        // "finish" mutates too, resetting the buffer's own header fields
+        // even though its main purpose is to return a value, the same
+        // "mutates *and* returns" shape List<T>.pop() already established)
+        // all mutate the receiver's own header fields in place; "get"/
+        // "contains" don't. Mirrors IndexAssignStmt/FieldAssignStmt raising
+        // Write on their own object below.
         if (methodCall->method == "push" || methodCall->method == "pop" ||
             methodCall->method == "set" || methodCall->method == "remove" ||
             methodCall->method == "add" || methodCall->method == "push_front" ||
             methodCall->method == "push_back" || methodCall->method == "pop_front" ||
             methodCall->method == "pop_back" || methodCall->method == "enqueue" ||
             methodCall->method == "dequeue" || methodCall->method == "append" ||
-            methodCall->method == "append_line" || methodCall->method == "clear" ||
-            methodCall->method == "reserve" || methodCall->method == "finish")
+            methodCall->method == "append_line" || methodCall->method == "write" ||
+            methodCall->method == "clear" || methodCall->method == "reserve" ||
+            methodCall->method == "finish")
         {
             if (const auto paramIndex = rootParamIndex(*methodCall->object, function))
             {
@@ -367,6 +398,18 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         return;
     }
 
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        checkMovesInExpr(*okExpr->value, function, moved);
+        return;
+    }
+
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        checkMovesInExpr(*errExpr->value, function, moved);
+        return;
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
         checkMovesInExpr(*tryExpr->operand, function, moved);
@@ -440,6 +483,19 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         checkMovesInExpr(*ifExpr->thenBranch, function, thenMoved);
         std::unordered_set<std::string> elseMoved;
         checkMovesInExpr(*ifExpr->elseBranch, function, elseMoved);
+        return;
+    }
+
+    // `match` (see docs/language/0064-enums.md) - same per-branch independent move tracking as
+    // IfExpr's own thenBranch/elseBranch just above, one `moved` set per arm.
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        checkMovesInExpr(*matchExpr->scrutinee, function, moved);
+        for (const auto& arm : matchExpr->arms)
+        {
+            std::unordered_set<std::string> armMoved;
+            checkMovesInExpr(*arm.body, function, armMoved);
+        }
         return;
     }
 
@@ -583,6 +639,22 @@ void CapabilityChecker::check(const Program& program)
             functions_[function->name] = function;
             inferred_[function->name] =
                 std::vector<Capability>(function->params.size(), Capability::Read);
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // Each impl method (see docs/language/0062-display-trait.md)
+            // is registered exactly like a top-level FunctionDecl - this
+            // is what makes `self`/`buf`'s own capabilities genuinely
+            // *inferred* (no explicit read/write prefix on either param
+            // in `format(self, buf: Buffer)`), the same fixpoint
+            // inference every other unprefixed parameter in the language
+            // already gets.
+            for (const auto& method : implDecl->methods)
+            {
+                functions_[method->name] = method.get();
+                inferred_[method->name] =
+                    std::vector<Capability>(method->params.size(), Capability::Read);
+            }
         }
     }
 

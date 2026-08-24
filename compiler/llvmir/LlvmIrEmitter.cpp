@@ -158,6 +158,16 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
         const std::string elementName = axeaTypeName.substr(9, axeaTypeName.size() - 10);
         return registerOptionalInstantiation(elementName);
     }
+    if (axeaTypeName.starts_with("Result<"))
+    {
+        // "Result<T,E>" - the canonical form Parser::parseTypeName always
+        // produces (see docs/language/0063-result.md). Same bracket-aware
+        // comma split as Map<K,V> below (findTopLevelComma handles
+        // Result<i32,Map<i32,i32>> correctly).
+        const std::string args = axeaTypeName.substr(7, axeaTypeName.size() - 8);
+        const auto comma = findTopLevelComma(args);
+        return registerResultInstantiation(args.substr(0, comma), args.substr(comma + 1));
+    }
     if (axeaTypeName.starts_with("slice<"))
     {
         // "slice<elem>" - the canonical form Parser::parseTypeName always
@@ -631,6 +641,53 @@ std::string LlvmIrEmitter::optionalPayloadType(const std::string& type) const
     return optionalPayloadTypeById_.at(id);
 }
 
+std::string LlvmIrEmitter::registerResultInstantiation(const std::string& okAxeaType,
+                                                       const std::string& errAxeaType)
+{
+    return registerResultInstantiationForLlvmPayloads(llvmType(okAxeaType), llvmType(errAxeaType));
+}
+
+std::string
+LlvmIrEmitter::registerResultInstantiationForLlvmPayloads(const std::string& okLlvmType,
+                                                          const std::string& errLlvmType)
+{
+    const std::string key = okLlvmType + "|" + errLlvmType;
+    if (const auto it = resultInstantiationIds_.find(key); it != resultInstantiationIds_.end())
+    {
+        return "%axea.Result." + std::to_string(it->second);
+    }
+
+    const int id = nextResultInstantiationId_++;
+    resultInstantiationIds_[key] = id;
+    const std::string name = "%axea.Result." + std::to_string(id);
+
+    resultTypeDeclsText_ << name << " = type { i1, " << okLlvmType << ", " << errLlvmType << " }\n";
+    resultOkPayloadTypeById_[id] = okLlvmType;
+    resultErrPayloadTypeById_[id] = errLlvmType;
+
+    return name;
+}
+
+bool LlvmIrEmitter::isResultType(const std::string& type) const
+{
+    return type.starts_with("%axea.Result.");
+}
+
+std::string LlvmIrEmitter::resultOkPayloadType(const std::string& type) const
+{
+    // "%axea.Result.<id>" - the id is everything after the last '.'.
+    const auto lastDot = type.rfind('.');
+    const int id = std::stoi(type.substr(lastDot + 1));
+    return resultOkPayloadTypeById_.at(id);
+}
+
+std::string LlvmIrEmitter::resultErrPayloadType(const std::string& type) const
+{
+    const auto lastDot = type.rfind('.');
+    const int id = std::stoi(type.substr(lastDot + 1));
+    return resultErrPayloadTypeById_.at(id);
+}
+
 bool LlvmIrEmitter::isSliceType(const std::string& type) const
 {
     // A slice is "{...}" passed *by value* - no trailing '*'. A List is
@@ -937,6 +994,320 @@ isfalse:
     return fnName;
 }
 
+std::string LlvmIrEmitter::registerFormatRuntime(const std::string& elementType,
+                                                 const FormatSpec& spec)
+{
+    const std::string key =
+        elementType + "|" + std::to_string(spec.zeroPad) + "|" + std::to_string(spec.width) + "|" +
+        (spec.precision ? std::to_string(*spec.precision) : "-") + "|" + std::string(1, spec.type);
+    if (const auto it = formatFnByKey_.find(key); it != formatFnByKey_.end())
+    {
+        return it->second;
+    }
+
+    const int id = nextFormatId_++;
+    const std::string idStr = std::to_string(id);
+    const std::string fnName = "@axea.format." + idStr;
+    formatFnByKey_[key] = fnName;
+
+    const std::string widthText = spec.width > 0 ? std::to_string(spec.width) : "";
+    const std::string zeroFlag = spec.zeroPad ? "0" : "";
+
+    if (spec.type == 'b')
+    {
+        // No printf specifier for binary - hand-rolled: count significant
+        // bits (treating 0 itself as one digit), pad to max(that count,
+        // spec.width) with '0' (zeroPad) or ' ', then fill the actual
+        // digits MSB-first using the already-known digit count to place
+        // each one directly (no reverse-the-string step needed, unlike a
+        // naive LSB-first digit loop). Always the full 64-bit pattern -
+        // see registerFormatRuntime's own header comment for why i32
+        // values are sign-extended first.
+        const std::string vBits = elementType == "i64" ? "%v" : "%vBits";
+        const std::string padChar = spec.zeroPad ? "48" : "32"; // '0' or ' '
+
+        toStrRuntimeText_ << "\ndefine i8* " << fnName << "(" << elementType << " %v) {\n";
+        toStrRuntimeText_ << "entry:\n";
+        if (elementType != "i64")
+        {
+            toStrRuntimeText_ << "  %vBits = sext " << elementType << " %v to i64\n";
+        }
+        toStrRuntimeText_ << "  %countSlot = alloca i32\n";
+        toStrRuntimeText_ << "  store i32 0, i32* %countSlot\n";
+        toStrRuntimeText_ << "  %remSlot = alloca i64\n";
+        toStrRuntimeText_ << "  store i64 " << vBits << ", i64* %remSlot\n";
+        toStrRuntimeText_ << "  br label %countHdr\n";
+        toStrRuntimeText_ << "countHdr:\n";
+        toStrRuntimeText_ << "  %rem = load i64, i64* %remSlot\n";
+        toStrRuntimeText_ << "  %remZero = icmp eq i64 %rem, 0\n";
+        toStrRuntimeText_ << "  br i1 %remZero, label %countDone, label %countBody\n";
+        toStrRuntimeText_ << "countBody:\n";
+        toStrRuntimeText_ << "  %remNext = lshr i64 %rem, 1\n";
+        toStrRuntimeText_ << "  store i64 %remNext, i64* %remSlot\n";
+        toStrRuntimeText_ << "  %c0 = load i32, i32* %countSlot\n";
+        toStrRuntimeText_ << "  %c1 = add i32 %c0, 1\n";
+        toStrRuntimeText_ << "  store i32 %c1, i32* %countSlot\n";
+        toStrRuntimeText_ << "  br label %countHdr\n";
+        toStrRuntimeText_ << "countDone:\n";
+        toStrRuntimeText_ << "  %rawCount = load i32, i32* %countSlot\n";
+        toStrRuntimeText_ << "  %isZeroCount = icmp eq i32 %rawCount, 0\n";
+        toStrRuntimeText_ << "  %digitCount = select i1 %isZeroCount, i32 1, i32 %rawCount\n";
+        toStrRuntimeText_ << "  %useSpecWidth = icmp sgt i32 " << (spec.width > 0 ? spec.width : 0)
+                          << ", %digitCount\n";
+        toStrRuntimeText_ << "  %totalWidth = select i1 %useSpecWidth, i32 "
+                          << (spec.width > 0 ? spec.width : 0) << ", i32 %digitCount\n";
+        toStrRuntimeText_ << "  %padCount = sub i32 %totalWidth, %digitCount\n";
+        toStrRuntimeText_ << "  %buf = call i8* @malloc(i64 80)\n";
+        toStrRuntimeText_ << "  %padIdxSlot = alloca i32\n";
+        toStrRuntimeText_ << "  store i32 0, i32* %padIdxSlot\n";
+        toStrRuntimeText_ << "  br label %padHdr\n";
+        toStrRuntimeText_ << "padHdr:\n";
+        toStrRuntimeText_ << "  %padIdx = load i32, i32* %padIdxSlot\n";
+        toStrRuntimeText_ << "  %padDone = icmp sge i32 %padIdx, %padCount\n";
+        toStrRuntimeText_ << "  br i1 %padDone, label %padFin, label %padBody\n";
+        toStrRuntimeText_ << "padBody:\n";
+        toStrRuntimeText_ << "  %padPtr = getelementptr i8, i8* %buf, i32 %padIdx\n";
+        toStrRuntimeText_ << "  store i8 " << padChar << ", i8* %padPtr\n";
+        toStrRuntimeText_ << "  %padIdxNext = add i32 %padIdx, 1\n";
+        toStrRuntimeText_ << "  store i32 %padIdxNext, i32* %padIdxSlot\n";
+        toStrRuntimeText_ << "  br label %padHdr\n";
+        toStrRuntimeText_ << "padFin:\n";
+        toStrRuntimeText_ << "  %digitIdxSlot = alloca i32\n";
+        toStrRuntimeText_ << "  store i32 0, i32* %digitIdxSlot\n";
+        toStrRuntimeText_ << "  br label %digitHdr\n";
+        toStrRuntimeText_ << "digitHdr:\n";
+        toStrRuntimeText_ << "  %digitIdx = load i32, i32* %digitIdxSlot\n";
+        toStrRuntimeText_ << "  %digitDone = icmp sge i32 %digitIdx, %digitCount\n";
+        toStrRuntimeText_ << "  br i1 %digitDone, label %digitFin, label %digitBody\n";
+        toStrRuntimeText_ << "digitBody:\n";
+        toStrRuntimeText_ << "  %bitPosTmp = sub i32 %digitCount, 1\n";
+        toStrRuntimeText_ << "  %bitPos32 = sub i32 %bitPosTmp, %digitIdx\n";
+        toStrRuntimeText_ << "  %bitPos64 = zext i32 %bitPos32 to i64\n";
+        toStrRuntimeText_ << "  %shifted = lshr i64 " << vBits << ", %bitPos64\n";
+        toStrRuntimeText_ << "  %bit = and i64 %shifted, 1\n";
+        toStrRuntimeText_ << "  %bit8 = trunc i64 %bit to i8\n";
+        toStrRuntimeText_ << "  %ch = add i8 %bit8, 48\n";
+        toStrRuntimeText_ << "  %destIdx = add i32 %padCount, %digitIdx\n";
+        toStrRuntimeText_ << "  %destPtr = getelementptr i8, i8* %buf, i32 %destIdx\n";
+        toStrRuntimeText_ << "  store i8 %ch, i8* %destPtr\n";
+        toStrRuntimeText_ << "  %digitIdxNext = add i32 %digitIdx, 1\n";
+        toStrRuntimeText_ << "  store i32 %digitIdxNext, i32* %digitIdxSlot\n";
+        toStrRuntimeText_ << "  br label %digitHdr\n";
+        toStrRuntimeText_ << "digitFin:\n";
+        toStrRuntimeText_ << "  %termPtr = getelementptr i8, i8* %buf, i32 %totalWidth\n";
+        toStrRuntimeText_ << "  store i8 0, i8* %termPtr\n";
+        toStrRuntimeText_ << "  ret i8* %buf\n";
+        toStrRuntimeText_ << "}\n";
+        return fnName;
+    }
+
+    // Every other case reuses libc sprintf with a fixed, self-contained
+    // format-string global (never routed through stringPtrConstant/
+    // hoistString - see this function's own header comment for why).
+    std::string fmtText = "%" + zeroFlag + widthText;
+    std::string valueType;
+    std::string valueRef = "%v";
+    if (spec.type == 'x' || spec.type == 'X' || spec.type == 'o')
+    {
+        fmtText += "ll";
+        fmtText += spec.type == 'o' ? 'o' : spec.type;
+        valueType = "i64";
+        if (elementType != "i64")
+        {
+            valueRef = "%vBits";
+        }
+    }
+    else if (spec.precision.has_value())
+    {
+        fmtText += "." + std::to_string(*spec.precision) + "f";
+        valueType = "double";
+    }
+    else
+    {
+        // Plain decimal width/zero-pad - native width (TypeChecker
+        // already guarantees i32 or i64 here).
+        fmtText += elementType == "i64" ? "lld" : "d";
+        valueType = elementType;
+    }
+
+    const std::string globalName = "@axea.fmt.spec." + idStr;
+    const std::size_t fmtLen = fmtText.size() + 1;
+    toStrRuntimeText_ << "\n"
+                      << globalName << " = private unnamed_addr constant [" << fmtLen
+                      << " x i8] c\"" << fmtText << "\\00\"\n";
+
+    toStrRuntimeText_ << "define i8* " << fnName << "(" << elementType << " %v) {\n";
+    toStrRuntimeText_ << "entry:\n";
+    if (valueRef == "%vBits")
+    {
+        toStrRuntimeText_ << "  %vBits = sext " << elementType << " %v to i64\n";
+    }
+    toStrRuntimeText_ << "  %buf = call i8* @malloc(i64 64)\n";
+    toStrRuntimeText_ << "  %fmtPtr = getelementptr [" << fmtLen << " x i8], [" << fmtLen
+                      << " x i8]* " << globalName << ", i64 0, i64 0\n";
+    toStrRuntimeText_ << "  %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, "
+                      << valueType << " " << valueRef << ")\n";
+    toStrRuntimeText_ << "  ret i8* %buf\n";
+    toStrRuntimeText_ << "}\n";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerAlignPadRuntime()
+{
+    const std::string fnName = "@axea.align.pad";
+    if (alignPadRegistered_)
+    {
+        return fnName;
+    }
+    alignPadRegistered_ = true;
+
+    // Registered exactly once (unlike registerFormatRuntime's own
+    // per-(type,spec) memoization) - see this function's own header
+    // comment in LlvmIrEmitter.hpp for why one shared function suffices.
+    // Named registers throughout, since this is emitted at most once
+    // total, the same "no numbering needed" reasoning
+    // @axea.strbuf.new/.append/.finish already rely on.
+    toStrRuntimeText_ << R"(
+define i8* @axea.align.pad(i8* %text, i32 %width, i8 %alignCode) {
+entry:
+  %len64 = call i64 @strlen(i8* %text)
+  %len = trunc i64 %len64 to i32
+  %deficit = sub i32 %width, %len
+  %needsPad = icmp sgt i32 %deficit, 0
+  br i1 %needsPad, label %pad, label %nopad
+nopad:
+  ret i8* %text
+pad:
+  %isLeft = icmp eq i8 %alignCode, 60
+  %isRight = icmp eq i8 %alignCode, 62
+  %half = sdiv i32 %deficit, 2
+  %leftPad0 = select i1 %isLeft, i32 0, i32 %half
+  %leftPad = select i1 %isRight, i32 %deficit, i32 %leftPad0
+  %rightPad = sub i32 %deficit, %leftPad
+  %bufSize64 = zext i32 %width to i64
+  %bufSize = add i64 %bufSize64, 1
+  %buf = call i8* @malloc(i64 %bufSize)
+  %lIdxSlot = alloca i32
+  store i32 0, i32* %lIdxSlot
+  br label %lHdr
+lHdr:
+  %lIdx = load i32, i32* %lIdxSlot
+  %lDone = icmp sge i32 %lIdx, %leftPad
+  br i1 %lDone, label %lFin, label %lBody
+lBody:
+  %lPtr = getelementptr i8, i8* %buf, i32 %lIdx
+  store i8 32, i8* %lPtr
+  %lNext = add i32 %lIdx, 1
+  store i32 %lNext, i32* %lIdxSlot
+  br label %lHdr
+lFin:
+  %cIdxSlot = alloca i32
+  store i32 0, i32* %cIdxSlot
+  br label %cHdr
+cHdr:
+  %cIdx = load i32, i32* %cIdxSlot
+  %cDone = icmp sge i32 %cIdx, %len
+  br i1 %cDone, label %cFin, label %cBody
+cBody:
+  %srcPtr = getelementptr i8, i8* %text, i32 %cIdx
+  %byte = load i8, i8* %srcPtr
+  %dstIdx = add i32 %leftPad, %cIdx
+  %dstPtr = getelementptr i8, i8* %buf, i32 %dstIdx
+  store i8 %byte, i8* %dstPtr
+  %cNext = add i32 %cIdx, 1
+  store i32 %cNext, i32* %cIdxSlot
+  br label %cHdr
+cFin:
+  %rIdxSlot = alloca i32
+  store i32 0, i32* %rIdxSlot
+  br label %rHdr
+rHdr:
+  %rIdx = load i32, i32* %rIdxSlot
+  %rDone = icmp sge i32 %rIdx, %rightPad
+  br i1 %rDone, label %rFin, label %rBody
+rBody:
+  %rDstIdx0 = add i32 %leftPad, %len
+  %rDstIdx = add i32 %rDstIdx0, %rIdx
+  %rPtr = getelementptr i8, i8* %buf, i32 %rDstIdx
+  store i8 32, i8* %rPtr
+  %rNext = add i32 %rIdx, 1
+  store i32 %rNext, i32* %rIdxSlot
+  br label %rHdr
+rFin:
+  %termPtr = getelementptr i8, i8* %buf, i32 %width
+  store i8 0, i8* %termPtr
+  ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerDebugQuoteRuntime()
+{
+    const std::string fnName = "@axea.debug.quote_str";
+    if (debugQuoteRegistered_)
+    {
+        return fnName;
+    }
+    debugQuoteRegistered_ = true;
+
+    // Registered exactly once, named registers throughout (see
+    // registerAlignPadRuntime's own identical reasoning) - mallocs
+    // len+3 bytes ('"' + text + '"' + '\0'), copies `text`'s own bytes
+    // unchanged (no escaping of embedded quotes/backslashes - see
+    // docs/language/0058-debug-formatting.md's own Known Imprecision).
+    toStrRuntimeText_ << R"(
+define i8* @axea.debug.quote_str(i8* %text) {
+entry:
+  %len64 = call i64 @strlen(i8* %text)
+  %len = trunc i64 %len64 to i32
+  %bufSize0 = add i32 %len, 3
+  %bufSize64 = zext i32 %bufSize0 to i64
+  %buf = call i8* @malloc(i64 %bufSize64)
+  store i8 34, i8* %buf
+  %idxSlot = alloca i32
+  store i32 0, i32* %idxSlot
+  br label %hdr
+hdr:
+  %idx = load i32, i32* %idxSlot
+  %done = icmp sge i32 %idx, %len
+  br i1 %done, label %fin, label %body
+body:
+  %srcPtr = getelementptr i8, i8* %text, i32 %idx
+  %byte = load i8, i8* %srcPtr
+  %dstIdx = add i32 %idx, 1
+  %dstPtr = getelementptr i8, i8* %buf, i32 %dstIdx
+  store i8 %byte, i8* %dstPtr
+  %idxNext = add i32 %idx, 1
+  store i32 %idxNext, i32* %idxSlot
+  br label %hdr
+fin:
+  %closeIdx = add i32 %len, 1
+  %closePtr = getelementptr i8, i8* %buf, i32 %closeIdx
+  store i8 34, i8* %closePtr
+  %termIdx = add i32 %len, 2
+  %termPtr = getelementptr i8, i8* %buf, i32 %termIdx
+  store i8 0, i8* %termPtr
+  ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::stringifyValueDebug(int reg, FunctionContext& fctx)
+{
+    const std::string type = typeOf(reg, fctx);
+    if (type == "i8*" || type == "{i32, i8*}*")
+    {
+        const std::string rawPtr = resolveStrPtrOfType(type, ref(reg, fctx), fctx);
+        const std::string fnName = registerDebugQuoteRuntime();
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(i8* " << rawPtr << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    return stringifyValue(reg, fctx);
+}
+
 std::string LlvmIrEmitter::registerOptionalToStrRuntime(const std::string& optionalType)
 {
     if (const auto it = optionalToStrFnByOptionalType_.find(optionalType);
@@ -1013,6 +1384,106 @@ issome:
 isnone:
   %nonePtr = getelementptr [5 x i8], [5 x i8]* @axea.str.none, i64 0, i64 0
   ret i8* %nonePtr
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerResultToStrRuntime(const std::string& resultType)
+{
+    if (const auto it = resultToStrFnByResultType_.find(resultType);
+        it != resultToStrFnByResultType_.end())
+    {
+        return it->second;
+    }
+
+    const std::string okType = resultOkPayloadType(resultType);
+    const std::string errType = resultErrPayloadType(resultType);
+    // "%axea.Result.<id>" - the id is everything after the last '.'.
+    const std::string idStr = resultType.substr(resultType.rfind('.') + 1);
+    const std::string fnName = "@axea.result." + idStr + ".to_str";
+    resultToStrFnByResultType_[resultType] = fnName;
+
+    // Shared by both the Ok and Err branches below - each payload type is
+    // independently restricted to i32/i64/f64/bool, the same set
+    // registerOptionalToStrRuntime's own single payload already is (see
+    // that function's own comment for why: Ok(x)/Err(e) themselves accept
+    // any payload type, only *printing* one is this narrow).
+    // Distinct destination register names per branch (`okPayloadStr`/
+    // `errPayloadStr`, not a shared `payloadStr`) - both branches live in
+    // the same function, and LLVM requires every named value defined
+    // exactly once *per function*, not merely once per basic block, even
+    // when (as here) the two blocks are mutually exclusive at runtime.
+    auto payloadToStrCall = [this](const std::string& payloadType,
+                                   const char* payloadVar,
+                                   const char* destVar) -> std::string
+    {
+        if (payloadType == "i32")
+        {
+            registerI32ToStrRuntime();
+            return "  %" + std::string(destVar) + " = call i8* @axea.i32.to_str(i32 %" +
+                   payloadVar + ")\n";
+        }
+        if (payloadType == "i64")
+        {
+            registerI64ToStrRuntime();
+            return "  %" + std::string(destVar) + " = call i8* @axea.i64.to_str(i64 %" +
+                   payloadVar + ")\n";
+        }
+        if (payloadType == "double")
+        {
+            registerF64ToStrRuntime();
+            return "  %" + std::string(destVar) + " = call i8* @axea.f64.to_str(double %" +
+                   payloadVar + ")\n";
+        }
+        if (payloadType == "i1")
+        {
+            registerBoolToStrRuntime();
+            return "  %" + std::string(destVar) + " = call i8* @axea.bool.to_str(i1 %" +
+                   payloadVar + ")\n";
+        }
+        throw std::runtime_error(
+            "printing Result<T,E> is only supported for T,E in {i32, i64, f64, bool} this "
+            "phase, found payload type " +
+            payloadType);
+    };
+    const std::string okToStrCall = payloadToStrCall(okType, "okPayload", "okPayloadStr");
+    const std::string errToStrCall = payloadToStrCall(errType, "errPayload", "errPayloadStr");
+
+    if (!resultToStrGlobalsRegistered_)
+    {
+        resultToStrGlobalsRegistered_ = true;
+        // "Ok(%s)\00" is 6 characters + terminator; "Err(%s)\00" is 7 + 1.
+        toStrRuntimeText_ << R"(
+@axea.fmt.ok = private unnamed_addr constant [7 x i8] c"Ok(%s)\00"
+@axea.fmt.err = private unnamed_addr constant [8 x i8] c"Err(%s)\00"
+)";
+    }
+
+    // A real sprintf call, same as registerOptionalToStrRuntime's own - 48
+    // bytes comfortably covers "Err(" + the longest payload rendering (32
+    // bytes, f64's own bound) + ")" + terminator.
+    toStrRuntimeText_ << R"(
+define i8* @axea.result.)"
+                      << idStr << "." << R"(to_str()" << resultType << R"( %v) {
+entry:
+  %isOk = extractvalue )"
+                      << resultType << R"( %v, 0
+  br i1 %isOk, label %isok, label %iserr
+isok:
+  %okPayload = extractvalue )"
+                      << resultType << R"( %v, 1
+)" << okToStrCall << R"(  %okBuf = call i8* @malloc(i64 48)
+  %okFmtPtr = getelementptr [7 x i8], [7 x i8]* @axea.fmt.ok, i64 0, i64 0
+  %okIgnored = call i32 (i8*, i8*, ...) @sprintf(i8* %okBuf, i8* %okFmtPtr, i8* %okPayloadStr)
+  ret i8* %okBuf
+iserr:
+  %errPayload = extractvalue )"
+                      << resultType << R"( %v, 2
+)" << errToStrCall << R"(  %errBuf = call i8* @malloc(i64 48)
+  %errFmtPtr = getelementptr [8 x i8], [8 x i8]* @axea.fmt.err, i64 0, i64 0
+  %errIgnored = call i32 (i8*, i8*, ...) @sprintf(i8* %errBuf, i8* %errFmtPtr, i8* %errPayloadStr)
+  ret i8* %errBuf
 }
 )";
     return fnName;
@@ -1262,6 +1733,14 @@ std::string LlvmIrEmitter::emitElementToStrCall(const std::string& elementType,
              << ")\n";
         return dest;
     }
+    if (isResultType(elementType))
+    {
+        const std::string fnName = registerResultToStrRuntime(elementType);
+        const std::string dest = "%t" + std::to_string(nextTmp++);
+        body << "  " << dest << " = call i8* " << fnName << "(" << elementType << " " << valueRef
+             << ")\n";
+        return dest;
+    }
     if (isNamedStructPointerType(elementType))
     {
         // Pre-registered, unconditionally, by emitStructToStringHelpers -
@@ -1315,6 +1794,110 @@ void LlvmIrEmitter::emitStructToStringHelpers(const IrProgram& program)
     {
         const std::string structType = "%" + name;
         const std::string pointerType = structType + "*";
+
+        // Display trait dispatch (see docs/language/0062-display-
+        // trait.md) - when `name` has a registered `impl Display`,
+        // `@axea.tostring.<name>` calls the user's own already-compiled
+        // "format" function (an entirely ordinary function by this
+        // point, emitted by emitFunction like any other) into a fresh
+        // `@axea.strbuf` - the exact same `{i32, i32, i8*}*` header
+        // shape `llvmType("Buffer")` itself produces, confirmed, not
+        // assumed, so the strbuf pointer is passed to `format`'s own
+        // `Buffer`-typed parameter with no bitcast needed at all - then
+        // returns `@axea.strbuf.finish`'s own result directly, instead
+        // of building the default `Name { field: value, ... }` text
+        // below.
+        if (const auto implIt = program.displayImpls.find(name);
+            implIt != program.displayImpls.end())
+        {
+            std::ostringstream displayBody;
+            displayBody << "define i8* @axea.tostring." << name << "(" << pointerType << " %v) {\n";
+            displayBody << "entry:\n";
+            displayBody << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+            displayBody << "  call void @" << implIt->second << "(" << pointerType
+                        << " %v, {i32, i32, i8*}* %buf)\n";
+            displayBody << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+            displayBody << "  ret i8* %result\n";
+            displayBody << "}\n";
+            toStrRuntimeText_ << "\n" << displayBody.str();
+            continue;
+        }
+
+        // `enum` (see docs/language/0064-enums.md) - `name` is really a flattened
+        // `{i32 tag, <every variant's own fields concatenated>}` struct (see
+        // IrGenerator::generate's own comment). A real, tag-aware stringifier: switch on the
+        // tag, then for the matched variant build "VariantName(field0, field1, ...)" (bare
+        // "VariantName" for a no-payload variant) - reusing emitElementToStrCall per field, the
+        // exact same generic "stringify any value" dispatch the default struct-to-string body
+        // just below already uses, so an enum field can be any printable type (str/struct/
+        // collection/Optional/Result included, not restricted the way Result<T,E>'s own
+        // printing is - see that doc's own Known Imprecision for why *its* restriction exists
+        // and doesn't apply here).
+        if (const auto enumIt = program.enums.find(name); enumIt != program.enums.end())
+        {
+            registerStrbufRuntime();
+            std::ostringstream body;
+            int nextTmp = 0;
+            body << "define i8* @axea.tostring." << name << "(" << pointerType << " %v) {\n";
+            body << "entry:\n";
+            body << "  %tagPtr = getelementptr " << structType << ", " << pointerType
+                 << " %v, i32 0, i32 0\n";
+            body << "  %tag = load i32, i32* %tagPtr\n";
+            body << "  switch i32 %tag, label %axea_unreachable [\n";
+            for (std::size_t vi = 0; vi < enumIt->second.size(); ++vi)
+            {
+                body << "    i32 " << vi << ", label %variant" << vi << "\n";
+            }
+            body << "  ]\n";
+
+            for (std::size_t vi = 0; vi < enumIt->second.size(); ++vi)
+            {
+                const auto& [variantName, fieldCount] = enumIt->second[vi];
+                body << "variant" << vi << ":\n";
+                if (fieldCount == 0)
+                {
+                    body << "  ret i8* " << stringPtrConstant(variantName) << "\n";
+                    continue;
+                }
+                const std::string bufVar = "%buf" + std::to_string(vi);
+                body << "  " << bufVar << " = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+                body << "  call void @axea.strbuf.append({i32, i32, i8*}* " << bufVar << ", i8* "
+                     << stringPtrConstant(variantName + "(") << ")\n";
+                for (int fi = 0; fi < fieldCount; ++fi)
+                {
+                    if (fi > 0)
+                    {
+                        body << "  call void @axea.strbuf.append({i32, i32, i8*}* " << bufVar
+                             << ", i8* " << stringPtrConstant(", ") << ")\n";
+                    }
+                    const auto [fieldIndex, fieldLlvmType] =
+                        fieldIndexAndType(name, variantName + "_" + std::to_string(fi));
+                    const std::string fieldPtr =
+                        "%v" + std::to_string(vi) + "fptr" + std::to_string(fi);
+                    const std::string fieldVal =
+                        "%v" + std::to_string(vi) + "fval" + std::to_string(fi);
+                    body << "  " << fieldPtr << " = getelementptr " << structType << ", "
+                         << pointerType << " %v, i32 0, i32 " << fieldIndex << "\n";
+                    body << "  " << fieldVal << " = load " << fieldLlvmType << ", " << fieldLlvmType
+                         << "* " << fieldPtr << "\n";
+                    const std::string fieldStr =
+                        emitElementToStrCall(fieldLlvmType, fieldVal, body, nextTmp);
+                    body << "  call void @axea.strbuf.append({i32, i32, i8*}* " << bufVar
+                         << ", i8* " << fieldStr << ")\n";
+                }
+                body << "  call void @axea.strbuf.append({i32, i32, i8*}* " << bufVar << ", i8* "
+                     << stringPtrConstant(")") << ")\n";
+                body << "  %result" << vi << " = call i8* @axea.strbuf.finish({i32, i32, i8*}* "
+                     << bufVar << ")\n";
+                body << "  ret i8* %result" << vi << "\n";
+            }
+            body << "axea_unreachable:\n";
+            body << "  unreachable\n";
+            body << "}\n";
+            toStrRuntimeText_ << "\n" << body.str();
+            continue;
+        }
+
         const std::string openBrace = stringPtrConstant(name + " { ");
 
         std::ostringstream body;
@@ -1560,6 +2143,58 @@ std::string LlvmIrEmitter::registerCollectionToStrRuntime(const std::string& llv
         return fnName;
     }
 
+    if (isSliceType(llvmType))
+    {
+        // {T*, i32} passed *by value* (see docs/language/0032-slices.md and
+        // docs/language/0056-slice-printing.md) - both fields come straight
+        // out of the already-in-hand struct via `extractvalue`, unlike
+        // every branch above which GEPs/loads its length and data pointer
+        // out of a heap record reached through a pointer parameter.
+        // Otherwise identical to the List<T> branch just above: same
+        // bracket-and-comma loop, same single-index GEP element access
+        // emitIndexGet's own isSliceType branch already uses.
+        const std::string elementType = sliceElementType(llvmType);
+
+        body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
+        body << "entry:\n";
+        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << openBracket
+             << ")\n";
+        body << "  %data = extractvalue " << llvmType << " %v, 0\n";
+        body << "  %len = extractvalue " << llvmType << " %v, 1\n";
+        body << "  %idxSlot = alloca i32\n";
+        body << "  store i32 0, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loophdr:\n";
+        body << "  %idx = load i32, i32* %idxSlot\n";
+        body << "  %loopDone = icmp sge i32 %idx, %len\n";
+        body << "  br i1 %loopDone, label %loopdone, label %loopbody\n";
+        body << "loopbody:\n";
+        body << "  %notFirst = icmp sgt i32 %idx, 0\n";
+        body << "  br i1 %notFirst, label %addComma, label %afterComma\n";
+        body << "addComma:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << comma << ")\n";
+        body << "  br label %afterComma\n";
+        body << "afterComma:\n";
+        body << "  %elemPtr = getelementptr " << elementType << ", " << elementType
+             << "* %data, i32 %idx\n";
+        body << "  %elemVal = load " << elementType << ", " << elementType << "* %elemPtr\n";
+        const std::string elemStr = emitElementToStrCall(elementType, "%elemVal", body, nextTmp);
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << elemStr << ")\n";
+        body << "  %idxNext = add i32 %idx, 1\n";
+        body << "  store i32 %idxNext, i32* %idxSlot\n";
+        body << "  br label %loophdr\n";
+        body << "loopdone:\n";
+        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << closeBracket
+             << ")\n";
+        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
+        body << "  ret i8* %result\n";
+        body << "}\n";
+
+        toStrRuntimeText_ << "\n" << body.str();
+        return fnName;
+    }
+
     // Fixed array (see docs/language/0031-arrays.md) - the element count
     // is statically known, so the loop is unrolled at this (LlvmIrEmitter-
     // build-time) point rather than emitted as a real runtime loop,
@@ -1641,6 +2276,14 @@ std::string LlvmIrEmitter::stringifyValueOfType(const std::string& type,
     if (isOptionalType(type))
     {
         const std::string fnName = registerOptionalToStrRuntime(type);
+        const int destReg = allocateRegister(fctx);
+        *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << type << " " << valueRef
+                  << ")\n";
+        return "%" + std::to_string(destReg);
+    }
+    if (isResultType(type))
+    {
+        const std::string fnName = registerResultToStrRuntime(type);
         const int destReg = allocateRegister(fctx);
         *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << type << " " << valueRef
                   << ")\n";
@@ -1779,13 +2422,41 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
                     ? registerOptionalInstantiationForLlvmPayload(typeOf(optionalNew->value, fctx))
                     : registerOptionalInstantiation(optionalNew->payloadTypeName);
         }
+        else if (const auto* resultNew = dynamic_cast<const IrResultNew*>(inst.get()))
+        {
+            // See docs/language/0063-result.md and IrResultNew's own
+            // comment in Ir.hpp - `value`'s own register gives one of the
+            // two payload types (Ok if isOk, Err otherwise);
+            // otherPayloadTypeName (an Axea type name, unlike `value`'s
+            // own already-LLVM register type) gives the other.
+            const std::string knownLlvmType = typeOf(resultNew->value, fctx);
+            const std::string otherLlvmType = llvmType(resultNew->otherPayloadTypeName);
+            fctx.registerTypes[resultNew->dest] = registerResultInstantiationForLlvmPayloads(
+                resultNew->isOk ? knownLlvmType : otherLlvmType,
+                resultNew->isOk ? otherLlvmType : knownLlvmType);
+        }
         else if (const auto* isSome = dynamic_cast<const IrOptionalIsSome*>(inst.get()))
         {
             fctx.registerTypes[isSome->dest] = "i1";
         }
         else if (const auto* unwrap = dynamic_cast<const IrOptionalUnwrap*>(inst.get()))
         {
-            fctx.registerTypes[unwrap->dest] = optionalPayloadType(typeOf(unwrap->object, fctx));
+            // Shared by Optional<T> and Result<T,E> (see
+            // docs/language/0063-result.md and IrOptionalUnwrap's own
+            // comment in Ir.hpp) - `object`'s own already-inferred
+            // register type tells us which concrete named type this is,
+            // so the right registration table is consulted either way.
+            const std::string objectType = typeOf(unwrap->object, fctx);
+            if (isResultType(objectType))
+            {
+                fctx.registerTypes[unwrap->dest] = unwrap->field == 2
+                                                       ? resultErrPayloadType(objectType)
+                                                       : resultOkPayloadType(objectType);
+            }
+            else
+            {
+                fctx.registerTypes[unwrap->dest] = optionalPayloadType(objectType);
+            }
         }
         else if (const auto* toCstr = dynamic_cast<const IrToCstr*>(inst.get()))
         {
@@ -2175,6 +2846,31 @@ void LlvmIrEmitter::collectStrings(const std::vector<std::unique_ptr<IrInst>>& i
             collectStrings(branch->thenBlock);
             collectStrings(branch->elseBlock);
         }
+        else if (const auto* loop = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            // Pre-existing gap, found while verifying
+            // docs/language/0057-alignment.md's own worked example (a
+            // `for`-loop body containing an interpolated string with a
+            // literal segment, e.g. `"{a} {b}"`'s own literal " " piece
+            // between the two expression pieces): this recursion into
+            // IrBranch's own two blocks was never extended to IrLoop's
+            // conditionBlock/body, so any string *literal* appearing
+            // inside a loop (an IrConstString `.value`, produced for the
+            // literal-text pieces of an interpolated string, or a bare
+            // string literal used directly) was never hoisted into this
+            // one-time snapshot - only for it to be referenced via
+            // `stringGlobalByLiteral_.at(...)` at real emission time,
+            // throwing `std::out_of_range` (the interpreter and both
+            // compiled optimization levels the usual verification
+            // discipline runs never exercise this exact "literal text
+            // inside a loop body" combination in existing tests/examples,
+            // which is how this went unnoticed). Recursing here the same
+            // way IrBranch's own two blocks already do fixes every case,
+            // nested loops included, since this function is naturally
+            // recursive.
+            collectStrings(loop->conditionBlock);
+            collectStrings(loop->body);
+        }
     }
 }
 
@@ -2277,6 +2973,15 @@ namespace
             // a pointer - "null" is invalid IR for it. All-zero bits
             // constructs exactly None (hasValue = i1 0, payload = 0),
             // itself a perfectly valid "value not present" sentinel.
+            return "zeroinitializer";
+        }
+        if (valueLlvmType.starts_with("%axea.Result."))
+        {
+            // Same reasoning as Optional's own case just above (see
+            // docs/language/0063-result.md) - all-zero bits constructs a
+            // structurally valid Err(<zero>) (isOk = i1 0), not a
+            // meaningful real error, but a perfectly fine "value not
+            // present" sentinel for the identical reason.
             return "zeroinitializer";
         }
         return "null"; // every other valid V is pointer-shaped
@@ -6319,6 +7024,29 @@ LlvmIrEmitter::IndexableView LlvmIrEmitter::resolveIndexableView(int objectReg,
     const std::string objectType = typeOf(objectReg, fctx);
     const std::string objectRef = ref(objectReg, fctx);
 
+    if (isSliceType(objectType))
+    {
+        // {T*, i32} passed *by value* (see docs/language/0032-slices.md and
+        // docs/language/0056-slice-printing.md) - both fields already sit
+        // directly in the by-value struct via `extractvalue`, no GEP/load
+        // needed (unlike the List branch below, which reaches through a
+        // pointer to a heap record). Only emitJoin ever actually reaches
+        // this branch in practice - emitStrSlice's own object is always
+        // str-coercible/Array/List, never a bare slice<T> (`array[a..b]`
+        // re-slicing a slice remains out of scope, per
+        // docs/language/0050-collection-join-and-slicing.md's own Known
+        // Imprecision).
+        const std::string elementType = sliceElementType(objectType);
+        const int dataReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataReg << " = extractvalue " << objectType << " " << objectRef
+                  << ", 0\n";
+        const int lenReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lenReg << " = extractvalue " << objectType << " " << objectRef
+                  << ", 1\n";
+        return IndexableView{
+            elementType, "%" + std::to_string(dataReg), "%" + std::to_string(lenReg)};
+    }
+
     if (isListType(objectType) && !isStringType(objectType))
     {
         // {i32, T*, i32}* - GEP+load both the length field (0) and the data
@@ -7258,6 +7986,35 @@ void LlvmIrEmitter::emitOptionalNew(const IrOptionalNew& optionalNew, FunctionCo
               << payloadType << " " << payloadRef << ", 1\n";
 }
 
+void LlvmIrEmitter::emitResultNew(const IrResultNew& resultNew, FunctionContext& fctx)
+{
+    // Ok(x)/Err(e) (see docs/language/0063-result.md) - the 3-field direct
+    // extension of emitOptionalNew's own `{i1, T}` construction just
+    // above: `{i1, T, E}` via three `insertvalue`s (isOk bit, Ok payload,
+    // Err payload) instead of two. Whichever payload `resultNew.value`
+    // doesn't cover gets `undef`, the identical "never observed, so
+    // `undef` is the correct spelling, not a placeholder" reasoning
+    // emitOptionalNew's own None case already established - every
+    // consumer here checks `isOk` before reading either payload.
+    const std::string resultType = typeOf(resultNew.dest, fctx);
+    const std::string okType = resultOkPayloadType(resultType);
+    const std::string errType = resultErrPayloadType(resultType);
+    const std::string isOkBit = resultNew.isOk ? "1" : "0";
+    const int withTag = allocateRegister(fctx);
+    *fctx.out << "  %" << withTag << " = insertvalue " << resultType << " undef, i1 " << isOkBit
+              << ", 0\n";
+
+    const std::string okRef = resultNew.isOk ? ref(resultNew.value, fctx) : "undef";
+    const int withOkPayload = allocateRegister(fctx);
+    *fctx.out << "  %" << withOkPayload << " = insertvalue " << resultType << " %" << withTag
+              << ", " << okType << " " << okRef << ", 1\n";
+
+    const std::string errRef = !resultNew.isOk ? ref(resultNew.value, fctx) : "undef";
+    const int destReg = defineRegister(resultNew.dest, fctx);
+    *fctx.out << "  %" << destReg << " = insertvalue " << resultType << " %" << withOkPayload
+              << ", " << errType << " " << errRef << ", 2\n";
+}
+
 void LlvmIrEmitter::emitOptionalIsSome(const IrOptionalIsSome& isSome, FunctionContext& fctx)
 {
     // `.is_some()`/`.is_none()` (see docs/language/0052-optional.md) - a
@@ -7281,13 +8038,16 @@ void LlvmIrEmitter::emitOptionalIsSome(const IrOptionalIsSome& isSome, FunctionC
 void LlvmIrEmitter::emitOptionalUnwrap(const IrOptionalUnwrap& unwrap, FunctionContext& fctx)
 {
     // `?`'s then-branch and `.unwrap_or`'s is-some branch (see
-    // docs/language/0052-optional.md) - a plain `extractvalue` of field 1;
-    // the surrounding IrBranch each is emitted inside already guarantees
-    // hasValue is true whenever this runs, so no check is needed here.
+    // docs/language/0052-optional.md) - a plain `extractvalue` of `field`
+    // (1 in every case but one: `?`'s Result-flavored Err-propagation
+    // path sets it to 2 - see docs/language/0063-result.md and this
+    // instruction's own comment in Ir.hpp); the surrounding IrBranch each
+    // is emitted inside already guarantees the extraction is safe
+    // whenever this runs, so no check is needed here.
     const std::string optionalType = typeOf(unwrap.object, fctx);
     const int destReg = defineRegister(unwrap.dest, fctx);
     *fctx.out << "  %" << destReg << " = extractvalue " << optionalType << " "
-              << ref(unwrap.object, fctx) << ", 1\n";
+              << ref(unwrap.object, fctx) << ", " << unwrap.field << "\n";
 }
 
 void LlvmIrEmitter::emitToCstr(const IrToCstr& toCstr, FunctionContext& fctx)
@@ -7692,7 +8452,73 @@ void LlvmIrEmitter::emitBufferAppendValue(const IrBufferAppendValue& appendValue
     // into a shared helper, per this codebase's own "separate over
     // shared" convention for whole operations.
     const std::string bufferRef = ref(appendValue.buffer, fctx);
-    const std::string textPtr = stringifyValue(appendValue.value, fctx);
+    std::string textPtr;
+    if (appendValue.debug)
+    {
+        // `{expr:?}` (see docs/language/0058-debug-formatting.md) -
+        // TypeChecker guarantees `formatSpec` is empty whenever `debug`
+        // is set, so this is checked first, independent of the
+        // formatSpec branch below.
+        textPtr = stringifyValueDebug(appendValue.value, fctx);
+    }
+    else if (appendValue.formatSpec.empty())
+    {
+        textPtr = stringifyValue(appendValue.value, fctx);
+    }
+    else
+    {
+        // `{expr:spec}` (see docs/language/0055-numeric-format-specs.md
+        // and docs/language/0057-alignment.md).
+        const FormatSpec spec = parseFormatSpec(appendValue.formatSpec);
+        if (spec.align == '\0')
+        {
+            // TypeChecker already validated the spec against this value's
+            // own checked type, so its LLVM type here is always exactly
+            // one of i32/i64/double.
+            const std::string elementType = typeOf(appendValue.value, fctx);
+            const std::string fnName = registerFormatRuntime(elementType, spec);
+            const int destReg = allocateRegister(fctx);
+            *fctx.out << "  %" << destReg << " = call i8* " << fnName << "(" << elementType << " "
+                      << ref(appendValue.value, fctx) << ")\n";
+            textPtr = "%" + std::to_string(destReg);
+        }
+        else
+        {
+            // Alignment applies to any text-representable type, not just
+            // numeric (see TypeChecker's own relaxation and
+            // registerAlignPadRuntime's header comment) - compute the
+            // piece's own unpadded core text first (a radix conversion or
+            // precision still delegates to registerFormatRuntime, called
+            // with width/zeroPad zeroed out so it produces natural-width
+            // text, reusing its existing conversion logic rather than
+            // duplicating it; anything else falls back to the same
+            // generic stringifyValue every unformatted piece already
+            // uses), then pad that text to width via the shared
+            // @axea.align.pad runtime function.
+            std::string coreTextPtr;
+            if (spec.type != '\0' || spec.precision.has_value())
+            {
+                FormatSpec unpadded = spec;
+                unpadded.width = 0;
+                unpadded.zeroPad = false;
+                const std::string elementType = typeOf(appendValue.value, fctx);
+                const std::string fnName = registerFormatRuntime(elementType, unpadded);
+                const int coreReg = allocateRegister(fctx);
+                *fctx.out << "  %" << coreReg << " = call i8* " << fnName << "(" << elementType
+                          << " " << ref(appendValue.value, fctx) << ")\n";
+                coreTextPtr = "%" + std::to_string(coreReg);
+            }
+            else
+            {
+                coreTextPtr = stringifyValue(appendValue.value, fctx);
+            }
+            const std::string padFnName = registerAlignPadRuntime();
+            const int paddedReg = allocateRegister(fctx);
+            *fctx.out << "  %" << paddedReg << " = call i8* " << padFnName << "(i8* " << coreTextPtr
+                      << ", i32 " << spec.width << ", i8 " << static_cast<int>(spec.align) << ")\n";
+            textPtr = "%" + std::to_string(paddedReg);
+        }
+    }
 
     const int textLen64Reg = allocateRegister(fctx);
     *fctx.out << "  %" << textLen64Reg << " = call i64 @strlen(i8* " << textPtr << ")\n";
@@ -8948,6 +9774,11 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitOptionalNew(*optionalNew, fctx);
             continue;
         }
+        if (const auto* resultNew = dynamic_cast<const IrResultNew*>(inst.get()))
+        {
+            emitResultNew(*resultNew, fctx);
+            continue;
+        }
         if (const auto* isSome = dynamic_cast<const IrOptionalIsSome*>(inst.get()))
         {
             emitOptionalIsSome(*isSome, fctx);
@@ -9350,6 +10181,53 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
     for (const auto& [name, fields] : program.structs)
     {
         const std::string pointerType = "%" + name + "*";
+
+        // Display trait dispatch (see docs/language/0062-display-
+        // trait.md) - this one function is the shared print path for
+        // every struct-printing call site (top-level auto-print,
+        // print()/write()'s own direct struct argument, and every
+        // nested-struct-in-struct/nested-struct-in-collection print),
+        // so patching it here covers all of them at once, the same way
+        // patching @axea.tostring.<name> above covers every
+        // interpolation/collection-stringify call site at once.
+        if (const auto implIt = program.displayImpls.find(name);
+            implIt != program.displayImpls.end())
+        {
+            registerStrbufRuntime();
+            out << "define void @axea.print." << name << "(" << pointerType << " %0) {\n";
+            out << "entry:\n";
+            out << "  %1 = call {i32, i32, i8*}* @axea.strbuf.new()\n";
+            out << "  call void @" << implIt->second << "(" << pointerType
+                << " %0, {i32, i32, i8*}* %1)\n";
+            out << "  %2 = call i8* @axea.strbuf.finish({i32, i32, i8*}* %1)\n";
+            out << "  %3 = call i32 (i8*, ...) @printf(i8* " << bareStrFmt << ", i8* %2)\n";
+            out << "  ret void\n";
+            out << "}\n\n";
+            continue;
+        }
+
+        // `enum` (see docs/language/0064-enums.md) - `name` is really a flattened
+        // `{i32 tag, <every variant's own fields concatenated>}` struct (see
+        // IrGenerator::generate's own comment on why), never the generic "print every field"
+        // struct printer below - that would leak the tag and every *other* variant's own
+        // undef/garbage fields. Delegates to @axea.tostring.<name> (always emitted somewhere
+        // in this same output - see emitStructToStringHelpers's own identical enum branch - no
+        // textual ordering constraint, LLVM doesn't require declare-before-use for module-level
+        // functions) then a single "%s" printf, the identical shape the Display-trait branch
+        // just above already established for the same reason (a real per-shape body, not the
+        // generic field-by-field one).
+        if (program.enums.contains(name))
+        {
+            registerStrbufRuntime();
+            out << "define void @axea.print." << name << "(" << pointerType << " %0) {\n";
+            out << "entry:\n";
+            out << "  %1 = call i8* @axea.tostring." << name << "(" << pointerType << " %0)\n";
+            out << "  %2 = call i32 (i8*, ...) @printf(i8* " << bareStrFmt << ", i8* %1)\n";
+            out << "  ret void\n";
+            out << "}\n\n";
+            continue;
+        }
+
         out << "define void @axea.print." << name << "(" << pointerType << " %0) {\n";
         out << "entry:\n";
         int nextReg = 1; // %0 is the incoming pointer param
@@ -9431,11 +10309,11 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
                 out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
                     << ", i8* " << utf8Ptr << ")\n";
             }
-            else if (isOptionalType(fieldLlvmType))
+            else if (isOptionalType(fieldLlvmType) || isResultType(fieldLlvmType))
             {
                 // Same "%s"-of-a-stringified-value approach as the i64/
                 // double branch above, and the top-level print dispatch's
-                // own Optional branch below (see
+                // own Optional/Result branch below (see
                 // docs/language/0052-optional.md) - checked before the
                 // generic "must be a nested struct pointer" fallback,
                 // which would otherwise misparse "%axea.Optional.<id>" as
@@ -9540,9 +10418,10 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << strFmt << ", i8* " << namePtr << ", i8* " << strPtr << ")\n";
         }
-        else if (isOptionalType(llvmTypeStr))
+        else if (isOptionalType(llvmTypeStr) || isResultType(llvmTypeStr))
         {
-            // "Some(<payload>)"/"None" (see docs/language/0052-optional.md)
+            // "Some(<payload>)"/"None"/"Ok(<payload>)"/"Err(<payload>)" (see
+            // docs/language/0052-optional.md, docs/language/0063-result.md)
             // - same "%s = %s\n" path i64/double just above use, checked
             // before the generic "must be a nested struct pointer"
             // fallback below, which would otherwise misparse
@@ -9635,10 +10514,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else if (isOptionalType(elementType))
+                else if (isOptionalType(elementType) || isResultType(elementType))
                 {
-                    // "Some(<payload>)"/"None" (see
-                    // docs/language/0052-optional.md) - checked before the
+                    // "Some(<payload>)"/"None"/"Ok(<payload>)"/
+                    // "Err(<payload>)" (see docs/language/0052-optional.md,
+                    // docs/language/0063-result.md) - checked before the
                     // generic "must be a nested struct pointer" fallback
                     // below, same reasoning as the char branch above.
                     const std::string strPtr = stringifyValueOfType(
@@ -9891,10 +10771,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else if (isOptionalType(elementType))
+                else if (isOptionalType(elementType) || isResultType(elementType))
                 {
-                    // "Some(<payload>)"/"None" (see
-                    // docs/language/0052-optional.md) - checked before the
+                    // "Some(<payload>)"/"None"/"Ok(<payload>)"/
+                    // "Err(<payload>)" (see docs/language/0052-optional.md,
+                    // docs/language/0063-result.md) - checked before the
                     // generic "must be a nested struct pointer" fallback
                     // below, same reasoning as the char branch above.
                     const std::string strPtr = stringifyValueOfType(
@@ -9992,10 +10873,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
             }
-            else if (isOptionalType(elementType))
+            else if (isOptionalType(elementType) || isResultType(elementType))
             {
-                // "Some(<payload>)"/"None" (see
-                // docs/language/0052-optional.md) - checked before the
+                // "Some(<payload>)"/"None"/"Ok(<payload>)"/"Err(<payload>)"
+                // (see docs/language/0052-optional.md,
+                // docs/language/0063-result.md) - checked before the
                 // generic "must be a nested struct pointer" fallback
                 // below, same reasoning as the char branch above.
                 const std::string strPtr =
@@ -10154,10 +11036,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                     out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                         << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
                 }
-                else if (isOptionalType(elementType))
+                else if (isOptionalType(elementType) || isResultType(elementType))
                 {
-                    // "Some(<payload>)"/"None" (see
-                    // docs/language/0052-optional.md) - checked before the
+                    // "Some(<payload>)"/"None"/"Ok(<payload>)"/
+                    // "Err(<payload>)" (see docs/language/0052-optional.md,
+                    // docs/language/0063-result.md) - checked before the
                     // generic "must be a nested struct pointer" fallback
                     // below, same reasoning as the char branch above.
                     const std::string strPtr = stringifyValueOfType(
@@ -10252,10 +11135,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
                 out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                     << bareStrFmt << ", i8* " << utf8Ptr << ")\n";
             }
-            else if (isOptionalType(elementType))
+            else if (isOptionalType(elementType) || isResultType(elementType))
             {
-                // "Some(<payload>)"/"None" (see
-                // docs/language/0052-optional.md) - checked before the
+                // "Some(<payload>)"/"None"/"Ok(<payload>)"/"Err(<payload>)"
+                // (see docs/language/0052-optional.md,
+                // docs/language/0063-result.md) - checked before the
                 // generic "must be a nested struct pointer" fallback
                 // below, same reasoning as the char branch above.
                 const std::string strPtr =
@@ -10414,6 +11298,13 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // LinkedList/SortedMap/SortedSet), which are all safe to emit much
     // later precisely because they're never used by value.
     out << optionalTypeDeclsText_.str();
+    // Result<T,E>'s own named type needs the identical by-value ordering
+    // treatment as Optional<T>'s just above (see docs/language/0063-result.md)
+    // - the same discovery pass (which runs inferTypes over every
+    // function/program.topLevel unconditionally) already populates
+    // resultTypeDeclsText_ too, since IrResultNew/IrOptionalUnwrap's own
+    // Result-aware type inference is reached by that identical walk.
+    out << resultTypeDeclsText_.str();
     out << "\ndeclare i8* @malloc(i64)\n";
     out << "declare i32 @printf(i8*, ...)\n";
     // String<>'s own construction/append need a runtime str length (see

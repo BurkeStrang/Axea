@@ -4,6 +4,7 @@
 #include "ir/Ir.hpp"
 #include "sema/RegionChecker.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -109,6 +110,24 @@ public:
     void defineIsBuffer(const std::string& name, bool isBuffer);
     std::optional<bool> findIsBuffer(const std::string& name) const;
 
+    // Same reasoning again, but string-valued rather than a bool disambiguating between two
+    // fixed kinds - a match scrutinee (see docs/language/0064-enums.md and
+    // IrGenerator::enumNameOfExpr) needs to know *which* of potentially many distinct
+    // user-declared enum types a local name holds, not just a yes/no between two builtins.
+    void defineEnumName(const std::string& name, std::string enumName);
+    std::optional<std::string> findEnumName(const std::string& name) const;
+
+    // Same reasoning again, but for *any* name whose own best-effort inferred Axea type name is
+    // known (a literal's own primitive type, a struct literal's own type name, ...) - not tied
+    // to any one disambiguation, unlike every map above. Used only by
+    // IrGenerator::simpleTypeOfExpr, to resolve a plain local through one level of assignment
+    // when deciding which alternative of a union type a value needs to be wrapped as (see
+    // docs/language/0065-unions.md) - IrGenerator otherwise keeps no real type table at all
+    // (see enumNameOfExpr's own comment), and this is deliberately no more general than that:
+    // a best-effort forwarding of the same narrow signal, not a real type inferer.
+    void defineSimpleType(const std::string& name, std::string simpleType);
+    std::optional<std::string> findSimpleType(const std::string& name) const;
+
 private:
     std::unordered_map<std::string, int> registers_;
     std::unordered_map<std::string, int> arrayLengths_;
@@ -119,6 +138,8 @@ private:
     std::unordered_map<std::string, bool> isSortedMapKinds_;
     std::unordered_map<std::string, bool> isSortedSetKinds_;
     std::unordered_map<std::string, bool> isBufferKinds_;
+    std::unordered_map<std::string, std::string> enumNames_;
+    std::unordered_map<std::string, std::string> simpleTypes_;
     IrScope* parent_;
     bool isBarrier_;
 };
@@ -152,6 +173,21 @@ private:
                                 const std::vector<Region>& regions);
 
     int lowerExpr(const Expr& expr, IrScope& scope, Context& ctx);
+    // `match` (see docs/language/0064-enums.md) - lowers arms[armIndex..] into a chain of
+    // nested IrBranch, mirroring exactly how `else if` chains already nest IfExpr (see
+    // lowerExpr's own IfExpr case) - each non-last arm becomes `tag == <its own declared
+    // variant index> ? <bind fields, lower body> : <recurse into the next arm>`; the last arm
+    // (TypeChecker already guarantees full coverage - see MatchExpr's own checkExpr comment)
+    // skips the comparison entirely and just lowers its own body directly, the same way a
+    // final bare `else` block does. `tagReg` is computed once, by the caller, and threaded
+    // through every recursion level rather than re-extracted at each one.
+    int lowerMatchArm(int scrutineeReg,
+                      int tagReg,
+                      const EnumDecl& enumDecl,
+                      const std::vector<MatchArm>& arms,
+                      std::size_t armIndex,
+                      IrScope& scope,
+                      Context& ctx);
     void lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx);
     // Shared by `while` (condition non-null, dest discarded by the caller)
     // and `loop` (condition null, dest is the loop's produced value).
@@ -275,7 +311,58 @@ private:
     std::optional<bool>
     isBufferExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
+    // Best-effort resolution of *which* registered enum type an expression's own value has -
+    // nullopt if it can't be determined (see docs/language/0064-enums.md). Needed only for a
+    // `match` scrutinee, which needs to know its own enum's declared variant *order* (to
+    // compute each named arm's own numeric tag to compare against - see lowerMatchArm), the
+    // one place this codebase's usual "no real type table" design genuinely needs a concrete
+    // type *name*, not just a two-way yes/no the way isBufferExpr/isSetExpr/... above need.
+    // Mirrors isBufferExpr's own exact resolution order: a direct variant-construction
+    // expression, a function parameter's own declared type, a tracked local (scope.findEnumName),
+    // or a called function's own declared return type.
+    std::optional<std::string>
+    enumNameOfExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+
+    // "T1 | T2 | ..." anonymous union types (see docs/language/0065-unions.md) - lower onto the
+    // exact same enum-as-flattened-struct machinery a real `enum` already uses. Auto-registers
+    // (if not already present) a synthetic EnumDecl for `canonicalName` into enums_ - one variant
+    // per "|"-separated alternative, named after that alternative's own canonical type name, with
+    // that one type as its single field - and returns it. A parallel copy of
+    // TypeChecker::resolveUnionType's own registration logic (see that function's comment for why
+    // this codebase's passes each keep their own copy rather than sharing one), minus the
+    // validation TypeChecker already performed on the whole program before IrGenerator ever runs.
+    const EnumDecl& registerUnionType(const std::string& canonicalName);
+    // Best-effort resolution of an expression's own "simple" Axea type name (a primitive, or a
+    // struct/enum's own name) - nullopt if it can't be determined. Used only to decide, at an
+    // implicit-union-wrap boundary (assignment/return/call argument - see wrapForUnion), *which*
+    // alternative of the target union a value corresponds to: a literal's own primitive type, a
+    // struct literal's own type name, a parameter/tracked-local's own declared/inferred type
+    // (IrScope::findSimpleType), or a called function's own declared return type. Deliberately no
+    // more general than that (e.g. arithmetic/`if`/`match` results aren't resolved) - this
+    // codebase's usual "no real type table" design (see enumNameOfExpr's own comment), scoped
+    // down to exactly what union wrapping needs; a value TypeChecker has already proven is a
+    // union member that this can't resolve is a real, if narrow, gap (see
+    // docs/language/0065-unions.md's own Known Imprecision).
+    std::optional<std::string>
+    simpleTypeOfExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+    // If `declaredTypeName` is a union and `valueReg`'s own resolved simple type (via
+    // simpleTypeOfExpr on `valueExpr`) is one of its alternatives, emits an IrStructNew wrapping
+    // `valueReg` into that alternative's own tagged variant and returns the new register;
+    // otherwise (not a union, or already exactly this union - e.g. forwarding an existing union
+    // value through another union-typed boundary) returns `valueReg` unchanged. Shared by the
+    // three boundaries TypeChecker's own isUnionMember gates (assignment, return, call argument).
+    int wrapForUnion(int valueReg,
+                     const Expr& valueExpr,
+                     const std::string& declaredTypeName,
+                     IrScope& scope,
+                     Context& ctx);
+
     std::unordered_map<std::string, const StructDecl*> structs_;
+    std::unordered_map<std::string, const EnumDecl*> enums_;
+    // Owns every synthetic union EnumDecl registerUnionType builds (see that function's own
+    // comment) - a real declared EnumDecl's pointer is instead owned by Program::items, which
+    // already outlives the generator.
+    std::vector<std::unique_ptr<EnumDecl>> unionDecls_;
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     // Stack of pre-loop scope snapshots, one per currently-open loop (top =
     // innermost). Pushed/popped by lowerLoop; read by

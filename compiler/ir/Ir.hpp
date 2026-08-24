@@ -528,7 +528,15 @@ struct IrOptionalNew final : IrInst
 
 // `.is_some()`/`.is_none()` (see docs/language/0052-optional.md) - `negate`
 // selects is_none (true) vs. is_some (false), avoiding a second near-
-// identical instruction type for what's otherwise the same i1 read.
+// identical instruction type for what's otherwise the same i1 read. Also
+// shared verbatim by Result<T,E>'s own `.is_ok()`/`.is_err()` (see
+// docs/language/0063-result.md): field 0 is "the positive-case tag" in
+// both Optional's `{i1, T}` and Result's `{i1, T, E}` layout, so this
+// instruction's own emission (a plain `extractvalue ..., 0`, optionally
+// xor'd) never needed to know which of the two it's reading - only
+// `LlvmIrEmitter`'s *type inference* for `.unwrap_or`/`?` (a different
+// instruction, IrOptionalUnwrap below) ever has to branch on which
+// concrete named type is involved.
 struct IrOptionalIsSome final : IrInst
 {
     int object;
@@ -538,10 +546,33 @@ struct IrOptionalIsSome final : IrInst
 // `?`'s then-branch unwrap and `.unwrap_or`'s is-some branch both extract
 // Optional<T>'s payload unconditionally (see docs/language/0052-optional.md)
 // - the IrBranch each is always emitted inside already guarantees hasValue
-// is true whenever this instruction actually runs.
+// is true whenever this instruction actually runs. `field` defaults to 1
+// (Optional's own, and Result<T,E>'s own Ok, payload position - both
+// layouts agree there, see IrOptionalIsSome's own comment for why) and is
+// set to 2 only by `?`'s Result-flavored Err-propagation path (see
+// docs/language/0063-result.md), to extract the Err payload instead - the
+// one position Optional's own `{i1, T}` layout has no equivalent of.
 struct IrOptionalUnwrap final : IrInst
 {
     int object;
+    int field = 1;
+};
+
+// `Ok(x)`/`Err(e)` (see docs/language/0063-result.md) - constructs a
+// Result<T,E> value, mirroring IrOptionalNew's own shape but for a
+// 3-field `{i1, T, E}` literal instead of `{i1, T}`: `value` is always a
+// real register (unlike IrOptionalNew's `value == -1` None case - Ok/Err
+// always carry a real payload, just never *both* at once).
+// `otherPayloadTypeName` is the canonical type name of whichever slot
+// `value` does *not* cover (E when isOk, T when !isOk) - always needed,
+// since a single register can only ever tell LLvmIrEmitter about one of
+// the two type parameters, unlike IrOptionalNew's `payloadTypeName`,
+// which is only ever needed for the *no-value-at-all* None case.
+struct IrResultNew final : IrInst
+{
+    bool isOk;
+    int value;
+    std::string otherPayloadTypeName;
 };
 
 // `object.to_cstr()` (see docs/language/0048-ffi.md) - `object` is always
@@ -575,6 +606,19 @@ struct IrBufferAppendValue final : IrInst
 {
     int buffer;
     int value;
+    // Raw `{expr:spec}` format-spec text (see
+    // docs/language/0055-numeric-format-specs.md), e.g. "05"/".2"/"08b" -
+    // empty for a plain `{expr}` piece with no format spec, which appends
+    // `value`'s own ordinary stringifyValue() representation exactly as
+    // before this phase. Always empty when `debug` below is set.
+    std::string formatSpec;
+    // `{expr:?}` (see docs/language/0058-debug-formatting.md) - debug
+    // representation: identical to the unformatted case except for
+    // str/String, which get wrapped in quotes. `{expr=}`'s own self-doc
+    // prefix needs no field here at all - IrGenerator lowers it as a
+    // separate, ordinary IrBufferAppend of a literal "<text>=" string,
+    // emitted immediately before this instruction.
+    bool debug = false;
 };
 
 // `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's
@@ -773,4 +817,24 @@ struct IrProgram
     std::vector<std::pair<std::string, int>> topLevelBindings;
     // struct name -> its fields, in declared order, as (fieldName, fieldType) pairs.
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> structs;
+    // struct name -> its `impl Display for <name>`'s own mangled `format`
+    // function name (see docs/language/0062-display-trait.md), when one
+    // was declared and passed TypeChecker's own conformance check. Only
+    // ever populated for the one compiler-recognized trait ("Display")
+    // that actually drives runtime stringification dispatch - a real
+    // `impl SomeOtherTrait for X` still compiles its own methods as
+    // ordinary functions (see `functions` above) but leaves this map
+    // untouched, since nothing consumes any other trait name yet.
+    std::unordered_map<std::string, std::string> displayImpls;
+    // `enum` declarations (see docs/language/0064-enums.md) - an enum's own runtime
+    // representation is stored in `structs` above too (the flattened `{i32 tag, <all variants'
+    // own fields concatenated>}` layout - see IrGenerator::generate's own comment for why
+    // reusing the struct machinery wholesale was worth it), but that alone can't tell
+    // LlvmIrEmitter which struct-name entries are *really* enums (needing a tag-aware
+    // print/tostring function, never the generic "print every field" one every ordinary struct
+    // gets) versus real structs. This is that distinguishing registry: enum name -> each
+    // variant's own (name, payload field count), in declared order - enough to recompute every
+    // variant's own field-index range within the flattened struct (variant i's own fields start
+    // right after the tag and every earlier variant's own field count).
+    std::unordered_map<std::string, std::vector<std::pair<std::string, int>>> enums;
 };

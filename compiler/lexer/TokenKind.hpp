@@ -60,6 +60,11 @@ enum class TokenKind
     Extern,
     As,
     Question,
+    Trait,
+    Impl,
+    Enum,
+    Match,
+    Pipe,
 
     EndOfFile,
     Invalid
@@ -120,6 +125,11 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Extern: return "Extern";
         case TokenKind::As: return "As";
         case TokenKind::Question: return "Question";
+        case TokenKind::Trait: return "Trait";
+        case TokenKind::Impl: return "Impl";
+        case TokenKind::Enum: return "Enum";
+        case TokenKind::Match: return "Match";
+        case TokenKind::Pipe: return "Pipe";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

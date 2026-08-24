@@ -1206,6 +1206,16 @@ TEST("LlvmIrEmitter's Buffer.append grows conditionally via a real br i1 branch,
     EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
 }
 
+TEST("LlvmIrEmitter's Buffer.write lowers identically to Buffer.append - same grow branch, same "
+     "copy-loop label, since 'write' is a plain alias (see docs/language/0061-buffer-write.md)")
+{
+    auto appendIr = emitLlvmIr("f() { b = Buffer()  b.append(\"hi\") }");
+    auto writeIr = emitLlvmIr("f() { b = Buffer()  b.write(\"hi\") }");
+    EXPECT_TRUE(writeIr.find("buffer.grow") != std::string::npos);
+    EXPECT_TRUE(writeIr.find("buffer.append.copy.header") != std::string::npos);
+    EXPECT_EQ(appendIr, writeIr);
+}
+
 TEST("LlvmIrEmitter's Buffer.append_line writes a trailing newline byte before the null "
      "terminator")
 {
@@ -1298,6 +1308,68 @@ TEST("LlvmIrEmitter prints a top-level Buffer binding via a direct %s of its dat
     auto ir = emitLlvmIr("b = Buffer()");
     EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
     EXPECT_TRUE(ir.find("@axea.print.i8") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.tostring.<Name> calls the user's own compiled 'format' function "
+     "into a fresh @axea.strbuf instead of building the default field-by-field text, when a "
+     "Display impl is registered for that struct (see docs/language/0062-display-trait.md)")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "impl Display for Point { "
+                         "  format(self, buf: Buffer) { buf.write(\"hi\") } "
+                         "} "
+                         "f(p: Point) -> String { return \"{p}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.tostring.Point(%Point* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call {i32, i32, i8*}* @axea.strbuf.new()") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @Point.format(%Point* %v, {i32, i32, i8*}* %buf)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)") !=
+                std::string::npos);
+    // The default field-by-field printer's own struct-name-prefix global
+    // ("Point { ") is never generated when Display dispatch takes over.
+    EXPECT_TRUE(ir.find("c\"Point { \\00\"") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.print.<Name> - the shared direct-print path for a top-level "
+     "binding, a bare print()/write() struct argument, and any nested struct field - also "
+     "dispatches to the user's 'format' function when a Display impl is registered")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "impl Display for Point { "
+                         "  format(self, buf: Buffer) { buf.write(\"hi\") } "
+                         "} "
+                         "p = Point { x: 1, y: 2 }");
+    EXPECT_TRUE(ir.find("define void @axea.print.Point(%Point* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @Point.format(%Point* %0, {i32, i32, i8*}* %1)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("%2 = call i8* @axea.strbuf.finish({i32, i32, i8*}* %1)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("%3 = call i32 (i8*, ...) @printf(i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter compiles impl Display's own 'format' method as an entirely ordinary "
+     "function, self and buf both real parameters with no special calling convention")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "impl Display for Point { "
+                         "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
+                         "} "
+                         "p = Point { x: 1, y: 2 }");
+    EXPECT_TRUE(ir.find("define void @Point.format(%Point* %0, {i32, i32, i8*}* %1) {") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter's struct-to-string dispatch is per-struct-type - a struct with no impl "
+     "Display in the same program still gets the default field-by-field printer")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "struct Other { n: i32 } "
+                         "impl Display for Point { "
+                         "  format(self, buf: Buffer) { buf.write(\"hi\") } "
+                         "} "
+                         "f(o: Other) -> String { return \"{o}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.tostring.Other(%Other* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Other { \\00\"") != std::string::npos);
 }
 
 TEST("LlvmIrEmitter represents char as i24, genuinely distinct from i32's own width - not a "
@@ -1626,6 +1698,144 @@ TEST("LlvmIrEmitter's parse<i32> resolves a String argument to a bare i8* first,
     EXPECT_TRUE(ir.find("call %axea.Optional.0 @axea.parse.i32(i8*") != std::string::npos);
 }
 
+TEST("LlvmIrEmitter represents an enum as a flattened {i32 tag, <every variant's own fields "
+     "concatenated>} struct, reusing the ordinary struct type-decl/malloc/GEP+store "
+     "machinery unchanged (see docs/language/0064-enums.md)")
+{
+    auto ir = emitLlvmIr("enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+                         "f() -> Shape { return Shape.Circle(5.0) }");
+    EXPECT_TRUE(ir.find("%Shape = type { i32, double, double, double }") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr %Shape, %Shape* %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's 'match' lowers to a nested icmp-eq/br chain against the tag field, "
+     "the exact same shape 'else if' chains already produce - no new branch instruction")
+{
+    auto ir = emitLlvmIr("enum Shape { Circle(f64)  Rectangle(f64, f64)  Point } "
+                         "area(s: Shape) -> f64 { "
+                         "  return match s { "
+                         "    Circle(r) => r "
+                         "    Rectangle(w, h) => w "
+                         "    Point => 0.0 "
+                         "  } "
+                         "}");
+    EXPECT_TRUE(ir.find("icmp eq i32") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") != std::string::npos);
+    // Field 0 is always the tag - a real match against a real variant's own payload field
+    // (index 1+) confirms binding extraction is wired up, not just the tag check.
+    EXPECT_TRUE(ir.find(", i32 0, i32 1") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.tostring.<EnumName> is a real tag-aware stringifier (a genuine "
+     "LLVM 'switch', not the generic 'print every field' struct-to-string body every ordinary "
+     "struct gets), producing \"VariantName(field0, ...)\" or bare \"VariantName\"")
+{
+    auto ir = emitLlvmIr("enum Shape { Circle(f64)  Point } "
+                         "f() -> String { return \"{Shape.Circle(5.0)}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.tostring.Shape(%Shape* %v) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("switch i32 %tag") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Circle(\\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Point\\00\"") != std::string::npos);
+    // The generic struct-to-string "Name { " opening brace text must never be generated for
+    // an enum - confirms the enum branch's own `continue` actually skipped the generic path.
+    EXPECT_TRUE(ir.find("c\"Shape { \\00\"") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.print.<EnumName> delegates to @axea.tostring.<EnumName> then a "
+     "single \"%s\" printf, the identical shape the Display-trait branch already established "
+     "- never the generic per-field struct printer, which would leak the tag and every other "
+     "variant's own garbage fields")
+{
+    auto ir = emitLlvmIr("enum Shape { Circle(f64)  Point } "
+                         "p = Shape.Circle(5.0)");
+    EXPECT_TRUE(ir.find("define void @axea.print.Shape(%Shape* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @axea.tostring.Shape(%Shape* %0)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's enum-to-string field access reuses fieldIndexAndType by the variant's "
+     "own synthetic field name, so a payload of any printable type (not just i32/i64/f64/bool) "
+     "works - unlike Result<T,E>'s own printing, which is restricted to those four")
+{
+    auto ir = emitLlvmIr("enum Message { Text(str) } "
+                         "f() -> String { return \"{Message.Text(\"hi\")}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.tostring.Message(%Message* %v) {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Ok(x)/Err(e) build a named 3-field {i1, T, E} struct via three "
+     "insertvalues, the direct extension of Optional<T>'s own 2-field {i1, T} construction "
+     "(see docs/language/0063-result.md)")
+{
+    auto ir = emitLlvmIr("f(a: i32, b: i32) -> Result<i32, i32> { "
+                         "  if b == 0 { return Err(0 - 1) } "
+                         "  return Ok(a / b) "
+                         "}");
+    EXPECT_TRUE(ir.find("%axea.Result.0 = type { i1, i32, i32 }") != std::string::npos);
+    EXPECT_TRUE(ir.find("insertvalue %axea.Result.0 undef, i1 1, 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("insertvalue %axea.Result.0 undef, i1 0, 0") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's Result<T,E> is a genuinely named type, registered before every by-value "
+     "use, exactly like Optional<T>'s own discovery-pass ordering requirement")
+{
+    auto ir = emitLlvmIr("f() -> Result<i32, i32> { return Ok(5) }");
+    const auto typeDeclPos = ir.find("%axea.Result.0 = type");
+    const auto firstUsePos = ir.find("%axea.Result.0", typeDeclPos + 1);
+    EXPECT_TRUE(typeDeclPos != std::string::npos);
+    EXPECT_TRUE(firstUsePos != std::string::npos);
+    EXPECT_TRUE(typeDeclPos < firstUsePos);
+}
+
+TEST("LlvmIrEmitter's '?' on a Result<T,E> operand reuses the exact same IrOptionalIsSome/"
+     "IrOptionalUnwrap instructions '?' on an Optional<T> operand does - field 0/1 mean the "
+     "same thing in both layouts, so no separate Result-specific check/unwrap codegen exists")
+{
+    auto ir = emitLlvmIr("inner(a: i32) -> Result<i32, i32> { return Ok(a) } "
+                         "outer(a: i32) -> Result<i32, i32> { x = inner(a)?  return Ok(x) }");
+    EXPECT_TRUE(ir.find("extractvalue %axea.Result.0") != std::string::npos);
+    // The Err-propagation path additionally extracts field 2 (the one
+    // position Optional<T>'s own {i1, T} layout has no equivalent of).
+    EXPECT_TRUE(ir.find(", 2\n") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's is_ok/is_err reuse emitOptionalIsSome verbatim (a plain field-0 "
+     "extractvalue, xor'd for is_err) - no separate Result-specific instruction exists")
+{
+    auto ir = emitLlvmIr("f() -> Result<i32, i32> { return Ok(5) } "
+                         "g() -> i32 { r = f()  ok = r.is_ok()  err = r.is_err()  return 0 }");
+    EXPECT_TRUE(ir.find("extractvalue %axea.Result.0") != std::string::npos);
+    EXPECT_TRUE(ir.find("xor i1") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.result.<id>.to_str builds \"Ok(%s)\"/\"Err(%s)\" via sprintf, "
+     "restricted to i32/i64/f64/bool payloads on each side independently, same restriction "
+     "registerOptionalToStrRuntime already has")
+{
+    auto ir = emitLlvmIr("f() -> Result<i32, i32> { return Ok(5) } "
+                         "g() -> String { return \"{f()}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.result.0.to_str(%axea.Result.0 %v)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Ok(%s)") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"Err(%s)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter throws a clear error printing a Result<T,E> whose payload isn't i32/i64/"
+     "f64/bool on either side, rather than emitting invalid IR")
+{
+    EXPECT_THROWS(emitLlvmIr("f() -> Result<i32, str> { return Ok(5) } "
+                             "g() -> String { return \"{f()}\" }"));
+}
+
+TEST("LlvmIrEmitter's sentinelFor Result<T,E> case returns zeroinitializer - a byval "
+     "aggregate, for which \"null\" is invalid IR")
+{
+    auto ir = emitLlvmIr("f() -> Result<i32, i32> { "
+                         "  m: Map<i32, Result<i32,i32>> = Map<i32, Result<i32,i32>>() "
+                         "  return m.get(1) "
+                         "}");
+    EXPECT_TRUE(ir.find("zeroinitializer") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter's parse<i64>() calls a single shared @axea.parse.i64 runtime function, "
      "the identical digit loop parse<i32>() uses just at 64-bit width (see "
      "docs/language/0051-numeric-widening.md)")
@@ -1923,6 +2133,21 @@ TEST("LlvmIrEmitter lowers a while loop's carried variable via alloca/load/store
     EXPECT_TRUE(ir.find("= phi") == std::string::npos);
 }
 
+TEST("LlvmIrEmitter hoists a string literal used inside a for-loop body's own interpolated "
+     "string (a literal piece between two expression pieces, e.g. \"{a} {b}\"'s own literal "
+     "\" \") - collectStrings' pre-pass previously recursed into IrBranch's own two blocks but "
+     "not IrLoop's conditionBlock/body, so this literal was never hoisted and its later "
+     "reference threw std::out_of_range at emission time; a real, pre-existing bug found while "
+     "verifying docs/language/0057-alignment.md's own worked example, unrelated to alignment "
+     "itself (reproduced with no format spec at all)")
+{
+    auto ir = emitLlvmIr("f(values: [i32; 2]) -> i32 { "
+                         "  for v in values { print(\"{v} suffix\") } "
+                         "  return 0 "
+                         "}");
+    EXPECT_TRUE(ir.find("c\" suffix\\00\"") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter marks an infinite loop with no break as unreachable at exit")
 {
     auto ir = emitLlvmIr("f() { loop { } }");
@@ -2010,4 +2235,208 @@ TEST("LlvmIrEmitter's .join() result is a fresh {i32, i8*}* String header, same 
 {
     auto ir = emitLlvmIr("f() -> String { numbers = [1, 2, 3] return numbers.join(\",\") }");
     EXPECT_TRUE(ir.find("ret {i32, i8*}*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers a self-contained sprintf-based format helper for a zero-padded "
+     "width spec, with the format string as a fixed global (not stringPtrConstant/hoistString - "
+     "see docs/language/0055-numeric-format-specs.md)")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 42 return \"{n:05}\" }");
+    EXPECT_TRUE(ir.find("@axea.fmt.spec.0 = private unnamed_addr constant") != std::string::npos);
+    EXPECT_TRUE(ir.find("c\"%05d\\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.format.0(i32 %v)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 (i8*, i8*, ...) @sprintf") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers a format helper for a radix conversion (x/X/o) that always "
+     "operates on the full 64-bit sign-extended value, regardless of the piece's i32/i64 type")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 42 return \"{n:x}\" }");
+    EXPECT_TRUE(ir.find("c\"%llx\\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("%vBits = sext i32 %v to i64") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers a format helper for a float precision spec using printf's own "
+     "%.Nf, not the hand-rolled binary path")
+{
+    auto ir = emitLlvmIr("f() -> String { pi = 3.14159 return \"{pi:.2}\" }");
+    EXPECT_TRUE(ir.find("c\"%.2f\\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.format.0(double %v)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's binary format spec is hand-rolled (no printf specifier exists for it), "
+     "computing digit count via a bit-shift loop rather than calling sprintf")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 42 return \"{n:b}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.format.0(i32 %v)") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 (i8*, i8*, ...) @sprintf") == std::string::npos);
+    EXPECT_TRUE(ir.find("countHdr:") != std::string::npos);
+    EXPECT_TRUE(ir.find("digitHdr:") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter memoizes registerFormatRuntime by (type, spec) so the same format spec used "
+     "twice for the same element type emits only one helper function")
+{
+    auto ir = emitLlvmIr("f() -> String { a = 1 b = 2 return \"{a:05} {b:05}\" }");
+    const auto first = ir.find("define i8* @axea.format.0(i32 %v)");
+    const auto second = ir.find("define i8* @axea.format.0(i32 %v)", first + 1);
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(second == std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.format.1(") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's slice<T> parameter is a by-value {T*, i32} fat pointer, not a pointer to a "
+     "heap record like every other collection - see docs/language/0056-slice-printing.md")
+{
+    auto ir = emitLlvmIr("f(s: slice<i32>) -> String { return s.join(\",\") }");
+    EXPECT_TRUE(ir.find("define {i32, i8*}* @f({i32*, i32} %0)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's collection stringifier for a slice<T> extracts its data pointer and "
+     "length via extractvalue (no GEP/load), unlike the pointer-based List<T> branch it "
+     "otherwise mirrors exactly")
+{
+    auto ir = emitLlvmIr("f(s: slice<i32>) -> String { return \"vals: {s}\" }");
+    EXPECT_TRUE(ir.find("define i8* @axea.tostring.collection.0({i32*, i32} %v)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("%data = extractvalue {i32*, i32} %v, 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("%len = extractvalue {i32*, i32} %v, 1") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr ([2 x i8], [2 x i8]* @axea.str.openbracket") !=
+                std::string::npos);
+}
+
+TEST("LlvmIrEmitter's .join() on a slice<T> extracts its data pointer/length via extractvalue "
+     "(resolveIndexableView's own by-value branch), then reuses the same join loop shape as "
+     "Array/List")
+{
+    auto ir = emitLlvmIr("f(s: slice<i32>) -> String { return s.join(\",\") }");
+    EXPECT_TRUE(ir.find("extractvalue {i32*, i32} %0, 0") != std::string::npos);
+    EXPECT_TRUE(ir.find("extractvalue {i32*, i32} %0, 1") != std::string::npos);
+    EXPECT_TRUE(ir.find("join.loop.header0") != std::string::npos);
+    EXPECT_TRUE(ir.find("join.append.copy.header") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's align spec calls the shared @axea.align.pad runtime function, passing "
+     "the align char's own raw code (60 '<', 62 '>', 94 '^') as a compile-time-known i8 "
+     "literal (see docs/language/0057-alignment.md)")
+{
+    auto ir = emitLlvmIr("f() -> String { name = \"hi\" return \"[{name:<10}]\" }");
+    EXPECT_TRUE(ir.find("call i8* @axea.align.pad(i8* %") != std::string::npos);
+    EXPECT_TRUE(ir.find(", i32 10, i8 60)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers @axea.align.pad at most once even across multiple differently-"
+     "aligned interpolation spans in the same program")
+{
+    auto ir = emitLlvmIr("g() -> String { name = \"x\" return \"{name:>1}{name:>2}{name:^3}\" }");
+    const auto first = ir.find("define i8* @axea.align.pad(");
+    const auto second = ir.find("define i8* @axea.align.pad(", first + 1);
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(second == std::string::npos);
+    EXPECT_TRUE(ir.find(", i32 1, i8 62)") != std::string::npos);
+    EXPECT_TRUE(ir.find(", i32 2, i8 62)") != std::string::npos);
+    EXPECT_TRUE(ir.find(", i32 3, i8 94)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter combines alignment with a radix conversion by first computing the "
+     "unpadded core text via registerFormatRuntime (width/zeroPad zeroed out, reusing its "
+     "existing hex conversion), then padding that text via @axea.align.pad")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 255 return \"{n:>10x}\" }");
+    const auto formatCall = ir.find("call i8* @axea.format.0(i32");
+    const auto padCall = ir.find("call i8* @axea.align.pad(i8* %", formatCall);
+    EXPECT_TRUE(formatCall != std::string::npos);
+    EXPECT_TRUE(padCall != std::string::npos && padCall > formatCall);
+    EXPECT_TRUE(ir.find(", i32 10, i8 62)") != std::string::npos);
+    // The core-text call itself has no width baked into its own format string
+    // (unpadded - "%llx", not "%010llx") - width belongs to align.pad alone.
+    EXPECT_TRUE(ir.find("c\"%llx\\00\"") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers a self-documenting '{n=}' piece as an ordinary literal-text append "
+     "(the raw source text plus '=', hoisted as a fixed string global) emitted immediately "
+     "before the value's own append - no new instruction field needed for self-doc at all "
+     "(see docs/language/0058-debug-formatting.md)")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 42 return \"{n=}\" }");
+    EXPECT_TRUE(ir.find("c\"n=\\00\"") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's debug format '{s:?}' calls the shared @axea.debug.quote_str runtime "
+     "function to wrap a str/String value in quotes")
+{
+    auto ir = emitLlvmIr("f() -> String { s = \"hi\" return \"{s:?}\" }");
+    EXPECT_TRUE(ir.find("call i8* @axea.debug.quote_str(i8* %") != std::string::npos);
+    EXPECT_TRUE(ir.find("define i8* @axea.debug.quote_str(i8* %text)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's debug format on a non-str type (i32) is identical to the unformatted "
+     "path - it calls @axea.i32.to_str directly, never @axea.debug.quote_str")
+{
+    auto ir = emitLlvmIr("f() -> String { n = 42 return \"{n:?}\" }");
+    EXPECT_TRUE(ir.find("call i8* @axea.i32.to_str(i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("@axea.debug.quote_str") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers @axea.debug.quote_str at most once even across multiple debug-"
+     "formatted str pieces in the same program")
+{
+    auto ir = emitLlvmIr("f() -> String { a = \"x\" b = \"y\" return \"{a:?}{b:?}\" }");
+    const auto first = ir.find("define i8* @axea.debug.quote_str(");
+    const auto second = ir.find("define i8* @axea.debug.quote_str(", first + 1);
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(second == std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers a union type onto the exact same flattened-struct machinery a real "
+     "enum uses - '|' isn't a legal LLVM identifier character, so the canonical \"i32|str\" name "
+     "is rewritten to \"i32.str\" wherever it becomes an actual LLVM symbol (see "
+     "docs/language/0065-unions.md)")
+{
+    auto ir = emitLlvmIr("f(x: i32 | str) -> i32 | str { return x }");
+    EXPECT_TRUE(ir.find("%i32.str = type { i32, i32, i8* }") != std::string::npos);
+    EXPECT_TRUE(ir.find("@f(%i32.str* %0)") != std::string::npos);
+    EXPECT_TRUE(ir.find("i32|str") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter implicitly wraps a plain i32 argument into a tagged union struct at a call "
+     "boundary - a real IrStructNew (insertvalue-free malloc+GEP+store, matching every other "
+     "enum construction), not just a type-level coercion with no codegen")
+{
+    auto ir = emitLlvmIr("f(x: i32 | str) -> i32 | str { return x } "
+                         "y = f(5)");
+    EXPECT_TRUE(ir.find("call i8* @malloc(") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr %i32.str, %i32.str* %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's union 'match' dispatches by each alternative's own tag - the same nested "
+     "icmp-eq/br/phi chain a real enum's match already lowers to")
+{
+    auto ir = emitLlvmIr("f(x: i32 | str) -> str { "
+                         "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
+                         "}");
+    EXPECT_TRUE(ir.find("icmp eq i32") != std::string::npos);
+    EXPECT_TRUE(ir.find(" phi ") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter forwards an already-union-typed value through another union-typed call "
+     "boundary without re-wrapping it - only one %i32.str allocation for the whole call chain")
+{
+    auto ir = emitLlvmIr("f(x: i32 | str) -> i32 | str { return x } "
+                         "g(x: i32 | str) -> i32 | str { return f(x) } "
+                         "y = g(5)");
+    // "bitcast i8* ... to %i32.str*" is the malloc+bitcast pair specific to allocating a *new*
+    // %i32.str struct - a type-scoped signal, unlike counting every "call i8* @malloc(" in the
+    // whole program text (which would also match mallocs inside always-emitted runtime helpers
+    // like @axea.strbuf.new/@axea.i32.to_str, never actually called by this program's own
+    // top-level code). Only one should appear: `g`'s own call to `f(5)` wraps the literal `5`
+    // once; `f` returning `x` straight back out, and `g` returning `f(x)` straight back out,
+    // both forward the already-tagged struct pointer with no wrapping of their own.
+    std::size_t allocCount = 0;
+    for (std::size_t pos = ir.find("to %i32.str*"); pos != std::string::npos;
+         pos = ir.find("to %i32.str*", pos + 1))
+    {
+        ++allocCount;
+    }
+    EXPECT_EQ(allocCount, 1);
 }

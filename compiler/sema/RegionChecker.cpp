@@ -221,6 +221,19 @@ void RegionChecker::registerDecls(const Program& program)
         {
             structs_[structDecl->name] = structDecl;
         }
+        else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
+        {
+            enums_[enumDecl->name] = enumDecl;
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // See docs/language/0062-display-trait.md - each impl method
+            // is registered exactly like a top-level FunctionDecl.
+            for (const auto& method : implDecl->methods)
+            {
+                functions_[method->name] = method.get();
+            }
+        }
     }
 }
 
@@ -413,6 +426,14 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
+        // `EnumName.Variant` (no parens - a no-payload variant, see
+        // docs/language/0064-enums.md and MethodCallExpr's own identical check above).
+        if (const auto* objectName = dynamic_cast<const NameExpr*>(field->object.get());
+            objectName && enums_.contains(objectName->name))
+        {
+            return RegionInfo{Region::Owned, "", ""};
+        }
+
         const RegionInfo objectInfo =
             regionOfExpr(*field->object, env, function, currentLoopBreakRegions);
         if (!objectInfo.structType.empty())
@@ -646,6 +667,23 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
     {
+        // `EnumName.Variant(args)` construction (see docs/language/0064-enums.md) - checked
+        // before recursing into `methodCall->object` as an ordinary value expression just
+        // below, which would otherwise throw "undefined variable" trying to look up a bare
+        // enum type name in `env`. Still walks each argument (a borrowed value wrapped in a
+        // variant's own payload could otherwise silently escape undetected - same reasoning
+        // SomeExpr/OkExpr/ErrExpr's own construction already established), always yields
+        // Owned overall (a freshly-built value, not an alias of anything).
+        if (const auto* objectName = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            objectName && enums_.contains(objectName->name))
+        {
+            for (const auto& argument : methodCall->arguments)
+            {
+                regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+            }
+            return RegionInfo{Region::Owned, "", ""};
+        }
+
         const RegionInfo objectInfo =
             regionOfExpr(*methodCall->object, env, function, currentLoopBreakRegions);
         for (const auto& argument : methodCall->arguments)
@@ -706,6 +744,20 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
+    // Ok(value)/Err(value) (see docs/language/0063-result.md) - same
+    // "still walked, always yields Owned" shape as SomeExpr above.
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        regionOfExpr(*okExpr->value, env, function, currentLoopBreakRegions);
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        regionOfExpr(*errExpr->value, env, function, currentLoopBreakRegions);
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
         // `expr?` unwraps Optional<T>'s payload - propagates the operand's
@@ -731,6 +783,39 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
             return elseInfo;
         }
         return thenInfo;
+    }
+
+    // `match` (see docs/language/0064-enums.md) - same "conservatively Borrowed if any branch
+    // could be" reasoning as IfExpr just above, generalized from two branches to N arms. Each
+    // arm gets its own fresh child RegionEnv for its own bound names (a variant's own extracted
+    // payload fields) - always Owned, the same "still walked, always Owned" treatment
+    // SomeExpr/OkExpr/ErrExpr's own payload already gets (a freshly-extracted value, not itself
+    // a reference back into the scrutinee - see those Expr types' own comments).
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        regionOfExpr(*matchExpr->scrutinee, env, function, currentLoopBreakRegions);
+        RegionInfo result{Region::Owned, "", ""};
+        bool haveResult = false;
+        for (const auto& arm : matchExpr->arms)
+        {
+            RegionEnv armEnv(&env);
+            for (const auto& bindingName : arm.bindingNames)
+            {
+                armEnv.define(bindingName, RegionInfo{Region::Owned, "", ""});
+            }
+            const RegionInfo armInfo =
+                regionOfExpr(*arm.body, armEnv, function, currentLoopBreakRegions);
+            if (armInfo.kind == Region::Borrowed)
+            {
+                return armInfo;
+            }
+            if (!haveResult)
+            {
+                result = armInfo;
+                haveResult = true;
+            }
+        }
+        return result;
     }
 
     if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
@@ -852,6 +937,13 @@ void RegionChecker::check(
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
             checkFunction(*function, capabilities.at(function->name));
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            for (const auto& method : implDecl->methods)
+            {
+                checkFunction(*method, capabilities.at(method->name));
+            }
         }
     }
 }

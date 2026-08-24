@@ -2,6 +2,7 @@
 
 #include "lexer/Lexer.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 Parser::Parser(std::vector<Token> tokens)
@@ -61,6 +62,38 @@ const Token& Parser::expect(TokenKind kind, const char* message)
 
 std::string Parser::parseTypeName()
 {
+    std::string first = parseTypeNameAtom();
+    if (current().kind != TokenKind::Pipe)
+    {
+        return first;
+    }
+
+    // "T1 | T2 | ..." anonymous union types (see docs/language/0065-unions.md)
+    // - lowered, from TypeChecker down, onto the exact same machinery a
+    // user-declared `enum` already has, structurally keyed the way
+    // Map<K,V>/Optional<T> are rather than nominally declared like
+    // struct/enum: sorted and deduplicated here so "i32 | str" and
+    // "str | i32" produce the identical canonical string, and thus compare
+    // equal and share one auto-registered synthetic enum (see
+    // TypeChecker::resolveUnionType).
+    std::vector<std::string> alternatives{std::move(first)};
+    while (match(TokenKind::Pipe))
+    {
+        alternatives.push_back(parseTypeNameAtom());
+    }
+    std::sort(alternatives.begin(), alternatives.end());
+    alternatives.erase(std::unique(alternatives.begin(), alternatives.end()), alternatives.end());
+
+    std::string canonical = alternatives.front();
+    for (std::size_t i = 1; i < alternatives.size(); ++i)
+    {
+        canonical += "|" + alternatives[i];
+    }
+    return canonical;
+}
+
+std::string Parser::parseTypeNameAtom()
+{
     if (match(TokenKind::LeftBracket))
     {
         // A full recursive parseTypeName() call, not a single Identifier
@@ -115,6 +148,17 @@ std::string Parser::parseTypeName()
         return "Map<" + keyType + "," + valueType + ">";
     }
 
+    // "Result<T,E>" - same two-type-argument shape as Map<K,V> above (see
+    // docs/language/0063-result.md).
+    if (name.text == "Result" && match(TokenKind::Less))
+    {
+        const std::string okType = parseTypeName();
+        expect(TokenKind::Comma, "expected ',' between Result Ok and Err types");
+        const std::string errType = parseTypeName();
+        expect(TokenKind::Greater, "expected '>' after Result Err type");
+        return "Result<" + okType + "," + errType + ">";
+    }
+
     // "SortedMap<key,value>" - same two-type-argument shape as Map<K,V>
     // above (see docs/language/0040-sorted-maps.md).
     if (name.text == "SortedMap" && match(TokenKind::Less))
@@ -141,6 +185,21 @@ std::unique_ptr<Stmt> Parser::parseItem()
     if (current().kind == TokenKind::Extern)
     {
         return parseExternDecl();
+    }
+
+    if (current().kind == TokenKind::Trait)
+    {
+        return parseTraitDecl();
+    }
+
+    if (current().kind == TokenKind::Impl)
+    {
+        return parseImplDecl();
+    }
+
+    if (current().kind == TokenKind::Enum)
+    {
+        return parseEnumDecl();
     }
 
     if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::LeftParen)
@@ -277,6 +336,135 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
         name.text, std::move(params), returnType, std::move(body));
 }
 
+Param Parser::parseSelfAwareParam(const std::string& selfType)
+{
+    // `self` (see docs/language/0062-display-trait.md) - unambiguous
+    // against a real parameter literally named `self` of some other type
+    // (`self: Foo`, legal but exotic), since that shape has a ':' right
+    // after the identifier and this only matches when it doesn't.
+    if (current().kind == TokenKind::Identifier && current().text == "self" &&
+        peek().kind != TokenKind::Colon)
+    {
+        advance();
+        return Param{"self", selfType, std::nullopt};
+    }
+    return parseParam();
+}
+
+std::unique_ptr<FunctionDecl> Parser::parseImplMethod(const std::string& typeName)
+{
+    const auto& name = expect(TokenKind::Identifier, "expected method name");
+    expect(TokenKind::LeftParen, "expected '(' after method name");
+
+    std::vector<Param> params;
+    if (current().kind != TokenKind::RightParen)
+    {
+        params.push_back(parseSelfAwareParam(typeName));
+        while (match(TokenKind::Comma))
+        {
+            if (current().kind == TokenKind::RightParen)
+            {
+                break;
+            }
+            params.push_back(parseSelfAwareParam(typeName));
+        }
+    }
+    expect(TokenKind::RightParen, "expected ')' after parameters");
+
+    std::optional<std::string> returnType;
+    if (match(TokenKind::Arrow))
+    {
+        returnType = parseTypeName();
+    }
+
+    std::unique_ptr<Expr> body;
+    if (match(TokenKind::FatArrow))
+    {
+        auto expr = parseExpression();
+        std::vector<std::unique_ptr<Stmt>> statements;
+        statements.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
+        body = std::make_unique<BlockExpr>(std::move(statements), nullptr);
+    }
+    else
+    {
+        body = parseBlock();
+    }
+
+    // Mangled with '.' (see ImplDecl's own comment) - permanently
+    // unreachable from ordinary call syntax, so this can never collide
+    // with, or be called directly as, a real user-declared function.
+    return std::make_unique<FunctionDecl>(
+        typeName + "." + name.text, std::move(params), returnType, std::move(body));
+}
+
+std::unique_ptr<Stmt> Parser::parseTraitDecl()
+{
+    advance(); // 'trait'
+    const auto& name = expect(TokenKind::Identifier, "expected trait name");
+    expect(TokenKind::LeftBrace, "expected '{' after trait name");
+
+    auto decl = std::make_unique<TraitDecl>();
+    decl->name = name.text;
+
+    while (current().kind != TokenKind::RightBrace)
+    {
+        const auto& methodName = expect(TokenKind::Identifier, "expected method name");
+        expect(TokenKind::LeftParen, "expected '(' after method name");
+
+        std::size_t paramCount = 0;
+        if (current().kind != TokenKind::RightParen)
+        {
+            parseSelfAwareParam("Self");
+            ++paramCount;
+            while (match(TokenKind::Comma))
+            {
+                if (current().kind == TokenKind::RightParen)
+                {
+                    break;
+                }
+                parseSelfAwareParam("Self");
+                ++paramCount;
+            }
+        }
+        expect(TokenKind::RightParen, "expected ')' after parameters");
+
+        // A trait method signature has no body - just optionally a
+        // return type, matching the source doc's own
+        // `format(self, buf: Buffer)` example (no `-> ...` at all there,
+        // since format's own result is unit).
+        if (match(TokenKind::Arrow))
+        {
+            parseTypeName();
+        }
+
+        decl->methods.push_back(TraitDecl::MethodSig{methodName.text, paramCount});
+    }
+    expect(TokenKind::RightBrace, "expected '}' after trait body");
+
+    return decl;
+}
+
+std::unique_ptr<Stmt> Parser::parseImplDecl()
+{
+    advance(); // 'impl'
+    const auto& traitName = expect(TokenKind::Identifier, "expected trait name after 'impl'");
+    expect(TokenKind::For, "expected 'for' after trait name in impl block");
+    const auto& typeName = expect(TokenKind::Identifier, "expected type name after 'for'");
+    expect(TokenKind::LeftBrace, "expected '{' after impl header");
+
+    auto decl = std::make_unique<ImplDecl>();
+    decl->traitName = traitName.text;
+    decl->typeName = typeName.text;
+
+    while (current().kind != TokenKind::RightBrace)
+    {
+        decl->methods.push_back(parseImplMethod(typeName.text));
+    }
+    expect(TokenKind::RightBrace, "expected '}' after impl body");
+
+    return decl;
+}
+
 Param Parser::parseExternParam()
 {
     const auto& name = expect(TokenKind::Identifier, "expected extern parameter name");
@@ -343,6 +531,73 @@ std::unique_ptr<Stmt> Parser::parseStructDecl()
     expect(TokenKind::RightBrace, "expected '}' after struct fields");
 
     return std::make_unique<StructDecl>(name.text, std::move(fields));
+}
+
+std::unique_ptr<Stmt> Parser::parseEnumDecl()
+{
+    expect(TokenKind::Enum, "expected 'enum'");
+    const auto& name = expect(TokenKind::Identifier, "expected enum name");
+    expect(TokenKind::LeftBrace, "expected '{' after enum name");
+
+    std::vector<EnumVariant> variants;
+    while (current().kind == TokenKind::Identifier)
+    {
+        const auto& variantName = advance();
+        std::vector<std::string> fieldTypes;
+        if (match(TokenKind::LeftParen))
+        {
+            if (current().kind != TokenKind::RightParen)
+            {
+                fieldTypes.push_back(parseTypeName());
+                while (match(TokenKind::Comma))
+                {
+                    fieldTypes.push_back(parseTypeName());
+                }
+            }
+            expect(TokenKind::RightParen, "expected ')' after variant payload types");
+        }
+        variants.push_back(EnumVariant{variantName.text, std::move(fieldTypes)});
+    }
+    expect(TokenKind::RightBrace, "expected '}' after enum variants");
+
+    return std::make_unique<EnumDecl>(name.text, std::move(variants));
+}
+
+std::unique_ptr<Expr> Parser::parseMatchExpr()
+{
+    expect(TokenKind::Match, "expected 'match'");
+    // Struct-literal parsing is disabled for the scrutinee, the same way
+    // an `if` condition already disables it - `match x { ... }`'s own
+    // `{` must start the arm list, not be misread as `x`'s own struct
+    // literal fields.
+    auto scrutinee = parseExpression(0, /*allowStructLiteral=*/false);
+    expect(TokenKind::LeftBrace, "expected '{' after match scrutinee");
+
+    std::vector<MatchArm> arms;
+    while (current().kind == TokenKind::Identifier)
+    {
+        const auto& variantName = advance();
+        std::vector<std::string> bindingNames;
+        if (match(TokenKind::LeftParen))
+        {
+            if (current().kind != TokenKind::RightParen)
+            {
+                bindingNames.push_back(expect(TokenKind::Identifier, "expected binding name").text);
+                while (match(TokenKind::Comma))
+                {
+                    bindingNames.push_back(
+                        expect(TokenKind::Identifier, "expected binding name").text);
+                }
+            }
+            expect(TokenKind::RightParen, "expected ')' after match arm bindings");
+        }
+        expect(TokenKind::FatArrow, "expected '=>' after match arm pattern");
+        auto body = parseExpression();
+        arms.push_back(MatchArm{variantName.text, std::move(bindingNames), std::move(body)});
+    }
+    expect(TokenKind::RightBrace, "expected '}' after match arms");
+
+    return std::make_unique<MatchExpr>(std::move(scrutinee), std::move(arms));
 }
 
 std::unique_ptr<Stmt> Parser::parseAssignment()
@@ -727,7 +982,21 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
     {
         if (match(TokenKind::Dot))
         {
-            const auto& field = expect(TokenKind::Identifier, "expected field name after '.'");
+            // `.write(...)` (see docs/language/0061-buffer-write.md) -
+            // "write" predates this as TokenKind::Write, a parameter
+            // capability-prefix keyword (docs/language/0049-printing-
+            // formatting.md's own precedent for `write(...)` at call
+            // position), so it never satisfies a plain `Identifier`
+            // expectation. Unambiguous here for the identical reason:
+            // `TokenKind::Write` only ever appears as a capability prefix
+            // inside `parseParam`'s own parameter-list parsing, a wholly
+            // different code path from postfix `.` access, so accepting
+            // it as a field/method name right after `.` can never
+            // misparse a real capability prefix as one.
+            const auto& field =
+                current().kind == TokenKind::Write
+                    ? advance()
+                    : expect(TokenKind::Identifier, "expected field name after '.'");
 
             // `object.method<T>(args)` (see docs/language/0046-generic-methods.md)
             // - committed to only on the exact 4-token lookahead
@@ -893,6 +1162,32 @@ std::int32_t Parser::decodeCharLiteral(const std::string& bytes)
     return codepoint;
 }
 
+std::unique_ptr<Expr> Parser::parseRawOrInterpolatedString(const std::string& tokenText)
+{
+    const bool raw = !tokenText.empty() && tokenText[0] == 'r';
+    const std::size_t prefixLen = raw ? 1 : 0;
+    const bool triple = tokenText.size() >= prefixLen + 3 && tokenText[prefixLen] == '"' &&
+                        tokenText[prefixLen + 1] == '"' && tokenText[prefixLen + 2] == '"';
+    const std::size_t quoteLen = triple ? 3 : 1;
+    const std::string content =
+        tokenText.substr(prefixLen + quoteLen, tokenText.size() - prefixLen - 2 * quoteLen);
+
+    // Raw strings (see docs/language/0059-raw-strings.md) disable
+    // interpolation entirely - the lexer's own scanRawStringSpan never
+    // treats '{'/'}' specially, so no unescaped '{' inside `content` was
+    // ever validated as a real expression span. Building an ordinary
+    // parseStringLiteral over it would therefore either misinterpret a
+    // literal '{' as the start of one, or reject '{{'/'}}' pairs that
+    // were never meant as escapes - so a raw literal becomes a plain
+    // StringExpr directly, content untouched, byte for byte.
+    if (raw)
+    {
+        return std::make_unique<StringExpr>(content);
+    }
+
+    return parseStringLiteral(content);
+}
+
 std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
 {
     std::vector<InterpolatedStringExpr::Piece> pieces;
@@ -919,16 +1214,28 @@ std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
             // nested braces (a struct literal, a block expression) - only
             // the top-level literal-text scan applies '{{'/'}}' escaping;
             // once inside an active expression span, every brace is a
-            // real Axea token.
+            // real Axea token. Also quote-aware (toggling `inString` on
+            // each '"') so a '}' inside a nested string literal argument
+            // (e.g. `{x.join("}")}` - see docs/language/0049-printing-
+            // formatting.md's own nested-string-literal follow-up) never
+            // prematurely ends the span - a real, narrow, pre-existing
+            // gap found while adding the format-spec colon scan just
+            // below, which needs the identical quote-awareness for its
+            // own reasons anyway.
             std::size_t j = i + 1;
             int depth = 1;
+            bool inString = false;
             while (j < text.size() && depth > 0)
             {
-                if (text[j] == '{')
+                if (text[j] == '"')
+                {
+                    inString = !inString;
+                }
+                else if (!inString && text[j] == '{')
                 {
                     ++depth;
                 }
-                else if (text[j] == '}')
+                else if (!inString && text[j] == '}')
                 {
                     --depth;
                     if (depth == 0)
@@ -943,10 +1250,109 @@ std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
                 throw std::runtime_error("unterminated interpolation expression in string literal");
             }
 
-            const std::string exprText = text.substr(i + 1, j - i - 1);
-            if (exprText.empty())
+            const std::string span = text.substr(i + 1, j - i - 1);
+            if (span.empty())
             {
                 throw std::runtime_error("empty interpolation expression '{}' in string literal");
+            }
+
+            // A top-level ':' (depth-tracked for '{[('/'}])', quote-aware
+            // the same way the span scan above is) splits the expression
+            // from an optional trailing format spec (see
+            // docs/language/0055-numeric-format-specs.md) - e.g.
+            // `{value:05}`. Never ambiguous with a struct literal's own
+            // `name: value` colons, which are always nested inside their
+            // own '{...}' (depth > 0 by the time they're reached).
+            std::size_t colonPos = std::string::npos;
+            {
+                int specDepth = 0;
+                bool specInString = false;
+                for (std::size_t k = 0; k < span.size(); ++k)
+                {
+                    const char sc = span[k];
+                    if (sc == '"')
+                    {
+                        specInString = !specInString;
+                    }
+                    else if (!specInString && (sc == '{' || sc == '[' || sc == '('))
+                    {
+                        ++specDepth;
+                    }
+                    else if (!specInString && (sc == '}' || sc == ']' || sc == ')'))
+                    {
+                        if (specDepth > 0)
+                        {
+                            --specDepth;
+                        }
+                    }
+                    else if (!specInString && specDepth == 0 && sc == ':')
+                    {
+                        colonPos = k;
+                        break;
+                    }
+                }
+            }
+
+            std::string exprText = span;
+            std::string formatSpec;
+            if (colonPos != std::string::npos)
+            {
+                exprText = span.substr(0, colonPos);
+                formatSpec = span.substr(colonPos + 1);
+                if (formatSpec.empty())
+                {
+                    throw std::runtime_error(
+                        "empty format spec after ':' in interpolation expression '{" + span + "}'");
+                }
+                if (exprText.empty())
+                {
+                    throw std::runtime_error("empty interpolation expression before ':' in '{" +
+                                             span + "}'");
+                }
+            }
+
+            // `{expr=}` (see docs/language/0058-debug-formatting.md) - a
+            // trailing '=' right before the ':spec' split point (or the
+            // closing '}' when there's no spec) marks self-documenting
+            // interpolation. Never ambiguous with a comparison operator:
+            // Axea has no expression-level '=' at all (assignment is
+            // statement-only), so a bare trailing '=' can only be this
+            // marker - guarded here purely so `==`/`!=`/`<=`/`>=` (each
+            // ending in '=' too, but never legal as a *trailing* token of
+            // a complete expression either, so this guard is about correct
+            // error attribution, not real ambiguity) fall through to the
+            // nested expression parse below and get its own clearer
+            // "unexpected token"/"expected expression" error instead of
+            // being silently misread as `{expr}=` for some truncated
+            // `expr`.
+            std::string selfDocPrefix;
+            if (!exprText.empty() && exprText.back() == '=' &&
+                (exprText.size() < 2 ||
+                 (exprText[exprText.size() - 2] != '=' && exprText[exprText.size() - 2] != '!' &&
+                  exprText[exprText.size() - 2] != '<' && exprText[exprText.size() - 2] != '>')))
+            {
+                exprText.pop_back();
+                if (exprText.empty())
+                {
+                    throw std::runtime_error("empty interpolation expression before '=' in '{" +
+                                             span + "}'");
+                }
+                selfDocPrefix = exprText;
+            }
+
+            // `{expr:?}` (see docs/language/0058-debug-formatting.md) - "?"
+            // is never itself a FormatSpec-grammar string (parseFormatSpec
+            // only ever accepts x/X/b/o as a type char), so it's peeled
+            // off here as a wholly separate, orthogonal piece-level flag
+            // rather than folded into FormatSpec.hpp's own shared grammar
+            // - debug mode is "which stringifier to call", not "how to
+            // format a number", and the doc never shows it combined with
+            // width/precision/radix/alignment.
+            bool debug = false;
+            if (formatSpec == "?")
+            {
+                debug = true;
+                formatSpec.clear();
             }
 
             if (!literal.empty())
@@ -968,7 +1374,8 @@ std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
                 throw std::runtime_error("unexpected token after interpolation expression '{" +
                                          exprText + "}'");
             }
-            pieces.push_back(InterpolatedStringExpr::Piece{"", std::move(exprAst)});
+            pieces.push_back(InterpolatedStringExpr::Piece{
+                "", std::move(exprAst), std::move(formatSpec), std::move(selfDocPrefix), debug});
 
             i = j + 1;
             continue;
@@ -1047,7 +1454,7 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     if (current().kind == TokenKind::String)
     {
         const auto token = advance();
-        return parseStringLiteral(token.text.substr(1, token.text.size() - 2));
+        return parseRawOrInterpolatedString(token.text);
     }
 
     if (current().kind == TokenKind::Char)
@@ -1094,6 +1501,11 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     if (current().kind == TokenKind::Loop)
     {
         return parseLoopExpr();
+    }
+
+    if (current().kind == TokenKind::Match)
+    {
+        return parseMatchExpr();
     }
 
     // `write(...)` (see docs/language/Axea_Printing_Formatting.md) - "write"
@@ -1279,6 +1691,36 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
                                          std::to_string(args.size()));
             }
             return std::make_unique<SomeExpr>(std::move(args.front()));
+        }
+
+        // `Ok(value)`/`Err(value)` (see docs/language/0063-result.md) - same
+        // one-runtime-argument shape as Some(value) above.
+        if (current().text == "Ok" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'Ok'");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after Ok(...) argument");
+            if (args.size() != 1)
+            {
+                throw std::runtime_error("Ok(...) expects exactly 1 argument, got " +
+                                         std::to_string(args.size()));
+            }
+            return std::make_unique<OkExpr>(std::move(args.front()));
+        }
+
+        if (current().text == "Err" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'Err'");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after Err(...) argument");
+            if (args.size() != 1)
+            {
+                throw std::runtime_error("Err(...) expects exactly 1 argument, got " +
+                                         std::to_string(args.size()));
+            }
+            return std::make_unique<ErrExpr>(std::move(args.front()));
         }
 
         // `None` (see docs/language/0052-optional.md) - a bare identifier,

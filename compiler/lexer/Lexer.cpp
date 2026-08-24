@@ -104,6 +104,18 @@ Token Lexer::nextToken()
         return lexNumber();
     }
 
+    // `r"..."` / `r"""..."""` (see docs/language/0059-raw-strings.md) -
+    // checked before the identifier branch below, since 'r' alone would
+    // otherwise lex as a one-character identifier. Unambiguous: an
+    // identifier `r` immediately followed by `"` with zero whitespace
+    // between has no other legal meaning in this grammar (no implicit
+    // concatenation/juxtaposition), so this can never misfire against a
+    // real identifier named `r` followed by a separate string literal.
+    if (c == 'r' && peek() == '"')
+    {
+        return lexString();
+    }
+
     if (std::isalpha(static_cast<unsigned char>(c)) || c == '_')
     {
         return lexIdentifierOrKeyword();
@@ -142,6 +154,10 @@ Token Lexer::nextToken()
         case ';': return makeToken(TokenKind::Semicolon, start, startLine, startColumn);
         case ',': return makeToken(TokenKind::Comma, start, startLine, startColumn);
         case '?': return makeToken(TokenKind::Question, start, startLine, startColumn);
+        // "|" - anonymous union types only (see docs/language/0065-unions.md),
+        // e.g. `i32 | str`; this language has no bitwise/logical-or operator,
+        // so '|' was unclaimed.
+        case '|': return makeToken(TokenKind::Pipe, start, startLine, startColumn);
         case '.':
             if (current() == '.')
             {
@@ -279,24 +295,17 @@ Token Lexer::lexIdentifierOrKeyword()
     auto token = makeToken(TokenKind::Identifier, start, startLine, startColumn);
 
     static const std::unordered_map<std::string, TokenKind> keywords{
-        {"if", TokenKind::If},
-        {"else", TokenKind::Else},
-        {"struct", TokenKind::Struct},
-        {"pub", TokenKind::Pub},
-        {"true", TokenKind::True},
-        {"false", TokenKind::False},
-        {"return", TokenKind::Return},
-        {"read", TokenKind::Read},
-        {"write", TokenKind::Write},
-        {"take", TokenKind::Take},
-        {"while", TokenKind::While},
-        {"loop", TokenKind::Loop},
-        {"break", TokenKind::Break},
-        {"continue", TokenKind::Continue},
-        {"for", TokenKind::For},
-        {"in", TokenKind::In},
-        {"extern", TokenKind::Extern},
-        {"as", TokenKind::As}};
+        {"if", TokenKind::If},         {"else", TokenKind::Else},
+        {"struct", TokenKind::Struct}, {"pub", TokenKind::Pub},
+        {"true", TokenKind::True},     {"false", TokenKind::False},
+        {"return", TokenKind::Return}, {"read", TokenKind::Read},
+        {"write", TokenKind::Write},   {"take", TokenKind::Take},
+        {"while", TokenKind::While},   {"loop", TokenKind::Loop},
+        {"break", TokenKind::Break},   {"continue", TokenKind::Continue},
+        {"for", TokenKind::For},       {"in", TokenKind::In},
+        {"extern", TokenKind::Extern}, {"as", TokenKind::As},
+        {"trait", TokenKind::Trait},   {"impl", TokenKind::Impl},
+        {"enum", TokenKind::Enum},     {"match", TokenKind::Match}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {
@@ -306,25 +315,31 @@ Token Lexer::lexIdentifierOrKeyword()
     return token;
 }
 
-bool Lexer::scanStringSpan()
+bool Lexer::scanStringSpan(int quoteLen)
 {
-    advance(); // opening quote
+    for (int i = 0; i < quoteLen; ++i)
+    {
+        advance(); // opening quote(s)
+    }
 
     // Depth-tracked so a quote *inside* an active interpolation span
     // (e.g. `"{x.join(",")}"`) is a nested string literal's own opening
-    // quote, not this string's own closing one - only a bare '"' at
-    // depth 0 ends the scan. '{{'/'}}' are only escaped-literal-brace
-    // pairs at depth 0, mirroring Parser::parseStringLiteral's own
-    // identical escaping rule exactly, so this scan treats the same
-    // source text as an interpolation span that the later parsing pass
-    // will.
+    // quote, not this string's own closing one - only a real closing
+    // quote run at depth 0 ends the scan. '{{'/'}}' are only
+    // escaped-literal-brace pairs at depth 0, mirroring
+    // Parser::parseStringLiteral's own identical escaping rule exactly,
+    // so this scan treats the same source text as an interpolation span
+    // that the later parsing pass will.
     int braceDepth = 0;
     while (!atEnd())
     {
         const char c = current();
-        if (c == '"' && braceDepth == 0)
+        if (c == '"' && braceDepth == 0 && (quoteLen == 1 || (peek(1) == '"' && peek(2) == '"')))
         {
-            advance();
+            for (int i = 0; i < quoteLen; ++i)
+            {
+                advance();
+            }
             return true;
         }
         if (c == '{')
@@ -359,8 +374,10 @@ bool Lexer::scanStringSpan()
             // A nested string literal inside an active span - recurse,
             // so it's skipped over using this exact same logic (handling
             // arbitrary further nesting inside *it*, too), rather than
-            // naively scanning to the next bare '"'.
-            if (!scanStringSpan())
+            // naively scanning to the next bare '"'. Always an ordinary
+            // single-quoted literal, even when the outer literal itself
+            // is triple-quoted - see the header comment.
+            if (!scanStringSpan(1))
             {
                 return false;
             }
@@ -369,7 +386,30 @@ bool Lexer::scanStringSpan()
         advance();
     }
 
-    return false; // ran out of input before a real (depth-0) closing quote
+    return false; // ran out of input before a real closing quote run
+}
+
+bool Lexer::scanRawStringSpan(int quoteLen)
+{
+    for (int i = 0; i < quoteLen; ++i)
+    {
+        advance(); // opening quote(s)
+    }
+
+    while (!atEnd())
+    {
+        if (current() == '"' && (quoteLen == 1 || (peek(1) == '"' && peek(2) == '"')))
+        {
+            for (int i = 0; i < quoteLen; ++i)
+            {
+                advance();
+            }
+            return true;
+        }
+        advance();
+    }
+
+    return false;
 }
 
 Token Lexer::lexString()
@@ -378,7 +418,22 @@ Token Lexer::lexString()
     const auto startLine = line_;
     const auto startColumn = column_;
 
-    if (scanStringSpan())
+    bool raw = false;
+    if (current() == 'r' && peek() == '"')
+    {
+        raw = true;
+        advance(); // consume the 'r' prefix; current() is now the opening '"'
+    }
+
+    // `"""`/`r"""` (see docs/language/0060-multiline-strings.md) - three
+    // consecutive '"' bytes starting at the (post-prefix) current
+    // position. `peek(1)`/`peek(2)` safely return '\0' past end of
+    // input, never a real '"', so a lone or doubled '"' at end of file
+    // is correctly seen as quoteLen == 1.
+    const int quoteLen = (current() == '"' && peek(1) == '"' && peek(2) == '"') ? 3 : 1;
+
+    const bool ok = raw ? scanRawStringSpan(quoteLen) : scanStringSpan(quoteLen);
+    if (ok)
     {
         return makeToken(TokenKind::String, start, startLine, startColumn);
     }

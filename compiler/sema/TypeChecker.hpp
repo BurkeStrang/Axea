@@ -3,6 +3,7 @@
 #include "ast/Expr.hpp"
 #include "ast/Stmt.hpp"
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,7 +52,27 @@ enum class TypeKind
     Never,
 
     Optional,
+    // `Result<T,E>` (see docs/language/0063-result.md) - shares `Type`'s
+    // existing `elementTypeName`/`valueTypeName` fields with Map<K,V>
+    // rather than getting its own: elementTypeName is T (the Ok payload,
+    // same role Optional<T> already gives that field), valueTypeName is E
+    // (the Err payload) - genuinely the same "two independent type
+    // parameters, string-keyed, arbitrarily nestable" shape Map<K,V>
+    // already established, just with neither parameter under a
+    // hashability/orderability constraint the way Map's own K is (see
+    // Type's own field comment below). Deliberately a new enumerator, not
+    // a reuse of the pre-existing (and, before this phase, completely
+    // inert - zero references anywhere in this file) TypeKind::Error just
+    // below: that enumerator's own original intent is undocumented and
+    // unrelated to this phase, so repurposing it would be presumptuous
+    // rather than principled.
+    Result,
     Error,
+    // A user-declared `enum` (see docs/language/0064-enums.md) - a genuine tagged union/
+    // algebraic data type. Reuses `Type::structName` to carry the enum's own name, the same
+    // field `Struct` just below already uses for its own name - variant payload types live on
+    // the registered `EnumDecl` itself (looked up by that name), not duplicated into `Type`.
+    Enum,
     Struct,
     Tuple,
     Function,
@@ -97,7 +118,8 @@ struct Type
     // The single type parameter for every kind that has exactly one -
     // Array/Slice/List/Stack/LinkedList/Deque/Queue/PriorityQueue/Optional/
     // Set, plus Map/SortedMap's own key (see docs/language/0034-maps-and-sets.md's
-    // generic rewrite). Genuinely arbitrarily nested (List<Optional<List<i32>>>,
+    // generic rewrite) and Result<T,E>'s own Ok payload (T - see
+    // docs/language/0063-result.md). Genuinely arbitrarily nested (List<Optional<List<i32>>>,
     // a struct, another Map<...>, ...) - a single TypeKind can't carry that
     // (this field used to be a flat elementKind/elementStructName pair,
     // exactly that limitation, until docs/language/0052-optional.md's own
@@ -106,8 +128,9 @@ struct Type
     // demand via resolveType(...) wherever the full nested Type is
     // actually needed (mirrors MapNewExpr/SetNewExpr's own "store the
     // string, re-resolve later" pattern at the AST layer). valueTypeName is
-    // Map/SortedMap's own value type (empty for every single-parameter
-    // kind, including Set). Always stored in canonical form (typeName(...)
+    // Map/SortedMap's own value type, or Result<T,E>'s own Err payload (E -
+    // empty for every single-parameter kind, including Set). Always stored
+    // in canonical form (typeName(...)
     // of the resolved element, not raw source text) so the defaulted
     // operator== below still works structurally.
     std::string elementTypeName;
@@ -167,6 +190,33 @@ private:
                         const Type* expectedReturnType,
                         std::vector<Type>* currentLoopBreakTypes);
     Type resolveType(const std::string& name) const;
+    // Returns the enum `objectExpr` names, if it's a bare NameExpr matching a registered enum
+    // type - the shared "is this actually EnumName.Variant(...)/EnumName.Variant construction,
+    // not a real method/field access" check both checkExpr's MethodCallExpr and FieldExpr cases
+    // need (see docs/language/0064-enums.md). Checked *before* either case's own generic
+    // checkExpr(*object,...)/checkFieldType call, which would otherwise throw "undefined
+    // variable" trying to resolve a bare enum type name as if it were bound to a value.
+    const EnumDecl* asEnumTypeName(const Expr& objectExpr) const;
+    // "T1 | T2 | ..." anonymous union types (see docs/language/0065-unions.md) - lower to the
+    // exact same enum-as-flattened-struct machinery `enum` already uses, just auto-registered
+    // on demand instead of user-declared: the first time a given canonical ("|"-joined, sorted,
+    // deduplicated - see Parser::parseTypeName) union string is seen, a synthetic EnumDecl is
+    // built (one variant per alternative, named after that alternative's own canonical type
+    // name, with that one type as its single field) and memoized into enums_ under the union's
+    // own canonical string as its "name" - every later pass (match, printing, construction) then
+    // treats it exactly like a real declared enum, with zero extra dispatch logic anywhere.
+    // `const` despite mutating enums_/unionDecls_: mirrors Map<K,V>/Optional<T>'s own
+    // auto-grows-on-demand instantiation caches, which every existing const-method caller here
+    // already treats as pure lookups.
+    Type resolveUnionType(const std::string& canonicalName) const;
+    // True if `valueType` is assignable to `targetType` by implicit union wrapping - `targetType`
+    // is a union (its enums_ entry's own canonical name, i.e. containing '|') and `valueType`
+    // matches exactly one of its alternatives. Used wherever plain Type equality currently gates
+    // assignment/argument/return (mirrors arrayToSliceCoercion/stringToStrCoercion's own
+    // "named coercion predicate OR'd into the equality check" shape at each such site) - the
+    // user-facing point of TypeScript-style unions (`f(5)`/`f("hi")` for `f(x: i32 | str)`, no
+    // wrapper syntax needed).
+    bool isUnionMember(const Type& valueType, const Type& targetType) const;
     // True if `type` is a valid Map/Set key type: i32/bool/str always;
     // Array/List if their element is (recursing on the existing flat
     // elementKind/elementStructName representation); struct if every
@@ -181,10 +231,31 @@ private:
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;
+    // `enum` declarations (see docs/language/0064-enums.md) - a parallel map to structs_ above,
+    // rather than folded into it: an EnumDecl is a genuinely different AST node (variants, not
+    // fields), even though a resolved Enum Type reuses Struct's own `structName` field to carry
+    // the enum's own name (see resolveType's own "Name" branch).
+    // mutable: resolveUnionType (called from the const resolveType) auto-registers a synthetic
+    // union's EnumDecl into this map the first time its canonical name is seen (see
+    // resolveUnionType's own comment) - real user-declared enums are inserted non-const, in
+    // registerSignatures, exactly as before.
+    mutable std::unordered_map<std::string, const EnumDecl*> enums_;
+    // Owns every synthetic union EnumDecl resolveUnionType builds, so the raw pointers stored
+    // into enums_ above stay valid for the checker's whole lifetime (a real declared EnumDecl's
+    // pointer is instead owned by Program::items, which already outlives the checker).
+    mutable std::vector<std::unique_ptr<EnumDecl>> unionDecls_;
     // extern c function declarations (see docs/language/0048-ffi.md) - a
     // parallel map to functions_ above rather than folded into it: an
     // ExternDecl is a genuinely different AST node (no body), even though
     // its own params/returnType shape happens to match FunctionDecl's.
     // CallExpr's own type-checking consults both.
     std::unordered_map<std::string, const ExternDecl*> externs_;
+    // trait/impl (see docs/language/0062-display-trait.md) - traits_ is
+    // consulted only for a real, if minimal (name+arity only, not full
+    // per-parameter type conformance) `impl` conformance check;
+    // registerSignatures folds every impl method straight into
+    // functions_ above (mangled name, see ImplDecl's own comment), so
+    // TypeChecker's later per-function validation pass needs no
+    // separate impl-aware code path at all.
+    std::unordered_map<std::string, const TraitDecl*> traits_;
 };

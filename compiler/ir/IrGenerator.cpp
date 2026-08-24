@@ -1,5 +1,6 @@
 #include "ir/IrGenerator.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace
@@ -42,6 +43,62 @@ namespace
     std::string optionalPayloadTypeName(const std::string& optionalTypeName)
     {
         return optionalTypeName.substr(9, optionalTypeName.size() - 10);
+    }
+
+    // Finds the first *top-level* comma in `text` - i.e. one not nested
+    // inside a further `<...>` type-argument list (e.g. Result<i32,
+    // Map<i32,i32>>'s own inner comma). Own copy, per this codebase's
+    // "each pass owns its own walk" convention - TypeChecker and
+    // LlvmIrEmitter each already have their own identical logic for the
+    // same reason (see docs/language/0034-maps-and-sets.md's generic
+    // rewrite).
+    std::size_t findTopLevelComma(const std::string& text)
+    {
+        int depth = 0;
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == '<')
+            {
+                ++depth;
+            }
+            else if (text[i] == '>')
+            {
+                --depth;
+            }
+            else if (text[i] == ',' && depth == 0)
+            {
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+    // "Result<T,E>" -> {T, E} (see docs/language/0063-result.md) - the
+    // Result-flavored analogue of optionalPayloadTypeName just above, used
+    // for the identical reason: Ok(x)/Err(e) each need the *other* type
+    // parameter's name from surrounding context (a declared type or the
+    // enclosing function's own return type), since IrGenerator keeps no
+    // real type table.
+    std::pair<std::string, std::string> resultPayloadTypeNames(const std::string& resultTypeName)
+    {
+        const std::string args = resultTypeName.substr(7, resultTypeName.size() - 8);
+        const auto comma = findTopLevelComma(args);
+        return {args.substr(0, comma), args.substr(comma + 1)};
+    }
+
+    // A union's own canonical name ("i32|str" - see docs/language/0065-unions.md and
+    // Parser::parseTypeName) is exactly the right *Axea-level* identity (readable, and what
+    // enums_/IrScope::findEnumName key on), but '|' isn't a legal unquoted LLVM identifier
+    // character - only [a-zA-Z$._][a-zA-Z$._0-9]* is. This is the one point that name ever turns
+    // into actual LLVM text (an IrStructNew's own typeName, and irProgram.structs/enums's own
+    // keys - both read directly by LlvmIrEmitter to build "%<name>"): '.' is a legal LLVM
+    // identifier character no existing Axea type name ever contains, so substituting it for '|'
+    // here is a deterministic, collision-free rename. A no-op for every real (never
+    // '|'-containing) struct/enum name.
+    std::string llvmSafeTypeName(std::string name)
+    {
+        std::replace(name.begin(), name.end(), '|', '.');
+        return name;
     }
 } // namespace
 
@@ -226,6 +283,34 @@ std::optional<bool> IrScope::findIsBuffer(const std::string& name) const
     return parent_ ? parent_->findIsBuffer(name) : std::nullopt;
 }
 
+void IrScope::defineEnumName(const std::string& name, std::string enumName)
+{
+    enumNames_[name] = std::move(enumName);
+}
+
+std::optional<std::string> IrScope::findEnumName(const std::string& name) const
+{
+    if (const auto it = enumNames_.find(name); it != enumNames_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findEnumName(name) : std::nullopt;
+}
+
+void IrScope::defineSimpleType(const std::string& name, std::string simpleType)
+{
+    simpleTypes_[name] = std::move(simpleType);
+}
+
+std::optional<std::string> IrScope::findSimpleType(const std::string& name) const
+{
+    if (const auto it = simpleTypes_.find(name); it != simpleTypes_.end())
+    {
+        return it->second;
+    }
+    return parent_ ? parent_->findSimpleType(name) : std::nullopt;
+}
+
 int IrGenerator::freshRegister(Context& ctx)
 {
     return (*ctx.registerCount)++;
@@ -252,12 +337,49 @@ void IrGenerator::registerStructs(const Program& program)
         {
             structs_[structDecl->name] = structDecl;
         }
+        else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
+        {
+            enums_[enumDecl->name] = enumDecl;
+        }
         // Only the return type is needed here (see isSetExpr) - not a
         // general function table, so this stays folded into registerStructs
         // rather than becoming its own pass.
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
             functions_[function->name] = function;
+        }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // See docs/language/0062-display-trait.md - each impl method
+            // is registered exactly like a top-level FunctionDecl.
+            for (const auto& method : implDecl->methods)
+            {
+                functions_[method->name] = method.get();
+            }
+        }
+    }
+
+    // Anonymous union types (see docs/language/0065-unions.md) - every function/impl-method
+    // signature is scanned up front for a param/return type string containing '|', registering
+    // each one's synthetic EnumDecl eagerly. Needed so enumNameOfExpr's own
+    // `enums_.contains(param.type)`/`enums_.contains(*returnType)` checks (used to resolve a
+    // union-typed parameter or a union-returning call for `match`) see it as a real enum from
+    // the very first reference - a param/return type is fixed at the signature, unlike a local's
+    // declared type (which lowerStmt's AssignmentStmt case registers lazily, the first time that
+    // specific assignment is lowered, since there's no equivalent "whole program" pass over
+    // statement bodies here).
+    for (const auto& [name, function] : functions_)
+    {
+        for (const auto& param : function->params)
+        {
+            if (param.type.find('|') != std::string::npos)
+            {
+                registerUnionType(param.type);
+            }
+        }
+        if (function->returnType && function->returnType->find('|') != std::string::npos)
+        {
+            registerUnionType(*function->returnType);
         }
     }
 }
@@ -697,6 +819,262 @@ std::optional<bool> IrGenerator::isBufferExpr(const Expr& expr,
     return std::nullopt;
 }
 
+std::optional<std::string> IrGenerator::enumNameOfExpr(const Expr& expr,
+                                                       const FunctionDecl* function,
+                                                       const IrScope& scope) const
+{
+    // A direct `EnumName.Variant(...)`/`EnumName.Variant` construction - the same "is `object`
+    // a bare name matching a known enum" check MethodCallExpr's/FieldExpr's own lowerExpr cases
+    // use (see docs/language/0064-enums.md).
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        if (const auto* name = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            name && enums_.contains(name->name))
+        {
+            return name->name;
+        }
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        if (const auto* name = dynamic_cast<const NameExpr*>(field->object.get());
+            name && enums_.contains(name->name))
+        {
+            return name->name;
+        }
+    }
+
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name && enums_.contains(param.type))
+                {
+                    return param.type;
+                }
+            }
+        }
+        return scope.findEnumName(name->name);
+    }
+
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType &&
+            enums_.contains(*it->second->returnType))
+        {
+            return *it->second->returnType;
+        }
+    }
+
+    return std::nullopt;
+}
+
+const EnumDecl& IrGenerator::registerUnionType(const std::string& canonicalName)
+{
+    if (const auto it = enums_.find(canonicalName); it != enums_.end())
+    {
+        return *it->second;
+    }
+
+    std::vector<EnumVariant> variants;
+    std::size_t start = 0;
+    while (true)
+    {
+        const auto bar = canonicalName.find('|', start);
+        const std::string alternative =
+            canonicalName.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+        variants.push_back(EnumVariant{alternative, {alternative}});
+        if (bar == std::string::npos)
+        {
+            break;
+        }
+        start = bar + 1;
+    }
+    auto decl = std::make_unique<EnumDecl>(canonicalName, std::move(variants));
+    const EnumDecl* raw = decl.get();
+    enums_[canonicalName] = raw;
+    unionDecls_.push_back(std::move(decl));
+    return *raw;
+}
+
+std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
+                                                         const FunctionDecl* function,
+                                                         const IrScope& scope) const
+{
+    if (dynamic_cast<const IntegerExpr*>(&expr))
+    {
+        return std::string("i32");
+    }
+    if (dynamic_cast<const Int64Expr*>(&expr))
+    {
+        return std::string("i64");
+    }
+    if (dynamic_cast<const FloatExpr*>(&expr))
+    {
+        return std::string("f64");
+    }
+    if (dynamic_cast<const BoolExpr*>(&expr))
+    {
+        return std::string("bool");
+    }
+    if (dynamic_cast<const CharExpr*>(&expr))
+    {
+        return std::string("char");
+    }
+    if (dynamic_cast<const StringExpr*>(&expr) ||
+        dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        return std::string("str");
+    }
+    if (const auto* structLiteral = dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        return structLiteral->typeName;
+    }
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        if (function)
+        {
+            for (const auto& param : function->params)
+            {
+                if (param.name == name->name)
+                {
+                    return param.type;
+                }
+            }
+        }
+        return scope.findSimpleType(name->name);
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        if (it != functions_.end() && it->second->returnType)
+        {
+            return *it->second->returnType;
+        }
+    }
+    return std::nullopt;
+}
+
+int IrGenerator::wrapForUnion(int valueReg,
+                              const Expr& valueExpr,
+                              const std::string& declaredTypeName,
+                              IrScope& scope,
+                              Context& ctx)
+{
+    if (declaredTypeName.find('|') == std::string::npos)
+    {
+        return valueReg;
+    }
+
+    const EnumDecl& unionDecl = registerUnionType(declaredTypeName);
+
+    // Already exactly this union (e.g. forwarding an existing `i32 | str`
+    // value through another `i32 | str`-typed boundary) - passed through
+    // unchanged, not re-wrapped.
+    if (const auto valueEnumName = enumNameOfExpr(valueExpr, ctx.function, scope);
+        valueEnumName && *valueEnumName == declaredTypeName)
+    {
+        return valueReg;
+    }
+
+    const std::optional<std::string> valueType = simpleTypeOfExpr(valueExpr, ctx.function, scope);
+    if (!valueType)
+    {
+        throw std::runtime_error("internal error: could not determine which alternative of union " +
+                                 declaredTypeName + " to wrap a value as");
+    }
+    const auto variantIt =
+        std::find_if(unionDecl.variants.begin(),
+                     unionDecl.variants.end(),
+                     [&](const EnumVariant& variant) { return variant.name == *valueType; });
+    if (variantIt == unionDecl.variants.end())
+    {
+        throw std::runtime_error("internal error: '" + *valueType +
+                                 "' is not an alternative of union " + declaredTypeName);
+    }
+    const int tagValue = static_cast<int>(variantIt - unionDecl.variants.begin());
+
+    auto tagInst = std::make_unique<IrConstInt>();
+    tagInst->value = tagValue;
+    const int tagReg = emit(ctx, std::move(tagInst));
+
+    std::vector<std::pair<std::string, int>> fields;
+    fields.emplace_back("__tag", tagReg);
+    fields.emplace_back(*valueType + "_0", valueReg);
+
+    auto inst = std::make_unique<IrStructNew>();
+    inst->typeName = llvmSafeTypeName(declaredTypeName);
+    inst->fields = std::move(fields);
+    return emit(ctx, std::move(inst));
+}
+
+int IrGenerator::lowerMatchArm(int scrutineeReg,
+                               int tagReg,
+                               const EnumDecl& enumDecl,
+                               const std::vector<MatchArm>& arms,
+                               std::size_t armIndex,
+                               IrScope& scope,
+                               Context& ctx)
+{
+    const MatchArm& arm = arms[armIndex];
+    const bool isLast = armIndex + 1 == arms.size();
+
+    // Binds this arm's own extracted payload fields (if any) and lowers its body - shared by
+    // both the "tag matched" case and the (comparison-skipped) last-arm case below.
+    auto lowerArmBody = [&](IrScope& bodyScope, Context& bodyCtx) -> int
+    {
+        IrScope armScope(&bodyScope, /*isBarrier=*/true);
+        for (std::size_t i = 0; i < arm.bindingNames.size(); ++i)
+        {
+            auto fieldInst = std::make_unique<IrFieldGet>();
+            fieldInst->object = scrutineeReg;
+            fieldInst->field = arm.variantName + "_" + std::to_string(i);
+            const int fieldReg = emit(bodyCtx, std::move(fieldInst));
+            armScope.define(arm.bindingNames[i], fieldReg);
+        }
+        return lowerExpr(*arm.body, armScope, bodyCtx);
+    };
+
+    if (isLast)
+    {
+        return lowerArmBody(scope, ctx);
+    }
+
+    const auto variantIt =
+        std::find_if(enumDecl.variants.begin(),
+                     enumDecl.variants.end(),
+                     [&](const EnumVariant& v) { return v.name == arm.variantName; });
+    const int variantIndex = static_cast<int>(variantIt - enumDecl.variants.begin());
+
+    auto tagConst = std::make_unique<IrConstInt>();
+    tagConst->value = variantIndex;
+    const int tagConstReg = emit(ctx, std::move(tagConst));
+
+    auto eqInst = std::make_unique<IrBinOp>();
+    eqInst->op = TokenKind::EqualEqual;
+    eqInst->lhs = tagReg;
+    eqInst->rhs = tagConstReg;
+    const int condReg = emit(ctx, std::move(eqInst));
+
+    auto branch = std::make_unique<IrBranch>();
+    branch->condition = condReg;
+
+    IrScope thenScope(&scope, /*isBarrier=*/true);
+    std::vector<int> thenStructLocals;
+    Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+    branch->thenValue = lowerArmBody(thenScope, thenCtx);
+
+    IrScope elseScope(&scope, /*isBarrier=*/true);
+    std::vector<int> elseStructLocals;
+    Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+    branch->elseValue =
+        lowerMatchArm(scrutineeReg, tagReg, enumDecl, arms, armIndex + 1, elseScope, elseCtx);
+
+    return emit(ctx, std::move(branch));
+}
+
 int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 {
     if (const auto* integer = dynamic_cast<const IntegerExpr*>(&expr))
@@ -760,10 +1138,28 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         {
             if (piece.expr)
             {
+                // `{expr=}` (see docs/language/0058-debug-formatting.md) -
+                // lowered as an ordinary literal-text append (the exact
+                // same IrConstString + IrBufferAppend pair a plain literal
+                // piece already uses below), emitted right before the
+                // expression's own value append, rather than threading a
+                // prefix field through IrBufferAppendValue itself.
+                if (!piece.selfDocPrefix.empty())
+                {
+                    auto prefixConst = std::make_unique<IrConstString>();
+                    prefixConst->value = piece.selfDocPrefix + "=";
+                    const int prefixReg = emit(ctx, std::move(prefixConst));
+                    auto prefixAppend = std::make_unique<IrBufferAppend>();
+                    prefixAppend->buffer = bufferReg;
+                    prefixAppend->text = prefixReg;
+                    emit(ctx, std::move(prefixAppend));
+                }
                 const int valueReg = lowerExpr(*piece.expr, scope, ctx);
                 auto appendInst = std::make_unique<IrBufferAppendValue>();
                 appendInst->buffer = bufferReg;
                 appendInst->value = valueReg;
+                appendInst->formatSpec = piece.formatSpec;
+                appendInst->debug = piece.debug;
                 emit(ctx, std::move(appendInst));
             }
             else if (!piece.literalText.empty())
@@ -829,17 +1225,34 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return -1;
     }
 
+    if (dynamic_cast<const OkExpr*>(&expr) || dynamic_cast<const ErrExpr*>(&expr))
+    {
+        // Unreachable in a well-typed program - same reasoning as NoneExpr
+        // just above (see docs/language/0063-result.md).
+        return -1;
+    }
+
     if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
     {
-        // `<expr>?` (see docs/language/0052-optional.md) - lowered as an
+        // `<expr>?` (see docs/language/0052-optional.md, generalized to
+        // Result<T,E> by docs/language/0063-result.md) - lowered as an
         // IrBranch, the same "conditional + early-terminating side" shape
         // IfExpr uses just below, exploiting emitBranch's own existing
         // "a terminated side contributes no merge-block value" handling
-        // (see LlvmIrEmitter::emitBranch) for the None side's `return`.
-        const int optional = lowerExpr(*tryExpr->operand, scope, ctx);
+        // (see LlvmIrEmitter::emitBranch) for the failure side's `return`.
+        // The condition check (IrOptionalIsSome) and the then-branch
+        // unwrap (IrOptionalUnwrap, field defaulted to 1) are shared
+        // verbatim between Optional and Result - both layouts agree on
+        // "field 0 is the positive tag, field 1 is the positive payload"
+        // (see IrOptionalIsSome's own comment) - only the *else* branch's
+        // own construction differs, decided by the enclosing function's
+        // own declared return type (never the operand's own inferred
+        // type, which IrGenerator has no table for - TypeChecker already
+        // guarantees the two agree).
+        const int operand = lowerExpr(*tryExpr->operand, scope, ctx);
 
         auto isSomeInst = std::make_unique<IrOptionalIsSome>();
-        isSomeInst->object = optional;
+        isSomeInst->object = operand;
         const int isSome = emit(ctx, std::move(isSomeInst));
 
         auto branch = std::make_unique<IrBranch>();
@@ -849,22 +1262,61 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         std::vector<int> thenStructLocals;
         Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
         auto unwrapInst = std::make_unique<IrOptionalUnwrap>();
-        unwrapInst->object = optional;
+        unwrapInst->object = operand;
         branch->thenValue = emit(thenCtx, std::move(unwrapInst));
 
         IrScope elseScope(&scope, /*isBarrier=*/true);
         std::vector<int> elseStructLocals;
         Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
-        auto noneInst = std::make_unique<IrOptionalNew>();
-        noneInst->value = -1;
-        noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
-        const int none = emit(elseCtx, std::move(noneInst));
+        const std::string& returnTypeName = *ctx.function->returnType;
+        int failureResult;
+        if (returnTypeName.starts_with("Result<"))
+        {
+            // Preserves the operand's own Err payload (unlike None, which
+            // carries nothing to preserve) - extracted via the same
+            // IrOptionalUnwrap instruction, field 2 this time (see its own
+            // comment for why that's the Err position in both layouts).
+            auto unwrapErrInst = std::make_unique<IrOptionalUnwrap>();
+            unwrapErrInst->object = operand;
+            unwrapErrInst->field = 2;
+            const int errValue = emit(elseCtx, std::move(unwrapErrInst));
+
+            auto errNewInst = std::make_unique<IrResultNew>();
+            errNewInst->isOk = false;
+            errNewInst->value = errValue;
+            errNewInst->otherPayloadTypeName = resultPayloadTypeNames(returnTypeName).first;
+            failureResult = emit(elseCtx, std::move(errNewInst));
+        }
+        else
+        {
+            auto noneInst = std::make_unique<IrOptionalNew>();
+            noneInst->value = -1;
+            noneInst->payloadTypeName = optionalPayloadTypeName(returnTypeName);
+            failureResult = emit(elseCtx, std::move(noneInst));
+        }
         auto returnInst = std::make_unique<IrReturn>();
-        returnInst->value = none;
+        returnInst->value = failureResult;
         emitVoid(elseCtx, std::move(returnInst));
         branch->elseValue = -1; // elseBlock always terminates via `return` above
 
         return emit(ctx, std::move(branch));
+    }
+
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        // See docs/language/0064-enums.md and lowerMatchArm's own comment. The tag is read
+        // once here, in the outer `ctx` - every nested branch built inside lowerMatchArm just
+        // references this same register, exactly like IfExpr's own already-computed condition
+        // register is referenced from inside its own thenBlock/elseBlock.
+        const int scrutineeReg = lowerExpr(*matchExpr->scrutinee, scope, ctx);
+        auto tagGet = std::make_unique<IrFieldGet>();
+        tagGet->object = scrutineeReg;
+        tagGet->field = "__tag";
+        const int tagReg = emit(ctx, std::move(tagGet));
+
+        const auto enumName = enumNameOfExpr(*matchExpr->scrutinee, ctx.function, scope);
+        const EnumDecl& enumDecl = *enums_.at(*enumName);
+        return lowerMatchArm(scrutineeReg, tagReg, enumDecl, matchExpr->arms, 0, scope, ctx);
     }
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
@@ -888,11 +1340,21 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(printInst));
         }
 
+        const auto calleeIt = functions_.find(call->callee);
         std::vector<int> args;
         args.reserve(call->arguments.size());
-        for (const auto& argument : call->arguments)
+        for (std::size_t i = 0; i < call->arguments.size(); ++i)
         {
-            args.push_back(lowerExpr(*argument, scope, ctx));
+            int argReg = lowerExpr(*call->arguments[i], scope, ctx);
+            // Implicit union wrapping (see docs/language/0065-unions.md) -
+            // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
+            // syntax.
+            if (calleeIt != functions_.end() && i < calleeIt->second->params.size())
+            {
+                argReg = wrapForUnion(
+                    argReg, *call->arguments[i], calleeIt->second->params[i].type, scope, ctx);
+            }
+            args.push_back(argReg);
         }
         auto inst = std::make_unique<IrCall>();
         inst->callee = call->callee;
@@ -902,6 +1364,40 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
     {
+        // `EnumName.Variant(args)` construction (see docs/language/0064-enums.md) - checked
+        // before lowering `methodCall->object` below, which would otherwise try to lower a bare
+        // enum type name as if it were a real value expression. Builds an ordinary
+        // IrStructNew (see IrGenerator::generate's own comment on why an enum is represented as
+        // a flattened struct) - the tag field first, then each argument mapped to that
+        // variant's own synthetic field name.
+        if (const auto* name = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            name && enums_.contains(name->name))
+        {
+            const EnumDecl& enumDecl = *enums_.at(name->name);
+            const auto variantIt =
+                std::find_if(enumDecl.variants.begin(),
+                             enumDecl.variants.end(),
+                             [&](const EnumVariant& v) { return v.name == methodCall->method; });
+            const int tagValue = static_cast<int>(variantIt - enumDecl.variants.begin());
+
+            auto tagInst = std::make_unique<IrConstInt>();
+            tagInst->value = tagValue;
+            const int tagReg = emit(ctx, std::move(tagInst));
+
+            std::vector<std::pair<std::string, int>> fields;
+            fields.emplace_back("__tag", tagReg);
+            for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
+            {
+                const int fieldReg = lowerExpr(*methodCall->arguments[i], scope, ctx);
+                fields.emplace_back(methodCall->method + "_" + std::to_string(i), fieldReg);
+            }
+
+            auto inst = std::make_unique<IrStructNew>();
+            inst->typeName = enumDecl.name;
+            inst->fields = std::move(fields);
+            return emit(ctx, std::move(inst));
+        }
+
         // Resolved from the AST, before lowering `object` below, since
         // isSetExpr/isStackExpr/isDequeExpr/isPriorityQueueExpr/
         // isSortedMapExpr all inspect the expression shape itself (see their
@@ -957,13 +1453,18 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(inst));
         }
 
-        if (methodCall->method == "is_some" || methodCall->method == "is_none")
+        if (methodCall->method == "is_some" || methodCall->method == "is_none" ||
+            methodCall->method == "is_ok" || methodCall->method == "is_err")
         {
             // Unambiguous by name alone, same reasoning as "parse"/
-            // "to_cstr"/"join" above (see docs/language/0052-optional.md).
+            // "to_cstr"/"join" above (see docs/language/0052-optional.md,
+            // docs/language/0063-result.md). is_ok/is_err reuse
+            // IrOptionalIsSome verbatim - field 0 is "the positive tag" in
+            // both Optional's and Result's layout (see that instruction's
+            // own comment).
             auto inst = std::make_unique<IrOptionalIsSome>();
             inst->object = object;
-            inst->negate = methodCall->method == "is_none";
+            inst->negate = methodCall->method == "is_none" || methodCall->method == "is_err";
             return emit(ctx, std::move(inst));
         }
 
@@ -1163,6 +1664,19 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(inst));
         }
 
+        // "write" (see docs/language/0061-buffer-write.md) is Buffer-only
+        // (TypeChecker never allows it on String), so - unlike "append"
+        // just above - it needs no bufferKind disambiguation: it always
+        // lowers to the same IrBufferAppend "append" itself already lowers
+        // to on that branch.
+        if (methodCall->method == "write")
+        {
+            auto inst = std::make_unique<IrBufferAppend>();
+            inst->buffer = object;
+            inst->text = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            return emit(ctx, std::move(inst));
+        }
+
         if (methodCall->method == "append_line")
         {
             auto inst = std::make_unique<IrBufferAppendLine>();
@@ -1312,6 +1826,29 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
     {
+        // `EnumName.Variant` (no parens - a no-payload variant, see
+        // docs/language/0064-enums.md and MethodCallExpr's own identical check above) -
+        // constructs the same flattened struct, tag only, no payload fields to fill.
+        if (const auto* name = dynamic_cast<const NameExpr*>(field->object.get());
+            name && enums_.contains(name->name))
+        {
+            const EnumDecl& enumDecl = *enums_.at(name->name);
+            const auto variantIt =
+                std::find_if(enumDecl.variants.begin(),
+                             enumDecl.variants.end(),
+                             [&](const EnumVariant& v) { return v.name == field->field; });
+            const int tagValue = static_cast<int>(variantIt - enumDecl.variants.begin());
+
+            auto tagInst = std::make_unique<IrConstInt>();
+            tagInst->value = tagValue;
+            const int tagReg = emit(ctx, std::move(tagInst));
+
+            auto inst = std::make_unique<IrStructNew>();
+            inst->typeName = enumDecl.name;
+            inst->fields.emplace_back("__tag", tagReg);
+            return emit(ctx, std::move(inst));
+        }
+
         // `.length` on a fixed array is always compile-time-known (see
         // docs/language/0031-arrays.md) - constant-fold it directly rather
         // than emitting a runtime IrFieldGet, so it's truly zero-cost. Falls
@@ -1539,6 +2076,15 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         const bool isNoneWithDeclaredType =
             dynamic_cast<const NoneExpr*>(assignment->value.get()) != nullptr &&
             assignment->declaredType.has_value();
+        // `x: Result<T,E> = Ok(value)`/`Err(value)` (see
+        // docs/language/0063-result.md) - same "built directly here,
+        // bypassing generic lowerExpr" treatment as None just above, since
+        // only this call site has the declared type text the *other*
+        // (not-supplied-by-`value`) type parameter is read from.
+        const auto* okExpr = dynamic_cast<const OkExpr*>(assignment->value.get());
+        const auto* errExpr = dynamic_cast<const ErrExpr*>(assignment->value.get());
+        const bool isOkOrErrWithDeclaredType =
+            (okExpr || errExpr) && assignment->declaredType.has_value();
         int value;
         if (isNoneWithDeclaredType)
         {
@@ -1547,9 +2093,25 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             inst->payloadTypeName = optionalPayloadTypeName(*assignment->declaredType);
             value = emit(ctx, std::move(inst));
         }
+        else if (isOkOrErrWithDeclaredType)
+        {
+            const auto [okTypeName, errTypeName] =
+                resultPayloadTypeNames(*assignment->declaredType);
+            auto inst = std::make_unique<IrResultNew>();
+            inst->isOk = okExpr != nullptr;
+            inst->value = lowerExpr(okExpr ? *okExpr->value : *errExpr->value, scope, ctx);
+            inst->otherPayloadTypeName = okExpr ? errTypeName : okTypeName;
+            value = emit(ctx, std::move(inst));
+        }
         else
         {
             value = lowerExpr(*assignment->value, scope, ctx);
+        }
+        // Implicit union wrapping (see docs/language/0065-unions.md) -
+        // `x: i32 | str = 5` needs no wrapper syntax.
+        if (assignment->declaredType)
+        {
+            value = wrapForUnion(value, *assignment->value, *assignment->declaredType, scope, ctx);
         }
         // Mutates an already-existing binding (in this scope or any
         // enclosing one, subject to the same barrier rule as assign()
@@ -1625,6 +2187,34 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         {
             scope.defineIsBuffer(assignment->name, *isBuffer);
         }
+        // Same reasoning again, for which registered enum type a value has (see
+        // enumNameOfExpr and docs/language/0064-enums.md) - needed so a later `match` on this
+        // local can resolve its own scrutinee's enum type. A union-typed declared local (see
+        // docs/language/0065-unions.md) is recorded straight from its own declared type text
+        // instead - implicit wrapping means the RHS value expression's own natural type is one
+        // of the union's alternatives, not the union itself, so enumNameOfExpr (which infers
+        // from the *value* expression) would never recognize it.
+        if (assignment->declaredType && assignment->declaredType->find('|') != std::string::npos)
+        {
+            scope.defineEnumName(assignment->name, *assignment->declaredType);
+        }
+        else if (const auto enumName = enumNameOfExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineEnumName(assignment->name, *enumName);
+        }
+        // Records this name's own best-effort simple Axea type, if known (see
+        // IrScope::findSimpleType/simpleTypeOfExpr) - needed only to resolve a plain local
+        // through one level of assignment when later deciding which alternative of a union type
+        // to wrap it as. Prefers the declared type text itself (more reliable than inferring
+        // from the RHS) whenever it's present and isn't itself a union.
+        if (assignment->declaredType && assignment->declaredType->find('|') == std::string::npos)
+        {
+            scope.defineSimpleType(assignment->name, *assignment->declaredType);
+        }
+        else if (const auto simpleType = simpleTypeOfExpr(*assignment->value, ctx.function, scope))
+        {
+            scope.defineSimpleType(assignment->name, *simpleType);
+        }
         return;
     }
 
@@ -1639,6 +2229,14 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             returnStmt->value &&
             dynamic_cast<const NoneExpr*>(returnStmt->value.get()) != nullptr && ctx.function &&
             ctx.function->returnType;
+        // `return Ok(value)`/`Err(value)` (see docs/language/0063-result.md)
+        // - same reasoning as `return None` just above.
+        const auto* okExpr =
+            returnStmt->value ? dynamic_cast<const OkExpr*>(returnStmt->value.get()) : nullptr;
+        const auto* errExpr =
+            returnStmt->value ? dynamic_cast<const ErrExpr*>(returnStmt->value.get()) : nullptr;
+        const bool isOkOrErrReturn =
+            (okExpr || errExpr) && ctx.function && ctx.function->returnType;
         auto inst = std::make_unique<IrReturn>();
         if (isNoneReturn)
         {
@@ -1647,9 +2245,27 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
             inst->value = emit(ctx, std::move(noneInst));
         }
+        else if (isOkOrErrReturn)
+        {
+            const auto [okTypeName, errTypeName] =
+                resultPayloadTypeNames(*ctx.function->returnType);
+            auto resultInst = std::make_unique<IrResultNew>();
+            resultInst->isOk = okExpr != nullptr;
+            resultInst->value = lowerExpr(okExpr ? *okExpr->value : *errExpr->value, scope, ctx);
+            resultInst->otherPayloadTypeName = okExpr ? errTypeName : okTypeName;
+            inst->value = emit(ctx, std::move(resultInst));
+        }
         else
         {
             inst->value = returnStmt->value ? lowerExpr(*returnStmt->value, scope, ctx) : -1;
+            // Implicit union wrapping (see docs/language/0065-unions.md) -
+            // `return 5` from a function declared `-> i32 | str` needs no
+            // wrapper syntax.
+            if (returnStmt->value && ctx.function && ctx.function->returnType)
+            {
+                inst->value = wrapForUnion(
+                    inst->value, *returnStmt->value, *ctx.function->returnType, scope, ctx);
+            }
         }
         emitVoid(ctx, std::move(inst));
         return;
@@ -1831,11 +2447,15 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
 {
     IrFunction irFunction;
     irFunction.name = function.name;
-    irFunction.returnType = function.returnType;
+    // llvmSafeTypeName: a no-op for every ordinary type name - only rewrites an anonymous
+    // union's own canonical "T1|T2" text (see docs/language/0065-unions.md) into the form
+    // LlvmIrEmitter will actually emit as a struct type name.
+    irFunction.returnType =
+        function.returnType ? std::optional(llvmSafeTypeName(*function.returnType)) : std::nullopt;
     for (const auto& param : function.params)
     {
         irFunction.paramNames.push_back(param.name);
-        irFunction.paramTypes.push_back(param.type);
+        irFunction.paramTypes.push_back(llvmSafeTypeName(param.type));
     }
 
     IrScope scope;
@@ -1935,6 +2555,28 @@ IrGenerator::generate(const Program& program,
             irProgram.functions.push_back(generateFunction(
                 *function, capabilities.at(function->name), regions.at(function->name)));
         }
+        else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
+        {
+            // Each method compiles exactly like a top-level FunctionDecl
+            // (see docs/language/0062-display-trait.md). "Display"'s own
+            // "format" method additionally gets registered into
+            // displayImpls, the one thing LlvmIrEmitter's own struct-
+            // stringify dispatch (registerStructToStringHelpers) actually
+            // consults - every other trait/method compiles as a real,
+            // callable-in-principle function but drives no runtime
+            // dispatch yet, since nothing else consumes any other trait
+            // name this phase.
+            for (const auto& method : implDecl->methods)
+            {
+                irProgram.functions.push_back(generateFunction(
+                    *method, capabilities.at(method->name), regions.at(method->name)));
+                if (implDecl->traitName == "Display" &&
+                    method->name == implDecl->typeName + ".format")
+                {
+                    irProgram.displayImpls[implDecl->typeName] = method->name;
+                }
+            }
+        }
         else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
         {
             // No body to lower (see docs/language/0048-ffi.md) - just
@@ -1967,6 +2609,45 @@ IrGenerator::generate(const Program& program,
             // auto-printed as if it were a binding.
             lowerStmt(*exprStmt, topScope, topCtx);
         }
+    }
+
+    // `enum` declarations (see docs/language/0064-enums.md), *including* every anonymous union
+    // type auto-registered along the way (see docs/language/0065-unions.md and
+    // registerUnionType) - represented, at every layer below TypeChecker, as an ordinary struct:
+    // a flattened `{i32 tag, <variant0's own fields>, <variant1's own fields>, ...}` layout, each
+    // variant's own payload fields synthetically named "<VariantName>_<index>" (never visible to
+    // real Axea source - see IrResultNew's own "internal name, unreachable from user syntax"
+    // convention for the identical reasoning). This lets construction (IrStructNew), field access
+    // (IrFieldGet), and every layer of LlvmIrEmitter's own struct machinery (type declarations,
+    // malloc+GEP+store construction, GEP+load field reads) work completely unchanged - an enum
+    // genuinely *is* a struct once it reaches this point, just one whose own fields happen to
+    // come from several source variants concatenated rather than one flat field list.
+    // `irProgram.enums` records enough (each variant's own name + field count, in order) for
+    // LlvmIrEmitter to later generate a real, tag-aware print/tostring function instead of the
+    // generic "print every field" one every ordinary struct gets (see
+    // emitStructPrintHelpers/emitStructToStringHelpers's own new enum-skipping check). Flattened
+    // here, *after* every function has been lowered above - not right after registerStructs, the
+    // way a real user-declared enum's own registration is - because a union's own registration
+    // (unlike a real enum's) happens lazily, discovered while lowering a function body (a local's
+    // declared type, an argument being wrapped, ...), so enums_ isn't done growing until the
+    // whole program has been lowered.
+    for (const auto& [name, enumDecl] : enums_)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        fields.emplace_back("__tag", "i32");
+        std::vector<std::pair<std::string, int>> variantSummary;
+        variantSummary.reserve(enumDecl->variants.size());
+        for (const auto& variant : enumDecl->variants)
+        {
+            for (std::size_t i = 0; i < variant.fieldTypes.size(); ++i)
+            {
+                fields.emplace_back(variant.name + "_" + std::to_string(i), variant.fieldTypes[i]);
+            }
+            variantSummary.emplace_back(variant.name, static_cast<int>(variant.fieldTypes.size()));
+        }
+        const std::string llvmName = llvmSafeTypeName(name);
+        irProgram.structs[llvmName] = std::move(fields);
+        irProgram.enums[llvmName] = std::move(variantSummary);
     }
 
     return irProgram;
