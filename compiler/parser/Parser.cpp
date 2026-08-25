@@ -17,6 +17,7 @@ Program Parser::parseProgram()
     {
         program.items.push_back(parseItem());
     }
+    program.moduleName = moduleName_;
     return program;
 }
 
@@ -111,6 +112,30 @@ std::string Parser::parseTypeNameAtom()
         return "[" + elementType + ";" + size.text + "]";
     }
 
+    // "fn(T1,T2)->R" (see docs/language/0067-closures.md) - a closure type, canonicalized here
+    // exactly like every other type ("no spaces" - Parser::parseTypeName's own established
+    // convention), so TypeChecker::resolveType can split it back apart deterministically. `fn`
+    // is a real keyword (TokenKind::Fn), not a plain Identifier, so this is checked before the
+    // unconditional `expect(Identifier)` below.
+    if (current().kind == TokenKind::Fn)
+    {
+        advance();
+        expect(TokenKind::LeftParen, "expected '(' after 'fn' in a closure type");
+        std::string params;
+        if (current().kind != TokenKind::RightParen)
+        {
+            params = parseTypeName();
+            while (match(TokenKind::Comma))
+            {
+                params += "," + parseTypeName();
+            }
+        }
+        expect(TokenKind::RightParen, "expected ')' after closure type parameters");
+        expect(TokenKind::Arrow, "expected '->' after closure type parameters");
+        const std::string returnType = parseTypeName();
+        return "fn(" + params + ")->" + returnType;
+    }
+
     const auto& name = expect(TokenKind::Identifier, "expected type name");
 
     // "slice<elem>" (docs/language/0032-slices.md) / "List<elem>"
@@ -175,7 +200,21 @@ std::string Parser::parseTypeNameAtom()
 
 std::unique_ptr<Stmt> Parser::parseItem()
 {
-    match(TokenKind::Pub); // visibility is parsed and discarded; no module system yet
+    // `pub` (see docs/language/0066-modules.md) - only meaningful on a function/extern
+    // declaration (gates whether `use`-ing code outside this file's own module can reach it);
+    // harmlessly consumed-and-ignored ahead of every other item kind, exactly as before this
+    // phase.
+    const bool isPublic = match(TokenKind::Pub);
+
+    if (current().kind == TokenKind::Module)
+    {
+        return parseModuleDecl();
+    }
+
+    if (current().kind == TokenKind::Use)
+    {
+        return parseUseDecl();
+    }
 
     if (current().kind == TokenKind::Struct)
     {
@@ -184,7 +223,9 @@ std::unique_ptr<Stmt> Parser::parseItem()
 
     if (current().kind == TokenKind::Extern)
     {
-        return parseExternDecl();
+        auto decl = parseExternDecl();
+        static_cast<ExternDecl&>(*decl).isPublic = isPublic;
+        return decl;
     }
 
     if (current().kind == TokenKind::Trait)
@@ -206,7 +247,9 @@ std::unique_ptr<Stmt> Parser::parseItem()
     {
         if (looksLikeFunctionDecl())
         {
-            return parseFunctionDecl();
+            auto decl = parseFunctionDecl();
+            static_cast<FunctionDecl&>(*decl).isPublic = isPublic;
+            return decl;
         }
         // A bare top-level call (e.g. `print("hi")`), kept for its side
         // effect and its result discarded - mirrors parseBlock's own
@@ -334,6 +377,50 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
 
     return std::make_unique<FunctionDecl>(
         name.text, std::move(params), returnType, std::move(body));
+}
+
+std::unique_ptr<Expr> Parser::parseClosureExpr()
+{
+    expect(TokenKind::Fn, "expected 'fn'");
+    expect(TokenKind::LeftParen, "expected '(' after 'fn'");
+
+    std::vector<Param> params;
+    if (current().kind != TokenKind::RightParen)
+    {
+        params.push_back(parseParam());
+        while (match(TokenKind::Comma))
+        {
+            if (current().kind == TokenKind::RightParen)
+            {
+                break;
+            }
+            params.push_back(parseParam());
+        }
+    }
+    expect(TokenKind::RightParen, "expected ')' after closure parameters");
+
+    std::optional<std::string> returnType;
+    if (match(TokenKind::Arrow))
+    {
+        returnType = parseTypeName();
+    }
+
+    std::unique_ptr<Expr> body;
+    if (match(TokenKind::FatArrow))
+    {
+        // Same `=>` sugar parseFunctionDecl's own body parsing already has - see that function's
+        // own comment.
+        auto expr = parseExpression();
+        std::vector<std::unique_ptr<Stmt>> statements;
+        statements.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
+        body = std::make_unique<BlockExpr>(std::move(statements), nullptr);
+    }
+    else
+    {
+        body = parseBlock();
+    }
+
+    return std::make_unique<ClosureExpr>(std::move(params), returnType, std::move(body));
 }
 
 Param Parser::parseSelfAwareParam(const std::string& selfType)
@@ -561,6 +648,40 @@ std::unique_ptr<Stmt> Parser::parseEnumDecl()
     expect(TokenKind::RightBrace, "expected '}' after enum variants");
 
     return std::make_unique<EnumDecl>(name.text, std::move(variants));
+}
+
+std::unique_ptr<Stmt> Parser::parseModuleDecl()
+{
+    if (moduleName_)
+    {
+        throw std::runtime_error("a file may declare at most one module");
+    }
+    expect(TokenKind::Module, "expected 'module'");
+    const auto& name = expect(TokenKind::Identifier, "expected module name");
+    moduleName_ = name.text;
+
+    auto decl = std::make_unique<ModuleDecl>();
+    decl->name = name.text;
+    return decl;
+}
+
+std::unique_ptr<Stmt> Parser::parseUseDecl()
+{
+    expect(TokenKind::Use, "expected 'use'");
+    const auto& name = expect(TokenKind::Identifier, "expected module name after 'use'");
+
+    std::optional<std::string> alias;
+    if (match(TokenKind::As))
+    {
+        alias = expect(TokenKind::Identifier, "expected alias name after 'as'").text;
+    }
+
+    aliases_[alias.value_or(name.text)] = name.text;
+
+    auto decl = std::make_unique<UseDecl>();
+    decl->moduleName = name.text;
+    decl->alias = alias;
+    return decl;
 }
 
 std::unique_ptr<Expr> Parser::parseMatchExpr()
@@ -982,6 +1103,19 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
     {
         if (match(TokenKind::Dot))
         {
+            // `alias.foo(...)` (see docs/language/0066-modules.md) - rewritten to the *real*
+            // module name right here, the exact moment `expr` (already fully parsed) is about
+            // to become a MethodCallExpr/FieldExpr's own `object` - never anywhere else a bare
+            // identifier appears, so an ordinary local variable that happens to share a name
+            // with an in-scope alias is unaffected everywhere except this one position (see
+            // aliases_'s own comment). Every later pass therefore only ever sees the real
+            // module name, with no alias awareness of its own needed anywhere downstream.
+            if (auto* aliasName = dynamic_cast<NameExpr*>(expr.get());
+                aliasName && aliases_.contains(aliasName->name))
+            {
+                aliasName->name = aliases_.at(aliasName->name);
+            }
+
             // `.write(...)` (see docs/language/0061-buffer-write.md) -
             // "write" predates this as TokenKind::Write, a parameter
             // capability-prefix keyword (docs/language/0049-printing-
@@ -1416,6 +1550,14 @@ std::unique_ptr<Expr> Parser::parseStringLiteral(const std::string& text)
 
 std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
 {
+    // `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure literal,
+    // same (params, optional return type, body) shape parseFunctionDecl already parses for a
+    // top-level function, just as an expression instead of a named declaration.
+    if (current().kind == TokenKind::Fn)
+    {
+        return parseClosureExpr();
+    }
+
     if (match(TokenKind::LeftParen))
     {
         auto expr = parseExpression();

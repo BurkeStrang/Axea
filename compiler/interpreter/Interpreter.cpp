@@ -997,6 +997,27 @@ void Interpreter::run(const Program& program)
                 }
             }
         }
+        else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
+        {
+            // Modules (see docs/language/0066-modules.md) - see externModules_'s own comment.
+            externModules_[externDecl->name] = externDecl->moduleName;
+        }
+    }
+
+    // Modules (see docs/language/0066-modules.md) - see moduleNames_'s own comment.
+    for (const auto& [name, function] : functions_)
+    {
+        if (const auto dot = name.rfind('.'); dot != std::string::npos)
+        {
+            moduleNames_.insert(name.substr(0, dot));
+        }
+    }
+    for (const auto& [name, owningModule] : externModules_)
+    {
+        if (!owningModule.empty())
+        {
+            moduleNames_.insert(owningModule);
+        }
     }
 
     for (const auto& item : program.items)
@@ -1314,6 +1335,27 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
+        // `callback(x)` where `callback` is a closure-typed local/param (see
+        // docs/language/0067-closures.md) - checked before print/write and the ordinary
+        // functions_ lookup below, since a closure call and a real function call share the exact
+        // same `Identifier(args)` syntax; TypeChecker's own identical check already validated
+        // this is well-formed wherever it's reached.
+        if (env.contains(call->callee))
+        {
+            const Value calleeValue = env.get(call->callee);
+            if (const auto* closureInstance =
+                    std::get_if<std::shared_ptr<ClosureInstance>>(&calleeValue))
+            {
+                std::vector<Value> args;
+                args.reserve(call->arguments.size());
+                for (const auto& argument : call->arguments)
+                {
+                    args.push_back(evaluate(*argument, env));
+                }
+                return callClosure(**closureInstance, std::move(args));
+            }
+        }
+
         // `print`/`write` (see docs/language/Axea_Printing_Formatting.md)
         // - compiler builtins, checked before the ordinary functions_
         // lookup below (TypeChecker::registerSignatures already
@@ -1434,6 +1476,32 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                 }
                 return std::make_shared<EnumInstance>(
                     EnumInstance{enumIt->second->name, methodCall->method, std::move(fields)});
+            }
+
+            // `math.sqrt(x)` module-qualified call (see docs/language/0066-modules.md) - checked
+            // before evaluating `methodCall->object` as an ordinary value just below, for the
+            // same "bare name matching something known, not a real bound value" reason as the
+            // enum check just above. TypeChecker already validated arity/types/pub-ness
+            // wherever this is reached, so no further validation happens here - just resolve
+            // and call. `object`'s own NameExpr already carries the *real* module name (Parser::
+            // parsePostfix rewrote any alias at parse time).
+            if (moduleNames_.contains(name->name))
+            {
+                std::vector<Value> args;
+                args.reserve(methodCall->arguments.size());
+                for (const auto& argument : methodCall->arguments)
+                {
+                    args.push_back(evaluate(*argument, env));
+                }
+                // An extern is resolved by its own bare/real name (e.g. "sqrt"), never a
+                // qualified one - see externModules_'s own comment.
+                if (const auto externIt = externModules_.find(methodCall->method);
+                    externIt != externModules_.end() && externIt->second == name->name)
+                {
+                    return callExtern(methodCall->method, args);
+                }
+                return callFunction(*functions_.at(name->name + "." + methodCall->method),
+                                    std::move(args));
             }
         }
 
@@ -2591,6 +2659,32 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         throw std::runtime_error("no match arm for variant '" + scrutinee->variantName + "'");
     }
 
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        // Move-only capture (see docs/language/0067-closures.md) - a snapshot of every
+        // enclosing-scope value the closure's own body references, taken *now*. Only names
+        // actually bound in `env` are captured; a top-level function's own name (also collected
+        // by the dumb, over-approximating scan) is simply never bound in any Environment, so it's
+        // silently skipped here and resolved normally (by name, via functions_) inside the
+        // closure body when it's eventually called.
+        auto instance = std::make_shared<ClosureInstance>();
+        instance->declaration = closureExpr;
+        std::unordered_set<std::string> referenced;
+        collectReferencedNames(*closureExpr->body, referenced);
+        for (const auto& param : closureExpr->params)
+        {
+            referenced.erase(param.name);
+        }
+        for (const auto& name : referenced)
+        {
+            if (env.contains(name))
+            {
+                instance->captures[name] = env.get(name);
+            }
+        }
+        return instance;
+    }
+
     throw std::runtime_error("unsupported expression");
 }
 
@@ -2667,6 +2761,248 @@ Value Interpreter::wrapForUnion(Value value, const std::string& declaredTypeName
     // call site in this file has none either.
     throw std::runtime_error("internal error: value doesn't match any alternative of union " +
                              declaredTypeName);
+}
+
+void Interpreter::collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names)
+{
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        names.insert(name->name);
+        return;
+    }
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
+    {
+        collectReferencedNames(*binary->left, names);
+        collectReferencedNames(*binary->right, names);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        collectReferencedNames(*cast->operand, names);
+        return;
+    }
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        collectReferencedNames(*someExpr->value, names);
+        return;
+    }
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        collectReferencedNames(*okExpr->value, names);
+        return;
+    }
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        collectReferencedNames(*errExpr->value, names);
+        return;
+    }
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        collectReferencedNames(*tryExpr->operand, names);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        collectReferencedNames(*field->object, names);
+        return;
+    }
+    if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        for (const auto& [fieldName, valueExpr] : literal->fields)
+        {
+            collectReferencedNames(*valueExpr, names);
+        }
+        return;
+    }
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            collectReferencedNames(*element, names);
+        }
+        return;
+    }
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        collectReferencedNames(*index->object, names);
+        collectReferencedNames(*index->index, names);
+        return;
+    }
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                collectReferencedNames(*piece.expr, names);
+            }
+        }
+        return;
+    }
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        collectReferencedNames(*strSlice->object, names);
+        if (strSlice->start)
+        {
+            collectReferencedNames(*strSlice->start, names);
+        }
+        if (strSlice->end)
+        {
+            collectReferencedNames(*strSlice->end, names);
+        }
+        return;
+    }
+    if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
+    {
+        collectReferencedNames(*ifExpr->condition, names);
+        collectReferencedNames(*ifExpr->thenBranch, names);
+        collectReferencedNames(*ifExpr->elseBranch, names);
+        return;
+    }
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        collectReferencedNames(*matchExpr->scrutinee, names);
+        for (const auto& arm : matchExpr->arms)
+        {
+            collectReferencedNames(*arm.body, names);
+        }
+        return;
+    }
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        collectReferencedNames(*loopExpr->body, names);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+    {
+        for (const auto& statement : block->statements)
+        {
+            collectReferencedNames(*statement, names);
+        }
+        if (block->result)
+        {
+            collectReferencedNames(*block->result, names);
+        }
+        return;
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        for (const auto& argument : call->arguments)
+        {
+            collectReferencedNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        collectReferencedNames(*methodCall->object, names);
+        for (const auto& argument : methodCall->arguments)
+        {
+            collectReferencedNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        std::unordered_set<std::string> nested;
+        collectReferencedNames(*closureExpr->body, nested);
+        for (const auto& param : closureExpr->params)
+        {
+            nested.erase(param.name);
+        }
+        names.insert(nested.begin(), nested.end());
+        return;
+    }
+
+    // IntegerExpr, Int64Expr, FloatExpr, BoolExpr, StringExpr, CharExpr: no sub-expressions.
+}
+
+void Interpreter::collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names)
+{
+    if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
+    {
+        collectReferencedNames(*assignment->value, names);
+        return;
+    }
+    if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
+    {
+        if (returnStmt->value)
+        {
+            collectReferencedNames(*returnStmt->value, names);
+        }
+        return;
+    }
+    if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
+    {
+        collectReferencedNames(*exprStmt->expr, names);
+        return;
+    }
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*fieldAssign->object, names);
+        collectReferencedNames(*fieldAssign->value, names);
+        return;
+    }
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*indexAssign->object, names);
+        collectReferencedNames(*indexAssign->index, names);
+        collectReferencedNames(*indexAssign->value, names);
+        return;
+    }
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        collectReferencedNames(*incDec->target, names);
+        return;
+    }
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        collectReferencedNames(*whileStmt->condition, names);
+        collectReferencedNames(*whileStmt->body, names);
+        return;
+    }
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            collectReferencedNames(*breakStmt->value, names);
+        }
+        return;
+    }
+    // ContinueStmt: nothing to collect.
+}
+
+Value Interpreter::callClosure(const ClosureInstance& instance, std::vector<Value> args)
+{
+    Environment env; // no parent - captures are explicit (already snapshotted), not looked up
+                     // through a live lexical chain
+    for (const auto& [name, value] : instance.captures)
+    {
+        env.define(name, value);
+    }
+    for (std::size_t i = 0; i < instance.declaration->params.size(); ++i)
+    {
+        env.define(instance.declaration->params[i].name, std::move(args[i]));
+    }
+
+    const auto& body = static_cast<const BlockExpr&>(*instance.declaration->body);
+    try
+    {
+        Environment bodyEnv(&env);
+        for (const auto& statement : body.statements)
+        {
+            execute(*statement, bodyEnv);
+        }
+        if (body.result)
+        {
+            evaluate(*body.result, bodyEnv);
+        }
+    }
+    catch (ReturnSignal& signal)
+    {
+        return std::move(signal.value);
+    }
+    return Value{std::monostate{}};
 }
 
 Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> args)

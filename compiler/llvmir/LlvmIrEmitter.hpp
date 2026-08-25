@@ -196,6 +196,20 @@ private:
     std::string resultOkPayloadType(const std::string& type) const;
     std::string resultErrPayloadType(const std::string& type) const;
 
+    // Closures (see docs/language/0067-closures.md) - same lazy-registration shape as
+    // registerResultInstantiation above. Returns "%axea.Closure.<id>".
+    std::string registerClosureInstantiation(const std::vector<std::string>& paramLlvmTypes,
+                                             const std::string& returnLlvmType);
+    // "%axea.Closure." prefix only - same reasoning as isOptionalType.
+    bool isClosureType(const std::string& type) const;
+    // The full function-pointer type text (e.g. "i32 (i8*, i32)*"), looked up by the full
+    // "%axea.Closure.<id>" string - needed at both IrClosureNew (building field 0) and
+    // IrClosureCall (typing the indirect call) time.
+    std::string closureFnPtrType(const std::string& type) const;
+    std::string closureReturnType(const std::string& type) const;
+    void emitClosureNew(const IrClosureNew& closureNew, FunctionContext& fctx);
+    void emitClosureCall(const IrClosureCall& closureCall, FunctionContext& fctx);
+
     bool isSliceType(const std::string& type) const;
     // "{T*, i32}" -> "T".
     std::string sliceElementType(const std::string& type) const;
@@ -1110,6 +1124,24 @@ private:
     std::unordered_map<int, std::string> resultErrPayloadTypeById_;
     int nextResultInstantiationId_ = 0;
     std::ostringstream resultTypeDeclsText_;
+
+    // Closure monomorphization (see docs/language/0067-closures.md) - the same lazy-
+    // registration/dedup shape as Optional/Result just above, keyed by joint LLVM signature text
+    // (returnLlvmType + "|" + each paramLlvmType, joined - safe for the identical "neither an
+    // LLVM type string nor '|' can collide" reason resultInstantiationIds_'s own key already
+    // relies on). Unlike Optional/Result, this is a "fat pointer" pair - {fn ptr, i8* captures} -
+    // not a payload-holding struct: a closure's own *captures* are structurally per-literal (an
+    // ordinary, separately-registered captures struct - see IrGenerator::closureCaptureStructs_),
+    // hidden behind the opaque i8* here, which is exactly what lets every closure sharing one
+    // signature collapse onto the same %axea.Closure.<id> regardless of what each one actually
+    // captures. closureFnPtrTypeById_: the assigned ID's own full function-pointer type text
+    // (e.g. "i32 (i8*, i32)*"), needed at both construction (IrClosureNew) and call
+    // (IrClosureCall) time.
+    std::unordered_map<std::string, int> closureInstantiationIds_;
+    std::unordered_map<int, std::string> closureFnPtrTypeById_;
+    std::unordered_map<int, std::string> closureReturnTypeById_;
+    int nextClosureInstantiationId_ = 0;
+    std::ostringstream closureTypeDeclsText_;
 
     // Key hash/equality runtime (see registerKeyRuntime): canonical Axea key
     // type string -> its (hashFnName, eqFnName) pair, memoized so a key type

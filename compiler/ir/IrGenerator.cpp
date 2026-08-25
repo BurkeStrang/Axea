@@ -357,6 +357,27 @@ void IrGenerator::registerStructs(const Program& program)
                 functions_[method->name] = method.get();
             }
         }
+        else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
+        {
+            // Modules (see docs/language/0066-modules.md) - see externModules_'s own comment.
+            externModules_[externDecl->name] = externDecl->moduleName;
+        }
+    }
+
+    // Modules (see docs/language/0066-modules.md) - see moduleNames_'s own comment.
+    for (const auto& [name, function] : functions_)
+    {
+        if (const auto dot = name.rfind('.'); dot != std::string::npos)
+        {
+            moduleNames_.insert(name.substr(0, dot));
+        }
+    }
+    for (const auto& [name, owningModule] : externModules_)
+    {
+        if (!owningModule.empty())
+        {
+            moduleNames_.insert(owningModule);
+        }
     }
 
     // Anonymous union types (see docs/language/0065-unions.md) - every function/impl-method
@@ -957,6 +978,215 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
     return std::nullopt;
 }
 
+void IrGenerator::collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names)
+{
+    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
+    {
+        names.insert(name->name);
+        return;
+    }
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
+    {
+        collectReferencedNames(*binary->left, names);
+        collectReferencedNames(*binary->right, names);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        collectReferencedNames(*cast->operand, names);
+        return;
+    }
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        collectReferencedNames(*someExpr->value, names);
+        return;
+    }
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        collectReferencedNames(*okExpr->value, names);
+        return;
+    }
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        collectReferencedNames(*errExpr->value, names);
+        return;
+    }
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        collectReferencedNames(*tryExpr->operand, names);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        collectReferencedNames(*field->object, names);
+        return;
+    }
+    if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        for (const auto& [fieldName, valueExpr] : literal->fields)
+        {
+            collectReferencedNames(*valueExpr, names);
+        }
+        return;
+    }
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            collectReferencedNames(*element, names);
+        }
+        return;
+    }
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        collectReferencedNames(*index->object, names);
+        collectReferencedNames(*index->index, names);
+        return;
+    }
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                collectReferencedNames(*piece.expr, names);
+            }
+        }
+        return;
+    }
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        collectReferencedNames(*strSlice->object, names);
+        if (strSlice->start)
+        {
+            collectReferencedNames(*strSlice->start, names);
+        }
+        if (strSlice->end)
+        {
+            collectReferencedNames(*strSlice->end, names);
+        }
+        return;
+    }
+    if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
+    {
+        collectReferencedNames(*ifExpr->condition, names);
+        collectReferencedNames(*ifExpr->thenBranch, names);
+        collectReferencedNames(*ifExpr->elseBranch, names);
+        return;
+    }
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        collectReferencedNames(*matchExpr->scrutinee, names);
+        for (const auto& arm : matchExpr->arms)
+        {
+            collectReferencedNames(*arm.body, names);
+        }
+        return;
+    }
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        collectReferencedNames(*loopExpr->body, names);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+    {
+        for (const auto& statement : block->statements)
+        {
+            collectReferencedNames(*statement, names);
+        }
+        if (block->result)
+        {
+            collectReferencedNames(*block->result, names);
+        }
+        return;
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        for (const auto& argument : call->arguments)
+        {
+            collectReferencedNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        collectReferencedNames(*methodCall->object, names);
+        for (const auto& argument : methodCall->arguments)
+        {
+            collectReferencedNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        std::unordered_set<std::string> nested;
+        collectReferencedNames(*closureExpr->body, nested);
+        for (const auto& param : closureExpr->params)
+        {
+            nested.erase(param.name);
+        }
+        names.insert(nested.begin(), nested.end());
+        return;
+    }
+
+    // IntegerExpr, Int64Expr, FloatExpr, BoolExpr, StringExpr, CharExpr: no sub-expressions.
+}
+
+void IrGenerator::collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names)
+{
+    if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
+    {
+        collectReferencedNames(*assignment->value, names);
+        return;
+    }
+    if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
+    {
+        if (returnStmt->value)
+        {
+            collectReferencedNames(*returnStmt->value, names);
+        }
+        return;
+    }
+    if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
+    {
+        collectReferencedNames(*exprStmt->expr, names);
+        return;
+    }
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*fieldAssign->object, names);
+        collectReferencedNames(*fieldAssign->value, names);
+        return;
+    }
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*indexAssign->object, names);
+        collectReferencedNames(*indexAssign->index, names);
+        collectReferencedNames(*indexAssign->value, names);
+        return;
+    }
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        collectReferencedNames(*incDec->target, names);
+        return;
+    }
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        collectReferencedNames(*whileStmt->condition, names);
+        collectReferencedNames(*whileStmt->body, names);
+        return;
+    }
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            collectReferencedNames(*breakStmt->value, names);
+        }
+        return;
+    }
+    // ContinueStmt: nothing to collect.
+}
+
 int IrGenerator::wrapForUnion(int valueReg,
                               const Expr& valueExpr,
                               const std::string& declaredTypeName,
@@ -1340,6 +1570,47 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(printInst));
         }
 
+        // `callback(x)` where `callback` is a closure-typed local/param (see
+        // docs/language/0067-closures.md) - checked before the ordinary functions_ lookup below,
+        // for the same "shares Identifier(args) syntax with a real call" reason
+        // docs/language/0066-modules.md's own module-call interception is. Reuses
+        // IrScope::findSimpleType (built for docs/language/0065-unions.md's own implicit-wrap
+        // resolution) rather than a new tracker - a closure-typed local's own declared/inferred
+        // type text always starts with "fn(", exactly the same signal simpleTypeOfExpr already
+        // resolves for any other name.
+        {
+            std::optional<std::string> calleeType;
+            if (ctx.function)
+            {
+                for (const auto& param : ctx.function->params)
+                {
+                    if (param.name == call->callee)
+                    {
+                        calleeType = param.type;
+                        break;
+                    }
+                }
+            }
+            if (!calleeType)
+            {
+                calleeType = scope.findSimpleType(call->callee);
+            }
+            if (calleeType && calleeType->starts_with("fn("))
+            {
+                const int closureReg = scope.find(call->callee);
+                std::vector<int> closureArgs;
+                closureArgs.reserve(call->arguments.size());
+                for (const auto& argument : call->arguments)
+                {
+                    closureArgs.push_back(lowerExpr(*argument, scope, ctx));
+                }
+                auto closureCall = std::make_unique<IrClosureCall>();
+                closureCall->closureObject = closureReg;
+                closureCall->args = std::move(closureArgs);
+                return emit(ctx, std::move(closureCall));
+            }
+        }
+
         const auto calleeIt = functions_.find(call->callee);
         std::vector<int> args;
         args.reserve(call->arguments.size());
@@ -1396,6 +1667,35 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             inst->typeName = enumDecl.name;
             inst->fields = std::move(fields);
             return emit(ctx, std::move(inst));
+        }
+
+        // `math.sqrt(x)` module-qualified call (see docs/language/0066-modules.md) - checked
+        // before lowering `methodCall->object` below, for the same "bare name that isn't a real
+        // value" reason as the enum check just above. An IrCall is emitted either way - the only
+        // question is *which* callee text: a function's own already-qualified name ("math.
+        // helper"), or an extern's own bare, real, externally-linked symbol ("sqrt" - never
+        // "math.sqrt", which would try to link against a symbol that doesn't exist; see
+        // externModules_'s own comment).
+        if (const auto* moduleName = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            moduleName && moduleNames_.contains(moduleName->name))
+        {
+            std::string callee = moduleName->name + "." + methodCall->method;
+            if (const auto externIt = externModules_.find(methodCall->method);
+                externIt != externModules_.end() && externIt->second == moduleName->name)
+            {
+                callee = methodCall->method;
+            }
+
+            std::vector<int> args;
+            args.reserve(methodCall->arguments.size());
+            for (const auto& argument : methodCall->arguments)
+            {
+                args.push_back(lowerExpr(*argument, scope, ctx));
+            }
+            auto callInst = std::make_unique<IrCall>();
+            callInst->callee = callee;
+            callInst->args = std::move(args);
+            return emit(ctx, std::move(callInst));
         }
 
         // Resolved from the AST, before lowering `object` below, since
@@ -2061,6 +2361,77 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return result;
     }
 
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        // Move-only capture (see docs/language/0067-closures.md) - the same over-approximating
+        // free-variable scan CapabilityChecker/Interpreter's own copies already use, minus the
+        // closure's own param names.
+        std::unordered_set<std::string> referenced;
+        collectReferencedNames(*closureExpr->body, referenced);
+        for (const auto& param : closureExpr->params)
+        {
+            referenced.erase(param.name);
+        }
+        // Deterministic order (insertion order of a sorted scan) so the same closure literal
+        // always produces byte-identical IR across runs - an unordered_set's own iteration order
+        // isn't guaranteed stable.
+        std::vector<std::string> capturedNames(referenced.begin(), referenced.end());
+        std::sort(capturedNames.begin(), capturedNames.end());
+
+        std::vector<std::pair<std::string, int>> captureFields;
+        std::vector<std::pair<std::string, std::string>> captureStructFields;
+        for (const auto& capturedName : capturedNames)
+        {
+            const NameExpr capturedNameExpr(capturedName);
+            const auto capturedType = simpleTypeOfExpr(capturedNameExpr, ctx.function, scope);
+            if (!capturedType)
+            {
+                // Not actually a bound local/param (e.g. a top-level function's own name, also
+                // picked up by the dumb, over-approximating scan) - resolved normally by name
+                // when the closure body eventually calls it, not captured at all.
+                continue;
+            }
+            const int capturedReg = lowerExpr(capturedNameExpr, scope, ctx);
+            captureFields.emplace_back(capturedName, capturedReg);
+            captureStructFields.emplace_back(capturedName, llvmSafeTypeName(*capturedType));
+        }
+        // Re-derive the actually-captured name list (some scanned names may have been dropped
+        // just above) so the trampoline's own IrFieldGet list matches captureFields exactly.
+        std::vector<std::string> actuallyCaptured;
+        actuallyCaptured.reserve(captureFields.size());
+        for (const auto& [name, reg] : captureFields)
+        {
+            actuallyCaptured.push_back(name);
+        }
+
+        const std::string capturesStructName =
+            "closure.captures." + std::to_string(closureCounter_);
+        const std::string trampolineName = "closure$" + std::to_string(closureCounter_);
+        ++closureCounter_;
+        closureCaptureStructs_[capturesStructName] = captureStructFields;
+
+        auto capturesStructInst = std::make_unique<IrStructNew>();
+        capturesStructInst->typeName = capturesStructName;
+        capturesStructInst->fields = captureFields;
+        const int capturesReg = emit(ctx, std::move(capturesStructInst));
+
+        closureTrampolines_.push_back(generateClosureTrampoline(
+            *closureExpr, trampolineName, capturesStructName, actuallyCaptured));
+
+        std::vector<std::string> paramTypes;
+        paramTypes.reserve(closureExpr->params.size());
+        for (const auto& param : closureExpr->params)
+        {
+            paramTypes.push_back(param.type);
+        }
+        auto closureNewInst = std::make_unique<IrClosureNew>();
+        closureNewInst->trampolineFunctionName = trampolineName;
+        closureNewInst->capturesObject = capturesReg;
+        closureNewInst->paramTypes = std::move(paramTypes);
+        closureNewInst->returnType = closureExpr->returnType.value_or("unit");
+        return emit(ctx, std::move(closureNewInst));
+    }
+
     return -1; // unreachable for a well-checked program
 }
 
@@ -2525,6 +2896,87 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     return irFunction;
 }
 
+IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr,
+                                                  const std::string& trampolineName,
+                                                  const std::string& capturesStructName,
+                                                  const std::vector<std::string>& capturedNames)
+{
+    IrFunction irFunction;
+    irFunction.name = trampolineName;
+    irFunction.returnType = closureExpr.returnType
+                                ? std::optional(llvmSafeTypeName(*closureExpr.returnType))
+                                : std::nullopt;
+    irFunction.paramNames.push_back("__captures");
+    irFunction.paramTypes.push_back(capturesStructName);
+    for (const auto& param : closureExpr.params)
+    {
+        irFunction.paramNames.push_back(param.name);
+        irFunction.paramTypes.push_back(llvmSafeTypeName(param.type));
+    }
+
+    IrScope scope;
+    int registerCount = 0;
+    // ctx.function is null - closures don't have an enclosing FunctionDecl of their own (a real,
+    // if narrow, known imprecision: any ctx.function-dependent logic, like union-wrap self-
+    // lookup, degrades to its own scope-only fallback inside a closure body - see
+    // docs/language/0067-closures.md's own Known Imprecision).
+    Context ctx{&irFunction.body, &registerCount, nullptr, nullptr};
+
+    emitVoid(ctx, std::make_unique<IrRegionEnter>());
+
+    // Every param's own register is allocated first, consecutively, with nothing else emitted in
+    // between - mirrors generateFunction's own identical shape exactly, since LlvmIrEmitter's own
+    // prologue maps the first N freshly allocated registers, in order, to the N actual LLVM
+    // parameters. The captures-field IrFieldGets below must come *after* this, once every param
+    // register already exists - emitting them interleaved would misalign that correspondence.
+    const int capturesRegister = freshRegister(ctx);
+    {
+        auto inst = std::make_unique<IrBorrowRead>();
+        inst->value = capturesRegister;
+        emitVoid(ctx, std::move(inst));
+    }
+    std::vector<int> paramRegisters;
+    paramRegisters.reserve(closureExpr.params.size());
+    for (std::size_t i = 0; i < closureExpr.params.size(); ++i)
+    {
+        const int paramRegister = freshRegister(ctx);
+        paramRegisters.push_back(paramRegister);
+        // Always Owned/Move - never struct-typed (this phase's own scope cut), so this has no
+        // observable effect at the LLVM level either way, mirroring generateFunction's own
+        // identical treatment of a non-struct param.
+        auto inst = std::make_unique<IrMove>();
+        inst->value = paramRegister;
+        emitVoid(ctx, std::move(inst));
+    }
+
+    for (std::size_t i = 0; i < closureExpr.params.size(); ++i)
+    {
+        scope.define(closureExpr.params[i].name, paramRegisters[i]);
+    }
+    for (const auto& capturedName : capturedNames)
+    {
+        auto fieldGet = std::make_unique<IrFieldGet>();
+        fieldGet->object = capturesRegister;
+        fieldGet->field = capturedName;
+        const int fieldReg = emit(ctx, std::move(fieldGet));
+        scope.define(capturedName, fieldReg);
+    }
+
+    lowerExpr(*closureExpr.body, scope, ctx);
+
+    if (!alwaysTerminates(irFunction.body))
+    {
+        auto returnInst = std::make_unique<IrReturn>();
+        returnInst->value = -1;
+        emitVoid(ctx, std::move(returnInst));
+    }
+
+    emitVoid(ctx, std::make_unique<IrRegionExit>());
+
+    irFunction.registerCount = registerCount;
+    return irFunction;
+}
+
 IrProgram
 IrGenerator::generate(const Program& program,
                       const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
@@ -2648,6 +3100,19 @@ IrGenerator::generate(const Program& program,
         const std::string llvmName = llvmSafeTypeName(name);
         irProgram.structs[llvmName] = std::move(fields);
         irProgram.enums[llvmName] = std::move(variantSummary);
+    }
+
+    // Closures (see docs/language/0067-closures.md) - every trampoline function and every
+    // captures struct discovered while lowering function bodies above, flushed here for the same
+    // "discovered lazily, not known up front the way a real top-level item is" reason unions are
+    // flattened here rather than right after registerStructs.
+    for (auto& trampoline : closureTrampolines_)
+    {
+        irProgram.functions.push_back(std::move(trampoline));
+    }
+    for (auto& [name, fields] : closureCaptureStructs_)
+    {
+        irProgram.structs[name] = std::move(fields);
     }
 
     return irProgram;

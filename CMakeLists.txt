@@ -14,6 +14,7 @@ add_library(axea_compiler
     compiler/sema/RegionChecker.cpp
     compiler/ir/IrGenerator.cpp
     compiler/llvmir/LlvmIrEmitter.cpp
+    compiler/module/ModuleLoader.cpp
 )
 
 target_include_directories(axea_compiler PUBLIC compiler)
@@ -37,6 +38,7 @@ add_executable(axea_tests
     tests/RegionCheckerTests.cpp
     tests/IrGeneratorTests.cpp
     tests/LlvmIrEmitterTests.cpp
+    tests/ModuleLoaderTests.cpp
 )
 target_include_directories(axea_tests PRIVATE tests)
 target_link_libraries(axea_tests PRIVATE axea_compiler)

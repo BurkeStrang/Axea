@@ -234,6 +234,20 @@ void RegionChecker::registerDecls(const Program& program)
                 functions_[method->name] = method.get();
             }
         }
+        else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get());
+                 externDecl && !externDecl->moduleName.empty())
+        {
+            moduleNames_.insert(externDecl->moduleName);
+        }
+    }
+
+    // Modules (see docs/language/0066-modules.md) - see moduleNames_'s own comment.
+    for (const auto& [name, function] : functions_)
+    {
+        if (const auto dot = name.rfind('.'); dot != std::string::npos)
+        {
+            moduleNames_.insert(name.substr(0, dot));
+        }
     }
 }
 
@@ -682,6 +696,27 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
                 regionOfExpr(*argument, env, function, currentLoopBreakRegions);
             }
             return RegionInfo{Region::Owned, "", ""};
+        }
+
+        // `math.sqrt(x)` module-qualified call (see docs/language/0066-modules.md) - same
+        // "bare name matching something known, checked before generic resolution" reasoning as
+        // the enum check just above; the exact `env.get` bug this whole pattern exists to avoid
+        // was first found (and documented) for enum's own EnumName.Variant construction, see
+        // docs/language/0064-enums.md.
+        if (const auto* moduleName = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            moduleName && moduleNames_.contains(moduleName->name))
+        {
+            std::string structType;
+            if (const auto it = functions_.find(moduleName->name + "." + methodCall->method);
+                it != functions_.end() && it->second->returnType)
+            {
+                structType = *it->second->returnType;
+            }
+            for (const auto& argument : methodCall->arguments)
+            {
+                regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+            }
+            return RegionInfo{Region::Owned, "", structType};
         }
 
         const RegionInfo objectInfo =

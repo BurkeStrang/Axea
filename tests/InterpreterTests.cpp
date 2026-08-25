@@ -2478,3 +2478,54 @@ TEST("Interpreter's union value wraps a struct alternative by its own type name"
     EXPECT_EQ(toString(results.at("a")), "point");
     EXPECT_EQ(toString(results.at("b")), "number");
 }
+
+TEST("Interpreter calls a closure literal assigned to a declared local (see "
+     "docs/language/0067-closures.md)")
+{
+    const std::string source =
+        "add: fn(i32, i32) -> i32 = fn(x: i32, y: i32) -> i32 { return x + y } "
+        "y = add(2, 3)";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 5);
+}
+
+TEST("Interpreter's closure closes over an enclosing function's own param by value - returned, "
+     "and called later, each captured value stays independent of any other closure's own copy")
+{
+    const std::string source = "makeAdder(base: i32) -> fn(i32) -> i32 { "
+                               "  return fn(x: i32) -> i32 { return x + base } "
+                               "} "
+                               "add5 = makeAdder(5) "
+                               "add10 = makeAdder(10) "
+                               "a = add5(1) "
+                               "b = add10(1)";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 6);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 11);
+}
+
+TEST("Interpreter calls a closure-typed parameter - a higher-order function")
+{
+    const std::string source = "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+                               "doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } "
+                               "tripler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 3 } "
+                               "a = apply(doubler, 5) "
+                               "b = apply(tripler, 5)";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 10);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 15);
+}
+
+TEST("Interpreter's closure captures a struct-typed local by move, still readable through the "
+     "captured copy after the closure is created")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "run() -> i32 { "
+                               "  p = Point { x: 3, y: 4 } "
+                               "  sum: fn() -> i32 = fn() -> i32 { return p.x + p.y } "
+                               "  return sum() "
+                               "} "
+                               "y = run()";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 7);
+}

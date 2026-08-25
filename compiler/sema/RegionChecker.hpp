@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Runs after CapabilityChecker (docs/language/0020-compiler-architecture.md's
@@ -89,5 +90,17 @@ private:
     // expression, which would otherwise throw "undefined variable" trying to look up a bare
     // enum type name in `env`.
     std::unordered_map<std::string, const EnumDecl*> enums_;
+    // Modules (see docs/language/0066-modules.md) - registered for the identical reason enums_
+    // is: regionOfExpr's MethodCallExpr case needs to recognize `math.sqrt(x)` *before*
+    // recursing into `object` as an ordinary value, which would otherwise throw "undefined
+    // variable: math" (this exact bug class - a bare type/module name mistaken for a bound
+    // value in RegionChecker's own generic path - was first found, and documented, for a real
+    // enum's own construction syntax; see docs/language/0064-enums.md). No extern *signatures*
+    // are needed here (RegionChecker only cares about struct-typed aliasing, and an extern's
+    // params/return are always FFI-safe primitives, never a struct - see
+    // docs/language/0048-ffi.md), so this is just the set of real module names, derived from
+    // both functions_'s own already-'.'-qualified keys and every registered ExternDecl's own
+    // moduleName field.
+    std::unordered_set<std::string> moduleNames_;
     std::unordered_map<std::string, std::vector<Region>> regions_;
 };

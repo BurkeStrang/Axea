@@ -349,16 +349,19 @@ namespace
     // docs/language/0034-maps-and-sets.md's generic rewrite) - the naive
     // `text.find(',')` this replaces broke as soon as a value type could
     // itself contain a comma.
+    // '('/')' tracked alongside '<'/'['/'>'/']' since docs/language/0067-closures.md's own
+    // "fn(T1,T2)->R" closure type text can nest inside any other type's own argument list
+    // (e.g. a Map<str, fn(i32)->i32> value type) exactly the way Map<K,V> itself already can.
     std::size_t findTopLevelComma(const std::string& text)
     {
         int depth = 0;
         for (std::size_t i = 0; i < text.size(); ++i)
         {
-            if (text[i] == '<' || text[i] == '[')
+            if (text[i] == '<' || text[i] == '[' || text[i] == '(')
             {
                 ++depth;
             }
-            else if (text[i] == '>' || text[i] == ']')
+            else if (text[i] == '>' || text[i] == ']' || text[i] == ')')
             {
                 --depth;
             }
@@ -399,6 +402,55 @@ namespace
         }
         return std::string::npos;
     }
+
+    // "fn(T1,T2)->R" -> ({T1,T2}, R) (see docs/language/0067-closures.md) - the closure-flavored
+    // analogue of Result's own payload-splitting helper, used wherever a closure's own structured
+    // signature (not just its canonical string identity) is actually needed: checking a closure
+    // call's own argument count/types, and (by IrGenerator/Interpreter, each with their own copy)
+    // building the closure's own runtime representation.
+    std::pair<std::vector<std::string>, std::string>
+    closureParamAndReturnTypes(const std::string& closureTypeName)
+    {
+        int depth = 0;
+        std::size_t closeParen = std::string::npos;
+        for (std::size_t i = 3; i < closureTypeName.size(); ++i) // "fn(" is always exactly 3 chars
+        {
+            const char c = closureTypeName[i];
+            if (c == '<' || c == '[' || c == '(')
+            {
+                ++depth;
+            }
+            else if (c == '>' || c == ']' || c == ')')
+            {
+                if (depth == 0)
+                {
+                    closeParen = i;
+                    break;
+                }
+                --depth;
+            }
+        }
+        const std::string paramsCsv = closureTypeName.substr(3, closeParen - 3);
+        const std::string returnType = closureTypeName.substr(closeParen + 3); // skip ")->"
+
+        std::vector<std::string> params;
+        if (!paramsCsv.empty())
+        {
+            std::size_t start = 0;
+            while (true)
+            {
+                const auto comma = findTopLevelComma(paramsCsv.substr(start));
+                if (comma == std::string::npos)
+                {
+                    params.push_back(paramsCsv.substr(start));
+                    break;
+                }
+                params.push_back(paramsCsv.substr(start, comma));
+                start += comma + 1;
+            }
+        }
+        return {params, returnType};
+    }
 } // namespace
 
 std::string typeName(const Type& type)
@@ -414,6 +466,7 @@ std::string typeName(const Type& type)
         case TypeKind::Unit: return "unit";
         case TypeKind::Struct: return type.structName;
         case TypeKind::Enum: return type.structName;
+        case TypeKind::Closure: return type.structName;
         // elementTypeName/valueTypeName are always already-canonical strings
         // (see Type::elementTypeName's own comment), so reconstruction is
         // trivial string concatenation - no nested Type to recurse into
@@ -467,6 +520,15 @@ Type TypeEnv::get(const std::string& name) const
         return parent_->get(name);
     }
     throw std::runtime_error("undefined variable: " + name);
+}
+
+bool TypeEnv::contains(const std::string& name) const
+{
+    if (types_.contains(name))
+    {
+        return true;
+    }
+    return parent_ && parent_->contains(name);
 }
 
 const EnumDecl* TypeChecker::asEnumTypeName(const Expr& objectExpr) const
@@ -545,6 +607,57 @@ bool TypeChecker::isUnionMember(const Type& valueType, const Type& targetType) c
         }
     }
     return false;
+}
+
+Type TypeChecker::checkCallArguments(const std::string& calleeDisplayName,
+                                     const std::vector<Param>& params,
+                                     const std::optional<std::string>& returnType,
+                                     const std::vector<std::unique_ptr<Expr>>& arguments,
+                                     TypeEnv& env,
+                                     const Type* expectedReturnType,
+                                     std::vector<Type>* currentLoopBreakTypes)
+{
+    if (arguments.size() != params.size())
+    {
+        throw std::runtime_error("function '" + calleeDisplayName + "' expects " +
+                                 std::to_string(params.size()) + " argument(s), got " +
+                                 std::to_string(arguments.size()));
+    }
+
+    for (std::size_t i = 0; i < arguments.size(); ++i)
+    {
+        const Type argType =
+            checkExpr(*arguments[i], env, expectedReturnType, currentLoopBreakTypes);
+        const Type paramType = resolveType(params[i].type);
+        // An array of *any* size implicitly converts to a slice of the
+        // same element type at a call boundary - the whole point of
+        // slice<T> (docs/language/0032-slices.md). An existing slice
+        // passed straight through to another slice parameter needs no
+        // special-casing: ordinary Slice == Slice equality already
+        // covers that forwarding case.
+        const bool arrayToSliceCoercion = paramType.kind == TypeKind::Slice &&
+                                          argType.kind == TypeKind::Array &&
+                                          argType.elementTypeName == paramType.elementTypeName;
+        // An owned String implicitly lends a str at a call boundary -
+        // the same "wider owned type stands in for a narrower borrowed
+        // view" shape arrayToSliceCoercion already covers for arrays,
+        // just for String/str instead (see docs/language/0042-string.md
+        // and docs/std/strings/0001-str.md).
+        const bool stringToStrCoercion = paramType == kStr && argType.kind == TypeKind::OwnedString;
+        // Implicit union wrapping (see docs/language/0065-unions.md) -
+        // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
+        // syntax, the actual ergonomic point of the feature.
+        const bool unionWrapCoercion = isUnionMember(argType, paramType);
+        if (!(argType == paramType) && !arrayToSliceCoercion && !stringToStrCoercion &&
+            !unionWrapCoercion)
+        {
+            throw std::runtime_error("argument " + std::to_string(i + 1) + " to '" +
+                                     calleeDisplayName + "' expects " + typeName(paramType) +
+                                     ", got " + typeName(argType));
+        }
+    }
+
+    return returnType ? resolveType(*returnType) : kUnit;
 }
 
 Type TypeChecker::resolveType(const std::string& name) const
@@ -852,6 +965,23 @@ Type TypeChecker::resolveType(const std::string& name) const
     {
         return resolveUnionType(name);
     }
+
+    // "fn(T1,T2)->R" - the canonical form Parser::parseTypeName always produces (see
+    // docs/language/0067-closures.md). Every param type and the return type are resolved here
+    // purely to validate them (an unsupported/unknown one throws the same way any other nested
+    // type would), matching Result<T,E>'s own "resolve just to validate, the actual Type stores
+    // the canonical string" shape.
+    if (name.starts_with("fn("))
+    {
+        const auto [paramTypeNames, returnTypeName] = closureParamAndReturnTypes(name);
+        for (const auto& paramTypeName : paramTypeNames)
+        {
+            resolveType(paramTypeName);
+        }
+        resolveType(returnTypeName);
+        return simpleType(TypeKind::Closure, name);
+    }
+
     if (const auto it = primitives.find(name); it != primitives.end())
     {
         return simpleType(it->second);
@@ -984,6 +1114,34 @@ void TypeChecker::registerSignatures(const Program& program)
             {
                 functions_[method->name] = method.get();
             }
+        }
+    }
+
+    // Modules (see docs/language/0066-modules.md) - main.cpp's own module-loading pass has
+    // already renamed every function/extern belonging to a module "math" to "math.name" (the
+    // exact same '.'-mangling ImplDecl methods already use for "TypeName.methodName" - see that
+    // struct's own comment), so every real module name is self-derivable straight from
+    // functions_/externs_'s own already-registered keys - no separate input needed from
+    // main.cpp. This does mean an impl's own mangled "TypeName.method" keys are picked up here
+    // too (indistinguishable from a real module by the name text alone), a harmless quirk: for
+    // "TypeName" to actually be treated as a module, a *distinct* real module of that exact name
+    // would also need to be loaded, and even then a qualified call through it would just fail
+    // ordinary arg-count/type checking (an impl method's own bound `self` has no equivalent in a
+    // module-qualified call) rather than silently misbehaving.
+    for (const auto& [name, function] : functions_)
+    {
+        if (const auto dot = name.rfind('.'); dot != std::string::npos)
+        {
+            moduleNames_.insert(name.substr(0, dot));
+        }
+    }
+    for (const auto& [name, externDecl] : externs_)
+    {
+        // An extern's own `name` is never module-qualified (see ExternDecl::moduleName's own
+        // comment) - its `moduleName` field carries this instead.
+        if (!externDecl->moduleName.empty())
+        {
+            moduleNames_.insert(externDecl->moduleName);
         }
     }
 
@@ -1169,6 +1327,10 @@ void TypeChecker::check(const Program& program)
 
 void TypeChecker::checkFunction(const FunctionDecl& function)
 {
+    // Modules (see docs/language/0066-modules.md) - see currentFunctionModule_'s own comment.
+    const auto dot = function.name.rfind('.');
+    currentFunctionModule_ = dot != std::string::npos ? function.name.substr(0, dot) : "";
+
     TypeEnv env; // no parent: functions don't see top-level globals
     for (const auto& param : function.params)
     {
@@ -1893,6 +2055,38 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
+        // `callback(x)` where `callback` is a closure-typed local/param (see
+        // docs/language/0067-closures.md) - checked before print/write and the ordinary
+        // functions_/externs_ lookup below, since a closure call and a real function/extern call
+        // share the exact same `Identifier(args)` syntax (Parser builds an ordinary CallExpr
+        // either way - see docs/language/0066-modules.md's own MethodCallExpr-reuse precedent for
+        // the same "one parsed shape, disambiguated per pass" idea). A local always shadows a
+        // top-level function of the same name, the ordinary "inner scope wins" rule - this is the
+        // first construct where that can actually matter, since no earlier feature let a local be
+        // *called*.
+        if (env.contains(call->callee))
+        {
+            const Type calleeType = env.get(call->callee);
+            if (calleeType.kind == TypeKind::Closure)
+            {
+                const auto [paramTypeNames, returnTypeName] =
+                    closureParamAndReturnTypes(calleeType.structName);
+                std::vector<Param> syntheticParams;
+                syntheticParams.reserve(paramTypeNames.size());
+                for (const auto& paramTypeName : paramTypeNames)
+                {
+                    syntheticParams.push_back(Param{"", paramTypeName, std::nullopt});
+                }
+                return checkCallArguments(call->callee,
+                                          syntheticParams,
+                                          std::optional<std::string>(returnTypeName),
+                                          call->arguments,
+                                          env,
+                                          expectedReturnType,
+                                          currentLoopBreakTypes);
+            }
+        }
+
         // `print`/`write` (see docs/language/Axea_Printing_Formatting.md) -
         // compiler builtins, checked before the ordinary
         // functions_/externs_ lookup below (mirrors `.parse<T>()`'s own
@@ -1955,48 +2149,13 @@ Type TypeChecker::checkExpr(const Expr& expr,
             returnType = &externIt->second->returnType;
         }
 
-        if (call->arguments.size() != params->size())
-        {
-            throw std::runtime_error("function '" + call->callee + "' expects " +
-                                     std::to_string(params->size()) + " argument(s), got " +
-                                     std::to_string(call->arguments.size()));
-        }
-
-        for (std::size_t i = 0; i < call->arguments.size(); ++i)
-        {
-            const Type argType =
-                checkExpr(*call->arguments[i], env, expectedReturnType, currentLoopBreakTypes);
-            const Type paramType = resolveType((*params)[i].type);
-            // An array of *any* size implicitly converts to a slice of the
-            // same element type at a call boundary - the whole point of
-            // slice<T> (docs/language/0032-slices.md). An existing slice
-            // passed straight through to another slice parameter needs no
-            // special-casing: ordinary Slice == Slice equality already
-            // covers that forwarding case.
-            const bool arrayToSliceCoercion = paramType.kind == TypeKind::Slice &&
-                                              argType.kind == TypeKind::Array &&
-                                              argType.elementTypeName == paramType.elementTypeName;
-            // An owned String implicitly lends a str at a call boundary -
-            // the same "wider owned type stands in for a narrower borrowed
-            // view" shape arrayToSliceCoercion already covers for arrays,
-            // just for String/str instead (see docs/language/0042-string.md
-            // and docs/std/strings/0001-str.md).
-            const bool stringToStrCoercion =
-                paramType == kStr && argType.kind == TypeKind::OwnedString;
-            // Implicit union wrapping (see docs/language/0065-unions.md) -
-            // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
-            // syntax, the actual ergonomic point of the feature.
-            const bool unionWrapCoercion = isUnionMember(argType, paramType);
-            if (!(argType == paramType) && !arrayToSliceCoercion && !stringToStrCoercion &&
-                !unionWrapCoercion)
-            {
-                throw std::runtime_error("argument " + std::to_string(i + 1) + " to '" +
-                                         call->callee + "' expects " + typeName(paramType) +
-                                         ", got " + typeName(argType));
-            }
-        }
-
-        return *returnType ? resolveType(**returnType) : kUnit;
+        return checkCallArguments(call->callee,
+                                  *params,
+                                  *returnType,
+                                  call->arguments,
+                                  env,
+                                  expectedReturnType,
+                                  currentLoopBreakTypes);
     }
 
     if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
@@ -2041,6 +2200,63 @@ Type TypeChecker::checkExpr(const Expr& expr,
                 }
             }
             return simpleType(TypeKind::Enum, enumDecl->name);
+        }
+
+        // `math.sqrt(x)` module-qualified call (see docs/language/0066-modules.md) - checked
+        // before the generic checkExpr(*methodCall->object,...) call just below, which would
+        // otherwise throw "undefined variable" trying to resolve a bare module name as if it
+        // were bound to a value (mirrors the EnumName.Variant check just above exactly - "is
+        // object a bare name matching something known, checked before generic resolution").
+        // `object`'s own NameExpr already carries the *real* module name by this point (Parser::
+        // parsePostfix rewrote any alias at parse time - see aliases_'s own comment), so no
+        // alias table is needed here at all.
+        if (const auto* moduleName = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            moduleName && moduleNames_.contains(moduleName->name))
+        {
+            const std::string qualifiedName = moduleName->name + "." + methodCall->method;
+            const std::vector<Param>* params = nullptr;
+            const std::optional<std::string>* returnType = nullptr;
+            bool isPublic = false;
+
+            if (const auto it = functions_.find(qualifiedName); it != functions_.end())
+            {
+                params = &it->second->params;
+                returnType = &it->second->returnType;
+                isPublic = it->second->isPublic;
+            }
+            // An extern is looked up by its own *bare* real name (e.g. "sqrt"), not the
+            // qualified one - its `name` is never renamed with a module prefix, since it's the
+            // real, externally-linked C symbol (see ExternDecl::moduleName's own comment). The
+            // qualification is validated here instead, via that field.
+            else if (const auto externIt = externs_.find(methodCall->method);
+                     externIt != externs_.end() && externIt->second->moduleName == moduleName->name)
+            {
+                params = &externIt->second->params;
+                returnType = &externIt->second->returnType;
+                isPublic = externIt->second->isPublic;
+            }
+            else
+            {
+                throw std::runtime_error("module '" + moduleName->name + "' has no function '" +
+                                         methodCall->method + "'");
+            }
+
+            // A module's own qualified self-reference (called from within its own code) is
+            // exempt - `pub` gates *external* visibility, not internal use (see
+            // currentFunctionModule_'s own comment).
+            if (!isPublic && currentFunctionModule_ != moduleName->name)
+            {
+                throw std::runtime_error("function '" + methodCall->method + "' in module '" +
+                                         moduleName->name + "' is private");
+            }
+
+            return checkCallArguments(qualifiedName,
+                                      *params,
+                                      *returnType,
+                                      methodCall->arguments,
+                                      env,
+                                      expectedReturnType,
+                                      currentLoopBreakTypes);
         }
 
         const Type objectType =
@@ -3300,6 +3516,65 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      "' - missing variant(s): " + missing);
         }
         return resultType;
+    }
+
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        // A real closure (see docs/language/0067-closures.md): `closureEnv`'s own parent is the
+        // *enclosing* scope, not null - the entire point of "closing over" it, unlike
+        // checkFunction's own top-level `TypeEnv env; // no parent: functions don't see top-level
+        // globals`. No explicit capture-list bookkeeping is needed here at all: an ordinary
+        // NameExpr lookup for a captured name just walks up through `closureEnv` to `env`
+        // exactly like a nested block/if-branch already does; only IrGenerator/Interpreter (the
+        // passes that actually build a runtime captures struct) need their own explicit
+        // free-variable scan.
+        TypeEnv closureEnv(&env);
+        std::vector<std::string> paramTypeNames;
+        paramTypeNames.reserve(closureExpr->params.size());
+        for (const auto& param : closureExpr->params)
+        {
+            const Type paramType = resolveType(param.type);
+            // Struct-typed closure params are out of scope this phase (see
+            // docs/language/0067-closures.md's own Known Imprecision) - CapabilityChecker's own
+            // read/write/take inference is keyed per top-level FunctionDecl name, and a closure
+            // is anonymous; extending that machinery to cover it is deliberately deferred rather
+            // than half-built. A *captured* struct-typed local is unaffected by this restriction
+            // - it's move-tracked the ordinary way, not inference-tracked.
+            if (paramType.kind == TypeKind::Struct)
+            {
+                throw std::runtime_error(
+                    "closure parameter '" + param.name + "' has struct type " +
+                    typeName(paramType) +
+                    " - struct-typed closure parameters aren't supported this phase");
+            }
+            closureEnv.define(param.name, paramType);
+            paramTypeNames.push_back(typeName(paramType));
+        }
+
+        const Type expectedReturn =
+            closureExpr->returnType ? resolveType(*closureExpr->returnType) : kUnit;
+        const auto& block = static_cast<const BlockExpr&>(*closureExpr->body);
+        checkBlock(block, closureEnv, &expectedReturn, nullptr);
+        if (!(expectedReturn == kUnit) && !definitelyReturns(block))
+        {
+            throw std::runtime_error("closure does not return a value of type " +
+                                     typeName(expectedReturn) +
+                                     " on all paths (did you forget 'return'?)");
+        }
+
+        std::string paramsCsv;
+        for (std::size_t i = 0; i < paramTypeNames.size(); ++i)
+        {
+            if (i > 0)
+            {
+                paramsCsv += ",";
+            }
+            paramsCsv += paramTypeNames[i];
+        }
+        Type result{};
+        result.kind = TypeKind::Closure;
+        result.structName = "fn(" + paramsCsv + ")->" + typeName(expectedReturn);
+        return result;
     }
 
     throw std::runtime_error("unsupported expression");

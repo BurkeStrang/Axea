@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -33,6 +35,9 @@ private:
     // start with) to decide without backtracking.
     bool looksLikeFunctionDecl() const;
     std::unique_ptr<Stmt> parseFunctionDecl();
+    // `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure literal,
+    // same (params, optional return type, body) shape as parseFunctionDecl, as an expression.
+    std::unique_ptr<Expr> parseClosureExpr();
     // `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md) -
     // no body, no capability prefixes on its own params (mirrors a plain C
     // signature - parseExternParam is a simpler, dedicated parse than
@@ -68,6 +73,13 @@ private:
     // use), each optionally followed by a parenthesized, comma-separated positional payload
     // type list.
     std::unique_ptr<Stmt> parseEnumDecl();
+    // `module math` (see docs/language/0066-modules.md) - one per file, at most (a second is a
+    // parse error). Sets moduleName_, read by parseProgram to populate Program::moduleName.
+    std::unique_ptr<Stmt> parseModuleDecl();
+    // `use math [as m]` - records `m` (or `math` itself, with no alias) into aliases_, consulted
+    // by parsePostfix to rewrite any later `m.foo(...)`/`m.field`'s own object NameExpr to the
+    // real module name at the point it's parsed (see aliases_'s own comment).
+    std::unique_ptr<Stmt> parseUseDecl();
     // `match scrutinee { Variant(a, b) => expr  _ => expr }` - arms are whitespace-separated
     // (same convention as struct fields/enum variants); each arm's `variantName` is a bare
     // identifier or the literal text "_", optionally followed by a parenthesized,
@@ -146,4 +158,17 @@ private:
     // Unique per for-loop, so nested for-loops' internal counter/end names
     // (see parseFor) can never collide with each other.
     int forCounter_{0};
+    // "module math" (see docs/language/0066-modules.md) - nullopt until a ModuleDecl is parsed
+    // in this file (at most one; parseModuleDecl throws on a second). Copied into
+    // Program::moduleName once parseProgram finishes.
+    std::optional<std::string> moduleName_;
+    // "use math as m" (or "use math" with no alias, keyed by "math" itself) - alias/name -> real
+    // module name, consulted by parsePostfix: an object NameExpr immediately followed by '.' is
+    // rewritten to the real module name here, at the exact moment it's about to become a
+    // MethodCallExpr/FieldExpr's own `object` - never anywhere else a plain identifier is used,
+    // so an ordinary local variable that happens to share a name with an in-scope alias is
+    // unaffected everywhere except that one position (the same latent shadowing risk
+    // EnumName.Variant construction already accepts for a variable named after a declared enum -
+    // see docs/language/0064-enums.md).
+    std::unordered_map<std::string, std::string> aliases_;
 };

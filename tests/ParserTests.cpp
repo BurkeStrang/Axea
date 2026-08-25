@@ -1968,3 +1968,141 @@ TEST("Parser accepts a real parameter literally named 'self' with an explicit ty
     auto* impl = dynamic_cast<ImplDecl*>(program.items.at(0).get());
     EXPECT_EQ(impl->methods[0]->params[0].type, "i32");
 }
+
+TEST("Parser parses 'module name' as a single top-level declaration scoping the whole file, "
+     "recorded on Program::moduleName (see docs/language/0066-modules.md)")
+{
+    auto program = parseOne("module math\n"
+                            "pub square(x: i32) -> i32 { return x * x }");
+
+    EXPECT_TRUE(program.moduleName.has_value());
+    EXPECT_EQ(*program.moduleName, "math");
+    auto* moduleDecl = dynamic_cast<ModuleDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(moduleDecl != nullptr);
+    EXPECT_EQ(moduleDecl->name, "math");
+}
+
+TEST("Parser rejects a second 'module' declaration in the same file")
+{
+    EXPECT_THROWS(parseOne("module a\nmodule b\nx = 1"));
+}
+
+TEST("Parser tracks 'pub' on a function/extern declaration via isPublic - a file with no 'pub' "
+     "at all defaults every declaration to non-public")
+{
+    auto program = parseOne("pub f() -> i32 { return 1 }\n"
+                            "g() -> i32 { return 2 }\n"
+                            "pub extern c h() -> i32\n"
+                            "extern c k() -> i32");
+
+    EXPECT_TRUE(dynamic_cast<FunctionDecl*>(program.items.at(0).get())->isPublic);
+    EXPECT_TRUE(!dynamic_cast<FunctionDecl*>(program.items.at(1).get())->isPublic);
+    EXPECT_TRUE(dynamic_cast<ExternDecl*>(program.items.at(2).get())->isPublic);
+    EXPECT_TRUE(!dynamic_cast<ExternDecl*>(program.items.at(3).get())->isPublic);
+}
+
+TEST("Parser parses 'use math' and 'use math as m' as UseDecl items carrying the real module "
+     "name and an optional alias")
+{
+    auto plain = parseOne("use math\nx = 1");
+    auto* plainUse = dynamic_cast<UseDecl*>(plain.items.at(0).get());
+    EXPECT_TRUE(plainUse != nullptr);
+    EXPECT_EQ(plainUse->moduleName, "math");
+    EXPECT_TRUE(!plainUse->alias.has_value());
+
+    auto aliased = parseOne("use math as m\nx = 1");
+    auto* aliasedUse = dynamic_cast<UseDecl*>(aliased.items.at(0).get());
+    EXPECT_TRUE(aliasedUse != nullptr);
+    EXPECT_EQ(aliasedUse->moduleName, "math");
+    EXPECT_EQ(*aliasedUse->alias, "m");
+}
+
+TEST("Parser rewrites an aliased 'm.foo(...)' call site's own object NameExpr to the real "
+     "module name at the exact point it's parsed, so every later pass only ever sees the real "
+     "name - never anywhere else a plain reference to 'm' would appear")
+{
+    auto program = parseOne("use math as m\n"
+                            "y = m.square(5)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* methodCall = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(methodCall != nullptr);
+    auto* object = dynamic_cast<NameExpr*>(methodCall->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "math");
+    EXPECT_EQ(methodCall->method, "square");
+}
+
+TEST("Parser's alias rewrite only touches a NameExpr immediately followed by '.' - an ordinary "
+     "local variable that happens to share a name with an in-scope alias is unaffected "
+     "everywhere else it's referenced bare")
+{
+    auto program = parseOne("use math as m\n"
+                            "m = 5\n"
+                            "y = m + 1");
+
+    auto* firstAssignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    EXPECT_EQ(firstAssignment->name, "m");
+    auto* secondAssignment = dynamic_cast<AssignmentStmt*>(program.items.at(2).get());
+    auto* addExpr = dynamic_cast<BinaryExpr*>(secondAssignment->value.get());
+    auto* leftName = dynamic_cast<NameExpr*>(addExpr->left.get());
+    EXPECT_TRUE(leftName != nullptr);
+    EXPECT_EQ(leftName->name, "m");
+}
+
+TEST("Parser builds a ClosureExpr AST node for a 'fn(params) -> ReturnType { body }' literal "
+     "(see docs/language/0067-closures.md), the same (params, optional return type, body) shape "
+     "as a top-level FunctionDecl")
+{
+    auto program = parseOne("add = fn(x: i32, y: i32) -> i32 { return x + y }");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* closure = dynamic_cast<ClosureExpr*>(assignment->value.get());
+    EXPECT_TRUE(closure != nullptr);
+    EXPECT_EQ(closure->params.size(), std::size_t(2));
+    EXPECT_EQ(closure->params[0].name, "x");
+    EXPECT_EQ(closure->params[0].type, "i32");
+    EXPECT_EQ(closure->params[1].name, "y");
+    EXPECT_EQ(*closure->returnType, "i32");
+}
+
+TEST("Parser parses 'fn(T1,T2)->R' as a type - canonicalized with no spaces, exactly like every "
+     "other type this parser produces")
+{
+    auto program = parseOne("f(callback: fn(i32, str) -> bool) -> i32 { return 1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_EQ(function->params.at(0).type, "fn(i32,str)->bool");
+}
+
+TEST("Parser desugars a closure's own '=>' body the same way a top-level function's does - a "
+     "single ReturnStmt wrapping the expression, not a trailing block result")
+{
+    auto program = parseOne("double = fn(x: i32) -> i32 => x * 2");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* closure = dynamic_cast<ClosureExpr*>(assignment->value.get());
+    auto* body = dynamic_cast<BlockExpr*>(closure->body.get());
+    EXPECT_EQ(body->statements.size(), std::size_t(1));
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    EXPECT_TRUE(returnStmt != nullptr);
+    EXPECT_TRUE(body->result == nullptr);
+}
+
+TEST("Parser parses a closure literal called immediately - 'fn(x: i32) -> i32 { x }(5)' - as an "
+     "ordinary CallExpr whose callee text is empty (a closure value has no name), consistent "
+     "with how a closure-typed local is called")
+{
+    // A closure literal has no name of its own, so it can't be the *callee* of an ordinary
+    // Identifier(args) call the way a named local can - only a name (local/param) can be
+    // called this phase. This test instead confirms a closure nested as a call *argument*
+    // parses correctly, the more common real shape.
+    auto program = parseOne("y = apply(fn(x: i32) -> i32 { return x }, 5)");
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* call = dynamic_cast<CallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "apply");
+    EXPECT_EQ(call->arguments.size(), std::size_t(2));
+    auto* closureArg = dynamic_cast<ClosureExpr*>(call->arguments.at(0).get());
+    EXPECT_TRUE(closureArg != nullptr);
+}

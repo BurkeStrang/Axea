@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Scope-chain for name -> virtual-register lookups during lowering, mirroring
@@ -171,6 +172,19 @@ private:
     IrFunction generateFunction(const FunctionDecl& function,
                                 const std::vector<Capability>& capabilities,
                                 const std::vector<Region>& regions);
+    // Closures (see docs/language/0067-closures.md) - a closure literal's own body compiles to a
+    // genuine new top-level function ("the trampoline"), reached only indirectly (through a
+    // closure value's own field-0 function pointer - see IrClosureNew/IrClosureCall), never by
+    // ordinary call syntax. `capturesStructName` is param 0's own type (always Borrowed/Read -
+    // the closure *value* owns the captures struct, reused across every call of that same value,
+    // never dropped by any one invocation); `capturedNames` are bound inside the body via
+    // IrFieldGet off that param. Mirrors generateFunction's own shape closely, simplified by this
+    // phase's own scope cut (a closure's own declared params are never struct-typed, so no
+    // per-param region/capability array is threaded through the way generateFunction's own is).
+    IrFunction generateClosureTrampoline(const ClosureExpr& closureExpr,
+                                         const std::string& trampolineName,
+                                         const std::string& capturesStructName,
+                                         const std::vector<std::string>& capturedNames);
 
     int lowerExpr(const Expr& expr, IrScope& scope, Context& ctx);
     // `match` (see docs/language/0064-enums.md) - lowers arms[armIndex..] into a chain of
@@ -345,6 +359,12 @@ private:
     // docs/language/0065-unions.md's own Known Imprecision).
     std::optional<std::string>
     simpleTypeOfExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+    // Closures (see docs/language/0067-closures.md) - collects every bare NameExpr text
+    // referenced anywhere in `expr`'s own subtree, unconditionally (own copy of the identical
+    // over-approximating collector CapabilityChecker/Interpreter each already have - see
+    // CapabilityChecker::collectReferencedNames's own comment for why this is safe).
+    static void collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names);
+    static void collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names);
     // If `declaredTypeName` is a union and `valueReg`'s own resolved simple type (via
     // simpleTypeOfExpr on `valueExpr`) is one of its alternatives, emits an IrStructNew wrapping
     // `valueReg` into that alternative's own tagged variant and returns the new register;
@@ -364,6 +384,31 @@ private:
     // already outlives the generator.
     std::vector<std::unique_ptr<EnumDecl>> unionDecls_;
     std::unordered_map<std::string, const FunctionDecl*> functions_;
+    // Modules (see docs/language/0066-modules.md) - bare/real extern name -> the module that
+    // declared it ("" for a root-file extern). An extern's own `name` is never module-qualified
+    // (see ExternDecl::moduleName's own comment) - this map exists purely so lowerExpr's
+    // MethodCallExpr case can tell a module-qualified *extern* call apart from a module-
+    // qualified *function* call and lower the right callee text: the extern's own bare real
+    // name (an IrCall must resolve to a real, externally-linked symbol like "sqrt", never a
+    // synthetic "math.sqrt"), versus a function's own already-qualified name.
+    std::unordered_map<std::string, std::string> externModules_;
+    // Real module names, self-derived from functions_'s own already-'.'-qualified keys plus
+    // externModules_'s own values (mirrors TypeChecker::registerSignatures's identical
+    // derivation and its own comment on the harmless ImplDecl-mangled-name overlap). Consulted
+    // by lowerExpr's MethodCallExpr case: `object` being a bare NameExpr matching this set means
+    // "math.sqrt(...)" is a qualified module call, not a real method call.
+    std::unordered_set<std::string> moduleNames_;
+    // Closures (see docs/language/0067-closures.md) - every trampoline function synthesized by
+    // lowerExpr's own ClosureExpr case, flushed into irProgram.functions at the end of generate()
+    // (mirrors this phase's own union-type flatten-at-the-end timing: a closure's own trampoline
+    // is discovered lazily, while lowering a function body, not up front the way registerStructs
+    // discovers real top-level functions). unionCounter_-style monotonic counter for a unique
+    // trampoline name ("closure$0", "closure$1", ...) and a unique captures-struct name
+    // ("closure.captures.0", ...) per closure literal encountered.
+    std::vector<IrFunction> closureTrampolines_;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
+        closureCaptureStructs_;
+    int closureCounter_ = 0;
     // Stack of pre-loop scope snapshots, one per currently-open loop (top =
     // innermost). Pushed/popped by lowerLoop; read by
     // currentLoopCarriedDiff for BreakStmt/ContinueStmt.

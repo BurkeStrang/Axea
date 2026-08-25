@@ -1,0 +1,35 @@
+apply(f: fn(i32) -> i32, x: i32) -> i32
+{
+    return f(x)
+}
+
+makeAdder(base: i32) -> fn(i32) -> i32
+{
+    return fn(x: i32) -> i32 { return x + base }
+}
+
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+run() -> i32
+{
+    add5 = makeAdder(5)
+    add10 = makeAdder(10)
+    print(add5(1))
+    print(add10(1))
+
+    doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 }
+    print(apply(add5, 10))
+    print(apply(doubler, 10))
+
+    p = Point { x: 3, y: 4 }
+    sumCoords: fn() -> i32 = fn() -> i32 { return p.x + p.y }
+    print(sumCoords())
+
+    return apply(add5, 10) + apply(doubler, 10)
+}
+
+y = run()

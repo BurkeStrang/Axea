@@ -1,0 +1,31 @@
+module math
+
+extern c abs(x: i32) -> i32
+
+pub min(a: i32, b: i32) -> i32
+{
+    if a < b
+    {
+        return a
+    }
+    return b
+}
+
+pub max(a: i32, b: i32) -> i32
+{
+    if a > b
+    {
+        return a
+    }
+    return b
+}
+
+pub square(x: i32) -> i32
+{
+    return x * x
+}
+
+pub distance(x: i32, y: i32) -> i32
+{
+    return math.abs(math.square(x) - math.square(y))
+}

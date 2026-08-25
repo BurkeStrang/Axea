@@ -1,0 +1,13 @@
+use math
+use io
+
+run() -> i32
+{
+    d = math.distance(5, 3)
+    m = math.max(d, math.min(10, 20))
+    io.println("distance: {d}")
+    io.println("bigger: {m}")
+    return d + m
+}
+
+x = run()

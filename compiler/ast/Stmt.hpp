@@ -182,6 +182,30 @@ struct Param
     std::optional<Capability> declaredCapability; // e.g. from `write user: User`
 };
 
+// `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure *literal*,
+// usable anywhere an expression is: assigned to a local, passed as an argument, returned. Lives
+// here rather than in Expr.hpp for the identical reason BlockExpr does - it needs Param, declared
+// in this file. Move-only captures: every enclosing-scope local the body references gets copied
+// into the closure's own captures at the point the literal is evaluated (no explicit capture
+// list, no borrowed captures - see that doc's own Design section for why). `params`/`returnType`
+// mirror FunctionDecl's own shape exactly; `body` is always a BlockExpr, same "`=>` desugars to a
+// real return" normalization parseFunctionDecl already does.
+struct ClosureExpr final : Expr
+{
+    ClosureExpr(std::vector<Param> params,
+                std::optional<std::string> returnType,
+                std::unique_ptr<Expr> body)
+        : params(std::move(params)),
+          returnType(std::move(returnType)),
+          body(std::move(body))
+    {
+    }
+
+    std::vector<Param> params;
+    std::optional<std::string> returnType; // empty => unit
+    std::unique_ptr<Expr> body;
+};
+
 struct Field
 {
     std::string name;
@@ -205,6 +229,13 @@ struct FunctionDecl final : Stmt
     std::vector<Param> params;
     std::optional<std::string> returnType; // empty => unit
     std::unique_ptr<Expr> body; // always a BlockExpr (`=>` shorthand is normalized to one)
+    // `pub` (see docs/language/0066-modules.md) - only meaningful for a function that belongs to
+    // a module (Program::moduleName set): gates whether outside code can reach it via
+    // `alias.name(...)`. Ignored for a root-file function (no module system before this phase
+    // ever checked it, and every root function stays callable exactly as before regardless).
+    // Set by Parser::parseItem, not by parseFunctionDecl itself - `pub` is consumed one level up,
+    // before dispatching to whichever kind of declaration follows it.
+    bool isPublic = false;
 };
 
 // `trait Name { format(self, buf: Buffer)  ... }` (see
@@ -269,6 +300,16 @@ struct ExternDecl final : Stmt
     std::vector<Param> params; // declaredCapability is always nullopt - extern params take no
                                // read/write/take prefix, mirroring a plain C function signature
     std::optional<std::string> returnType; // empty => unit (void)
+    // `pub` (see docs/language/0066-modules.md) - same meaning as FunctionDecl::isPublic.
+    bool isPublic = false;
+    // Modules (see docs/language/0066-modules.md) - which module declared this extern ("" for
+    // root), set by main.cpp's own module-loading pass. Unlike FunctionDecl, `name` itself is
+    // *never* qualified with a module prefix here - it's the real, externally-linked C symbol
+    // (e.g. "sqrt"), and renaming it the way a FunctionDecl's own name is renamed would try to
+    // link against a symbol that doesn't exist ("math.sqrt" instead of the real "sqrt"). A
+    // module-qualified call site (`math.sqrt(x)`) is resolved by looking up the extern's own
+    // bare `name` directly and checking *this* field, not by qualifying the lookup key.
+    std::string moduleName;
 };
 
 struct StructDecl final : Stmt
@@ -306,7 +347,38 @@ struct EnumDecl final : Stmt
     std::vector<EnumVariant> variants;
 };
 
+// `module math` (see docs/language/0066-modules.md) - a single declaration, scoping the *whole*
+// file it appears in to module "math" (mirrors Rust's own path-less `mod`, not a braced block -
+// there's no separate "module body" grammar, since a file already is one). A file with no
+// ModuleDecl is the root/anonymous program - today's exact status quo, unchanged. Parser enforces
+// at most one per file (a second is a parse error) but doesn't require it to be first; main.cpp's
+// own module-loading pass is what actually reads it (see loadProgram/mergeModule) and consumes
+// it out of the final merged Program - no later pass ever sees a ModuleDecl.
+struct ModuleDecl final : Stmt
+{
+    std::string name;
+};
+
+// `use math [as m]` (see docs/language/0066-modules.md) - records that this file depends on
+// module `math`, callable thereafter as `math.foo(...)` (or `m.foo(...)` if aliased). Retained
+// as a real Program item (unlike ModuleDecl, which is discarded once its name is read) purely so
+// main.cpp's discovery pass can enumerate every file's own dependencies to build its load
+// worklist - no later pass consults it directly, since Parser::parsePostfix already rewrites any
+// `alias.foo(...)`/`alias.field` call site's own NameExpr to the *real* module name at parse
+// time (see Parser::aliases_), so every later pass only ever sees the real name.
+struct UseDecl final : Stmt
+{
+    std::string moduleName;
+    std::optional<std::string> alias;
+};
+
 struct Program
 {
     std::vector<std::unique_ptr<Stmt>> items;
+    // Set by Parser::parseProgram when the file it parsed contains a ModuleDecl - nullopt for a
+    // root/anonymous program. Consumed by main.cpp's own module-loading pass (see
+    // loadProgram/mergeModule) to qualify every function/extern this Program declares; every
+    // later pass (TypeChecker onward) only ever sees the already-merged, already-qualified
+    // Program, so this field is meaningless past that point.
+    std::optional<std::string> moduleName;
 };

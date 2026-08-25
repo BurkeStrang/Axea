@@ -65,6 +65,9 @@ enum class TokenKind
     Enum,
     Match,
     Pipe,
+    Module,
+    Use,
+    Fn,
 
     EndOfFile,
     Invalid
@@ -130,6 +133,9 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Enum: return "Enum";
         case TokenKind::Match: return "Match";
         case TokenKind::Pipe: return "Pipe";
+        case TokenKind::Module: return "Module";
+        case TokenKind::Use: return "Use";
+        case TokenKind::Fn: return "Fn";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

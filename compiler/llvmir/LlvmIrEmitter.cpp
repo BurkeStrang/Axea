@@ -47,17 +47,19 @@ namespace
     // Own copy, per this codebase's "each pass owns its own walk" convention
     // - TypeChecker and RegionChecker each have their own identical logic
     // for the same reason (see docs/language/0034-maps-and-sets.md's generic
-    // rewrite).
+    // rewrite). '('/')' tracked too, since docs/language/0067-closures.md's
+    // own "fn(T1,T2)->R" closure type text can nest inside another type's
+    // own argument list, exactly like a further Map<K,V> already can.
     std::size_t findTopLevelComma(const std::string& text)
     {
         int depth = 0;
         for (std::size_t i = 0; i < text.size(); ++i)
         {
-            if (text[i] == '<' || text[i] == '[')
+            if (text[i] == '<' || text[i] == '[' || text[i] == '(')
             {
                 ++depth;
             }
-            else if (text[i] == '>' || text[i] == ']')
+            else if (text[i] == '>' || text[i] == ']' || text[i] == ')')
             {
                 --depth;
             }
@@ -167,6 +169,53 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
         const std::string args = axeaTypeName.substr(7, axeaTypeName.size() - 8);
         const auto comma = findTopLevelComma(args);
         return registerResultInstantiation(args.substr(0, comma), args.substr(comma + 1));
+    }
+    if (axeaTypeName.starts_with("fn("))
+    {
+        // "fn(T1,T2)->R" - the canonical form Parser::parseTypeName always produces (see
+        // docs/language/0067-closures.md). Own copy of
+        // TypeChecker::closureParamAndReturnTypes' own paren-depth-aware split (mirrors
+        // findTopLevelComma's own "<"/"["/"(" depth tracking, generalized to find the matching
+        // top-level ')' instead of a top-level ',').
+        int depth = 0;
+        std::size_t closeParen = std::string::npos;
+        for (std::size_t i = 3; i < axeaTypeName.size(); ++i) // "fn(" is always exactly 3 chars
+        {
+            const char c = axeaTypeName[i];
+            if (c == '<' || c == '[' || c == '(')
+            {
+                ++depth;
+            }
+            else if (c == '>' || c == ']' || c == ')')
+            {
+                if (depth == 0)
+                {
+                    closeParen = i;
+                    break;
+                }
+                --depth;
+            }
+        }
+        const std::string paramsCsv = axeaTypeName.substr(3, closeParen - 3);
+        const std::string returnTypeName = axeaTypeName.substr(closeParen + 3); // skip ")->"
+
+        std::vector<std::string> paramLlvmTypes;
+        if (!paramsCsv.empty())
+        {
+            std::size_t start = 0;
+            while (true)
+            {
+                const auto comma = findTopLevelComma(paramsCsv.substr(start));
+                if (comma == std::string::npos)
+                {
+                    paramLlvmTypes.push_back(llvmType(paramsCsv.substr(start)));
+                    break;
+                }
+                paramLlvmTypes.push_back(llvmType(paramsCsv.substr(start, comma)));
+                start += comma + 1;
+            }
+        }
+        return registerClosureInstantiation(paramLlvmTypes, llvmType(returnTypeName)) + "*";
     }
     if (axeaTypeName.starts_with("slice<"))
     {
@@ -686,6 +735,61 @@ std::string LlvmIrEmitter::resultErrPayloadType(const std::string& type) const
     const auto lastDot = type.rfind('.');
     const int id = std::stoi(type.substr(lastDot + 1));
     return resultErrPayloadTypeById_.at(id);
+}
+
+std::string
+LlvmIrEmitter::registerClosureInstantiation(const std::vector<std::string>& paramLlvmTypes,
+                                            const std::string& returnLlvmType)
+{
+    std::string key = returnLlvmType;
+    for (const auto& paramLlvmType : paramLlvmTypes)
+    {
+        key += "|" + paramLlvmType;
+    }
+    if (const auto it = closureInstantiationIds_.find(key); it != closureInstantiationIds_.end())
+    {
+        return "%axea.Closure." + std::to_string(it->second);
+    }
+
+    const int id = nextClosureInstantiationId_++;
+    closureInstantiationIds_[key] = id;
+    const std::string name = "%axea.Closure." + std::to_string(id);
+
+    // The classic "fat pointer" closure representation - captures are hidden behind field 1's
+    // own opaque i8*, so field 0's own function-pointer type only ever depends on the closure's
+    // declared signature, never on what any one literal actually captures (see
+    // closureInstantiationIds_'s own comment).
+    std::string fnPtrType = returnLlvmType + " (i8*";
+    for (const auto& paramLlvmType : paramLlvmTypes)
+    {
+        fnPtrType += ", " + paramLlvmType;
+    }
+    fnPtrType += ")*";
+
+    closureTypeDeclsText_ << name << " = type { " << fnPtrType << ", i8* }\n";
+    closureFnPtrTypeById_[id] = fnPtrType;
+    closureReturnTypeById_[id] = returnLlvmType;
+
+    return name;
+}
+
+bool LlvmIrEmitter::isClosureType(const std::string& type) const
+{
+    return type.starts_with("%axea.Closure.");
+}
+
+std::string LlvmIrEmitter::closureFnPtrType(const std::string& type) const
+{
+    const auto lastDot = type.rfind('.');
+    const int id = std::stoi(type.substr(lastDot + 1));
+    return closureFnPtrTypeById_.at(id);
+}
+
+std::string LlvmIrEmitter::closureReturnType(const std::string& type) const
+{
+    const auto lastDot = type.rfind('.');
+    const int id = std::stoi(type.substr(lastDot + 1));
+    return closureReturnTypeById_.at(id);
 }
 
 bool LlvmIrEmitter::isSliceType(const std::string& type) const
@@ -2496,6 +2600,24 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         else if (const auto* structNew = dynamic_cast<const IrStructNew*>(inst.get()))
         {
             fctx.registerTypes[structNew->dest] = "%" + structNew->typeName + "*";
+        }
+        else if (const auto* closureNew = dynamic_cast<const IrClosureNew*>(inst.get()))
+        {
+            std::vector<std::string> paramLlvmTypes;
+            paramLlvmTypes.reserve(closureNew->paramTypes.size());
+            for (const auto& paramType : closureNew->paramTypes)
+            {
+                paramLlvmTypes.push_back(llvmType(paramType));
+            }
+            fctx.registerTypes[closureNew->dest] =
+                registerClosureInstantiation(paramLlvmTypes, llvmType(closureNew->returnType)) +
+                "*";
+        }
+        else if (const auto* closureCall = dynamic_cast<const IrClosureCall*>(inst.get()))
+        {
+            const std::string closureType = typeOf(closureCall->closureObject, fctx);
+            fctx.registerTypes[closureCall->dest] =
+                closureReturnType(closureType.substr(0, closureType.size() - 1));
         }
         else if (const auto* fieldGet = dynamic_cast<const IrFieldGet*>(inst.get()))
         {
@@ -5340,6 +5462,102 @@ void LlvmIrEmitter::emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fc
     const int destReg = defineRegister(fieldGet.dest, fctx);
     *fctx.out << "  %" << destReg << " = load " << fieldLlvmType << ", " << fieldLlvmType << "* %"
               << fieldPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitClosureNew(const IrClosureNew& closureNew, FunctionContext& fctx)
+{
+    std::vector<std::string> paramLlvmTypes;
+    paramLlvmTypes.reserve(closureNew.paramTypes.size());
+    for (const auto& paramType : closureNew.paramTypes)
+    {
+        paramLlvmTypes.push_back(llvmType(paramType));
+    }
+    const std::string returnLlvmType = llvmType(closureNew.returnType);
+    const std::string closureType = registerClosureInstantiation(paramLlvmTypes, returnLlvmType);
+    const std::string fnPtrType = closureFnPtrType(closureType); // "RetType (i8*, ParamTypes...)*"
+    const std::string pointerType = closureType + "*";
+
+    // malloc, mirroring emitStructNew's own shape.
+    const int sizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << closureType << ", " << pointerType
+              << " null, i32 1\n";
+    const int sizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
+              << " to i64\n";
+    const int rawPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
+    const int destReg = defineRegister(closureNew.dest, fctx);
+    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
+              << "\n";
+
+    // Field 0: the trampoline's own address. The trampoline's own *real* declared LLVM type
+    // (first param is the specific captures struct type, not opaque i8*) never matches
+    // `fnPtrType` exactly, so this always needs an explicit bitcast - the one place this whole
+    // representation's own genericity (every closure sharing a signature collapsing onto the
+    // same %axea.Closure.<id>, regardless of what each literal actually captures) has to be
+    // paid for.
+    const std::string capturesType = typeOf(closureNew.capturesObject, fctx);
+    std::string trampolineRealType = returnLlvmType + " (" + capturesType;
+    for (const auto& paramLlvmType : paramLlvmTypes)
+    {
+        trampolineRealType += ", " + paramLlvmType;
+    }
+    trampolineRealType += ")*";
+
+    const int castedFnReg = allocateRegister(fctx);
+    *fctx.out << "  %" << castedFnReg << " = bitcast " << trampolineRealType << " @"
+              << closureNew.trampolineFunctionName << " to " << fnPtrType << "\n";
+    const int fnFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << fnFieldPtrReg << " = getelementptr " << closureType << ", " << pointerType
+              << " " << ref(closureNew.dest, fctx) << ", i32 0, i32 0\n";
+    *fctx.out << "  store " << fnPtrType << " %" << castedFnReg << ", " << fnPtrType << "* %"
+              << fnFieldPtrReg << "\n";
+
+    // Field 1: the already-built captures struct, hidden behind an opaque i8*.
+    const int capturesI8Reg = allocateRegister(fctx);
+    *fctx.out << "  %" << capturesI8Reg << " = bitcast " << capturesType << " "
+              << ref(closureNew.capturesObject, fctx) << " to i8*\n";
+    const int capturesFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capturesFieldPtrReg << " = getelementptr " << closureType << ", "
+              << pointerType << " " << ref(closureNew.dest, fctx) << ", i32 0, i32 1\n";
+    *fctx.out << "  store i8* %" << capturesI8Reg << ", i8** %" << capturesFieldPtrReg << "\n";
+}
+
+void LlvmIrEmitter::emitClosureCall(const IrClosureCall& closureCall, FunctionContext& fctx)
+{
+    const std::string closureType =
+        typeOf(closureCall.closureObject, fctx); // "%axea.Closure.<id>*"
+    const std::string closureStructType = closureType.substr(0, closureType.size() - 1);
+    const std::string fnPtrType = closureFnPtrType(closureStructType);
+    const std::string fnType = fnPtrType.substr(0, fnPtrType.size() - 1); // strip trailing '*'
+    const std::string returnLlvmType = closureReturnType(closureStructType);
+
+    const int fnFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << fnFieldPtrReg << " = getelementptr " << closureStructType << ", "
+              << closureType << " " << ref(closureCall.closureObject, fctx) << ", i32 0, i32 0\n";
+    const int fnReg = allocateRegister(fctx);
+    *fctx.out << "  %" << fnReg << " = load " << fnPtrType << ", " << fnPtrType << "* %"
+              << fnFieldPtrReg << "\n";
+
+    const int capturesFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capturesFieldPtrReg << " = getelementptr " << closureStructType << ", "
+              << closureType << " " << ref(closureCall.closureObject, fctx) << ", i32 0, i32 1\n";
+    const int capturesReg = allocateRegister(fctx);
+    *fctx.out << "  %" << capturesReg << " = load i8*, i8** %" << capturesFieldPtrReg << "\n";
+
+    std::string argsText = "i8* %" + std::to_string(capturesReg);
+    for (const int argReg : closureCall.args)
+    {
+        argsText += ", " + typeOf(argReg, fctx) + " " + ref(argReg, fctx);
+    }
+
+    *fctx.out << "  ";
+    if (returnLlvmType != "void")
+    {
+        const int destReg = defineRegister(closureCall.dest, fctx);
+        *fctx.out << "%" << destReg << " = ";
+    }
+    *fctx.out << "call " << fnType << " %" << fnReg << "(" << argsText << ")\n";
 }
 
 void LlvmIrEmitter::emitFieldSet(const IrFieldSet& fieldSet, FunctionContext& fctx)
@@ -9729,6 +9947,16 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitStructNew(*structNew, fctx);
             continue;
         }
+        if (const auto* closureNew = dynamic_cast<const IrClosureNew*>(inst.get()))
+        {
+            emitClosureNew(*closureNew, fctx);
+            continue;
+        }
+        if (const auto* closureCall = dynamic_cast<const IrClosureCall*>(inst.get()))
+        {
+            emitClosureCall(*closureCall, fctx);
+            continue;
+        }
         if (const auto* fieldGet = dynamic_cast<const IrFieldGet*>(inst.get()))
         {
             emitFieldGet(*fieldGet, fctx);
@@ -10432,6 +10660,17 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
         }
         else if (llvmTypeStr == "void")
         {
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << strFmt << ", i8* " << namePtr << ", i8* " << unitStr << ")\n";
+        }
+        else if (isClosureType(llvmTypeStr))
+        {
+            // A closure value has no meaningful printed form (see
+            // docs/language/0067-closures.md) - checked before the generic "must be a nested
+            // struct pointer" fallback below, which would otherwise misparse
+            // "%axea.Closure.<id>" as a struct name (same reasoning as the Optional/Result
+            // branch above). Matches the interpreter's own toString fallback exactly (see
+            // Interpreter.cpp) for byte-for-byte parity.
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << strFmt << ", i8* " << namePtr << ", i8* " << unitStr << ")\n";
         }
@@ -11305,6 +11544,7 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // resultTypeDeclsText_ too, since IrResultNew/IrOptionalUnwrap's own
     // Result-aware type inference is reached by that identical walk.
     out << resultTypeDeclsText_.str();
+    out << closureTypeDeclsText_.str();
     out << "\ndeclare i8* @malloc(i64)\n";
     out << "declare i32 @printf(i8*, ...)\n";
     // String<>'s own construction/append need a runtime str length (see

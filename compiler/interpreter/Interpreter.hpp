@@ -34,6 +34,7 @@ struct BufferInstance;
 struct OptionalInstance;
 struct ResultInstance;
 struct EnumInstance;
+struct ClosureInstance;
 
 using Value =
     std::variant<std::int64_t, // i32 and i64 both (see docs/language/0005-type-system.md) -
@@ -67,6 +68,7 @@ using Value =
                  std::shared_ptr<OptionalInstance>,
                  std::shared_ptr<ResultInstance>,
                  std::shared_ptr<EnumInstance>,
+                 std::shared_ptr<ClosureInstance>,
                  std::monostate>;
 
 struct StructInstance
@@ -86,6 +88,19 @@ struct EnumInstance
     std::string typeName;
     std::string variantName;
     std::vector<Value> fields;
+};
+
+// Reference semantics (shared_ptr) - see docs/language/0067-closures.md. `declaration` points
+// directly at the ClosureExpr AST node (owned by the Program, which outlives every Interpreter
+// value produced while running it - the same "points into the AST directly, no separate owned
+// copy" convention FunctionDecl pointers already use throughout this file). `captures` holds a
+// snapshot of every enclosing-scope value the closure's own body references, taken once, at the
+// moment the closure literal is evaluated (move-only semantics - see that doc's own Design
+// section: there's no way to mutate a capture and have it observed back in the enclosing scope).
+struct ClosureInstance
+{
+    const ClosureExpr* declaration;
+    std::unordered_map<std::string, Value> captures;
 };
 
 // Reference semantics (always accessed via shared_ptr), mirroring
@@ -374,6 +389,19 @@ public:
 
 private:
     Value callFunction(const FunctionDecl& decl, std::vector<Value> args);
+    // Closures (see docs/language/0067-closures.md) - runs a closure's own body with a fresh,
+    // parentless Environment (mirroring callFunction's own "no parent" isolation) seeded with
+    // its own captured values first, then its own params bound to `args`.
+    Value callClosure(const ClosureInstance& instance, std::vector<Value> args);
+    // Collects every bare NameExpr text referenced *anywhere* in `expr`'s own subtree,
+    // unconditionally - the interpreter's own copy of the identical collector
+    // CapabilityChecker::collectReferencedNames already has (see that method's own comment for
+    // why over-approximation is safe here: only names *actually bound* in the enclosing
+    // Environment are captured, via `env.contains` at the ClosureExpr call site, so collecting a
+    // top-level function's own name here is harmless - it's simply never bound in any
+    // Environment, so the filter drops it).
+    static void collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names);
+    static void collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names);
     // extern c functions (see docs/language/0048-ffi.md) - a small,
     // explicit allowlist of hand-implemented libc functions (currently
     // just "puts"), since the interpreter can't dynamically link against
@@ -396,6 +424,20 @@ private:
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, const StructDecl*> structs_;
     std::unordered_map<std::string, const EnumDecl*> enums_;
+    // Modules (see docs/language/0066-modules.md) - bare/real extern name -> the module that
+    // declared it ("" for a root-file extern). Not a full ExternDecl registry the way functions_
+    // is: the interpreter is dynamically typed and never needed extern *signatures* before this
+    // phase (an extern's only interpreter-visible implementation is Interpreter::callExtern's
+    // own hand-implemented allowlist, keyed by the extern's own bare/real name, which - unlike
+    // FunctionDecl - is *never* module-qualified, since it's a real, externally-linked C symbol;
+    // see ExternDecl::moduleName's own comment). This map exists purely so evaluate's
+    // MethodCallExpr case can validate "does module X actually declare an extern named Y" before
+    // calling into callExtern with the bare name. moduleNames_ is self-derived from functions_'s
+    // own already-'.'-qualified keys plus this map's own values (see
+    // TypeChecker::registerSignatures's identical derivation and its own comment on the harmless
+    // ImplDecl-mangled-name overlap).
+    std::unordered_map<std::string, std::string> externModules_;
+    std::unordered_set<std::string> moduleNames_;
     // struct name -> its `impl Display for <name>`'s own "format" method
     // (see docs/language/0062-display-trait.md) - only ever populated for
     // "Display" specifically, mirroring IrGenerator's own

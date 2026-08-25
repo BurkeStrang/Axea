@@ -338,9 +338,9 @@ TEST("TypeChecker accepts List<T> as a parameter, return type, and local declare
           "  x: List<i32> = List<i32>() "
           "  return x "
           "} "
-          "use(numbers: List<i32>) -> i32 { return numbers.length } "
+          "consume(numbers: List<i32>) -> i32 { return numbers.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects List<T> as a struct field type")
@@ -382,9 +382,9 @@ TEST("TypeChecker accepts Stack<T> as a parameter, return type, and local declar
           "  x: Stack<i32> = Stack<i32>() "
           "  return x "
           "} "
-          "use(s: Stack<i32>) -> i32 { return s.length } "
+          "consume(s: Stack<i32>) -> i32 { return s.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects Stack<T> as a struct field type")
@@ -426,9 +426,9 @@ TEST("TypeChecker accepts LinkedList<T> as a parameter, return type, and local d
           "  x: LinkedList<i32> = LinkedList<i32>() "
           "  return x "
           "} "
-          "use(s: LinkedList<i32>) -> i32 { return s.length } "
+          "consume(s: LinkedList<i32>) -> i32 { return s.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects LinkedList<T> as a struct field type")
@@ -477,9 +477,9 @@ TEST("TypeChecker accepts Deque<T> as a parameter, return type, and local declar
           "  x: Deque<i32> = Deque<i32>() "
           "  return x "
           "} "
-          "use(d: Deque<i32>) -> i32 { return d.length } "
+          "consume(d: Deque<i32>) -> i32 { return d.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects Deque<T> as a struct field type")
@@ -526,9 +526,9 @@ TEST("TypeChecker accepts Queue<T> as a parameter, return type, and local declar
           "  x: Queue<i32> = Queue<i32>() "
           "  return x "
           "} "
-          "use(q: Queue<i32>) -> i32 { return q.length } "
+          "consume(q: Queue<i32>) -> i32 { return q.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects Queue<T> as a struct field type")
@@ -576,9 +576,9 @@ TEST("TypeChecker accepts PriorityQueue<T> as a parameter, return type, and loca
           "  x: PriorityQueue<i32> = PriorityQueue<i32>() "
           "  return x "
           "} "
-          "use(q: PriorityQueue<i32>) -> i32 { return q.length } "
+          "consume(q: PriorityQueue<i32>) -> i32 { return q.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects PriorityQueue<T> as a struct field type")
@@ -753,9 +753,9 @@ TEST("TypeChecker accepts Map<i32,i32>/Set<i32> as a parameter, return type, and
           "  x: Map<i32,i32> = Map<i32,i32>() "
           "  return x "
           "} "
-          "use(m: Map<i32,i32>) -> i32 { return m.length } "
+          "consume(m: Map<i32,i32>) -> i32 { return m.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects Map<K,V>/Set<T> as a struct field type")
@@ -858,9 +858,9 @@ TEST("TypeChecker accepts SortedMap<i32,i32> as a parameter, return type, and lo
           "  x: SortedMap<i32,i32> = SortedMap<i32,i32>() "
           "  return x "
           "} "
-          "use(m: SortedMap<i32,i32>) -> i32 { return m.length } "
+          "consume(m: SortedMap<i32,i32>) -> i32 { return m.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects SortedMap<K,V> as a struct field type")
@@ -936,9 +936,9 @@ TEST("TypeChecker accepts SortedSet<i32> as a parameter, return type, and local 
           "  x: SortedSet<i32> = SortedSet<i32>() "
           "  return x "
           "} "
-          "use(s: SortedSet<i32>) -> i32 { return s.length } "
+          "consume(s: SortedSet<i32>) -> i32 { return s.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects SortedSet<T> as a struct field type")
@@ -1007,9 +1007,9 @@ TEST("TypeChecker accepts String as a parameter, return type, and local declared
           "  x: String = String(\"a\") "
           "  return x "
           "} "
-          "use(s: String) -> i32 { return s.length } "
+          "consume(s: String) -> i32 { return s.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects String as a struct field type")
@@ -1165,9 +1165,9 @@ TEST("TypeChecker accepts Buffer as a parameter, return type, and local declared
           "  x: Buffer = Buffer() "
           "  return x "
           "} "
-          "use(b: Buffer) -> i32 { return b.length } "
+          "consume(b: Buffer) -> i32 { return b.length } "
           "n = build() "
-          "y = use(n)");
+          "y = consume(n)");
 }
 
 TEST("TypeChecker rejects Buffer as a struct field type")
@@ -2004,4 +2004,67 @@ TEST("TypeChecker accepts a struct as a union alternative, matched by its own ty
           "p = Point{x: 1, y: 2} "
           "a = f(p) "
           "b = f(5)");
+}
+
+TEST("TypeChecker accepts a closure literal assigned to a declared 'fn(T)->R'-typed local, and "
+     "calling it (see docs/language/0067-closures.md)")
+{
+    check("add: fn(i32, i32) -> i32 = fn(x: i32, y: i32) -> i32 { return x + y } "
+          "y = add(2, 3)");
+}
+
+TEST("TypeChecker accepts a closure that closes over an enclosing function's own param, "
+     "returned as a value and called later - the defining closure use case")
+{
+    check("makeAdder(base: i32) -> fn(i32) -> i32 { "
+          "  return fn(x: i32) -> i32 { return x + base } "
+          "} "
+          "add5 = makeAdder(5) "
+          "y = add5(1)");
+}
+
+TEST("TypeChecker accepts a closure-typed parameter and calling it inside the enclosing "
+     "function's own body - a higher-order function")
+{
+    check("apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+          "double: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } "
+          "y = apply(double, 5)");
+}
+
+TEST("TypeChecker rejects a closure call with the wrong argument count")
+{
+    EXPECT_THROWS(check("add: fn(i32, i32) -> i32 = fn(x: i32, y: i32) -> i32 { return x + y } "
+                        "y = add(2)"));
+}
+
+TEST("TypeChecker rejects a closure call with an argument of the wrong type")
+{
+    EXPECT_THROWS(check("f: fn(i32) -> i32 = fn(x: i32) -> i32 { return x } "
+                        "y = f(\"hi\")"));
+}
+
+TEST("TypeChecker rejects a closure whose body doesn't return a value of its own declared "
+     "return type on every path")
+{
+    EXPECT_THROWS(check("f: fn(i32) -> i32 = fn(x: i32) -> i32 { if x > 0 { return x } }"));
+}
+
+TEST("TypeChecker rejects a struct-typed closure parameter - out of scope this phase (see "
+     "docs/language/0067-closures.md's own Known Imprecision)")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "f = fn(p: Point) -> i32 { return p.x }"));
+}
+
+TEST("TypeChecker accepts capturing a struct-typed local into exactly one closure (move-only, "
+     "not borrow - see docs/language/0067-closures.md's own Design section); double-capture "
+     "rejection is CapabilityChecker's own concern, see CapabilityCheckerTests.cpp")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "run() -> i32 { "
+          "  p = Point { x: 3, y: 4 } "
+          "  sum: fn() -> i32 = fn() -> i32 { return p.x + p.y } "
+          "  return sum() "
+          "} "
+          "y = run()");
 }

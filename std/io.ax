@@ -1,0 +1,8 @@
+module io
+
+extern c puts(text: cstr)
+
+pub println(text: str)
+{
+    io.puts(text.to_cstr())
+}

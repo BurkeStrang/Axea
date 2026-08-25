@@ -4,6 +4,7 @@
 #include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
 #include "llvmir/LlvmIrEmitter.hpp"
+#include "module/ModuleLoader.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
 #include "sema/RegionChecker.hpp"
@@ -1055,6 +1056,7 @@ namespace
         buffer << input.rdbuf();
         return buffer.str();
     }
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1097,8 +1099,7 @@ int main(int argc, char** argv)
 
         if (command == "run")
         {
-            Parser parser(std::move(tokens));
-            auto program = parser.parseProgram();
+            auto program = loadProgram(argv[2]);
 
             TypeChecker typeChecker;
             typeChecker.check(program);
@@ -1125,8 +1126,7 @@ int main(int argc, char** argv)
 
         if (command == "capabilities")
         {
-            Parser parser(std::move(tokens));
-            auto program = parser.parseProgram();
+            auto program = loadProgram(argv[2]);
 
             TypeChecker typeChecker;
             typeChecker.check(program);
@@ -1156,8 +1156,7 @@ int main(int argc, char** argv)
 
         if (command == "regions")
         {
-            Parser parser(std::move(tokens));
-            auto program = parser.parseProgram();
+            auto program = loadProgram(argv[2]);
 
             TypeChecker typeChecker;
             typeChecker.check(program);
@@ -1204,8 +1203,7 @@ int main(int argc, char** argv)
 
         if (command == "ir")
         {
-            Parser parser(std::move(tokens));
-            auto program = parser.parseProgram();
+            auto program = loadProgram(argv[2]);
 
             TypeChecker typeChecker;
             typeChecker.check(program);
@@ -1243,8 +1241,7 @@ int main(int argc, char** argv)
 
         if (command == "llvm-ir")
         {
-            Parser parser(std::move(tokens));
-            auto program = parser.parseProgram();
+            auto program = loadProgram(argv[2]);
 
             TypeChecker typeChecker;
             typeChecker.check(program);

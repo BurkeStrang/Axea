@@ -73,6 +73,14 @@ enum class TypeKind
     // field `Struct` just below already uses for its own name - variant payload types live on
     // the registered `EnumDecl` itself (looked up by that name), not duplicated into `Type`.
     Enum,
+    // `fn(T1,T2)->R` (see docs/language/0067-closures.md) - a closure value's own type. Reuses
+    // `Type::structName` to carry its own canonical signature string, the same "structName IS my
+    // own identity" role Struct/Enum already give that field (a closure's *own* signature is its
+    // identity, unlike Optional<T>'s "structName unused, elementTypeName is my nested payload"
+    // shape) - re-split back into (param types, return type) on demand via
+    // closureParamAndReturnTypes wherever the structured form is actually needed (mirrors
+    // Result<T,E>'s own "store the canonical string, re-resolve on demand" convention).
+    Closure,
     Struct,
     Tuple,
     Function,
@@ -148,6 +156,11 @@ public:
 
     void define(const std::string& name, Type type);
     Type get(const std::string& name) const;
+    // Closures (see docs/language/0067-closures.md) - checkExpr's own CallExpr case needs to
+    // know "is `callee` a bound local/param at all" *before* deciding whether it's a closure
+    // call, without get()'s own "throw if not found" behavior forcing a try/catch for the
+    // ordinary case (an actual top-level function name, never bound in any TypeEnv).
+    bool contains(const std::string& name) const;
 
 private:
     std::unordered_map<std::string, Type> types_;
@@ -217,6 +230,18 @@ private:
     // user-facing point of TypeScript-style unions (`f(5)`/`f("hi")` for `f(x: i32 | str)`, no
     // wrapper syntax needed).
     bool isUnionMember(const Type& valueType, const Type& targetType) const;
+    // Shared arg-count/per-arg-type checking (with the array->slice/String->str/union-wrap
+    // coercions - see each one's own comment) for a resolved callee's (params, returnType) -
+    // originally CallExpr's own inline logic, factored out so a module-qualified call
+    // (`math.sqrt(x)` - see docs/language/0066-modules.md) can reuse it verbatim instead of
+    // duplicating it.
+    Type checkCallArguments(const std::string& calleeDisplayName,
+                            const std::vector<Param>& params,
+                            const std::optional<std::string>& returnType,
+                            const std::vector<std::unique_ptr<Expr>>& arguments,
+                            TypeEnv& env,
+                            const Type* expectedReturnType,
+                            std::vector<Type>* currentLoopBreakTypes);
     // True if `type` is a valid Map/Set key type: i32/bool/str always;
     // Array/List if their element is (recursing on the existing flat
     // elementKind/elementStructName representation); struct if every
@@ -258,4 +283,23 @@ private:
     // TypeChecker's later per-function validation pass needs no
     // separate impl-aware code path at all.
     std::unordered_map<std::string, const TraitDecl*> traits_;
+    // Modules (see docs/language/0066-modules.md) - the set of real module names self-derived
+    // from functions_/externs_'s own already-'.'-qualified keys (see registerSignatures's own
+    // comment). Consulted by checkExpr's MethodCallExpr case: `object` being a bare NameExpr
+    // matching this set means "math.sqrt(...)" is a qualified module call, not a real method
+    // call, resolved directly against functions_["math.sqrt"]/externs_["math.sqrt"] instead of
+    // the generic checkExpr(*methodCall->object,...) path (mirrors asEnumTypeName's identical
+    // "is object a bare name matching something known, checked before generic resolution"
+    // shape).
+    std::unordered_set<std::string> moduleNames_;
+    // The enclosing function's own module, if any (the substring before functions_'s own last
+    // '.' in its qualified name - "" for a root-file function). Set once, at the top of
+    // checkFunction, and left untouched through that whole function body's own recursive
+    // checkExpr/checkStmt/checkBlock traversal (never reentrant - this codebase has no nested
+    // function declarations/closures, so checkFunction is never called again from within an
+    // outer checkFunction's own recursion) - a single ambient member field instead of a new
+    // parameter threaded through every one of those signatures. Consulted only to exempt a
+    // module's own qualified self-reference (`math.helper()` called from within math's own code)
+    // from the `pub` check a genuinely external qualified reference needs.
+    std::string currentFunctionModule_;
 };

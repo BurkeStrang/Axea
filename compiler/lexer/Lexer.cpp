@@ -305,7 +305,9 @@ Token Lexer::lexIdentifierOrKeyword()
         {"for", TokenKind::For},       {"in", TokenKind::In},
         {"extern", TokenKind::Extern}, {"as", TokenKind::As},
         {"trait", TokenKind::Trait},   {"impl", TokenKind::Impl},
-        {"enum", TokenKind::Enum},     {"match", TokenKind::Match}};
+        {"enum", TokenKind::Enum},     {"match", TokenKind::Match},
+        {"module", TokenKind::Module}, {"use", TokenKind::Use},
+        {"fn", TokenKind::Fn}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {

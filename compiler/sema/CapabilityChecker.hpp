@@ -35,6 +35,19 @@ private:
     void checkMovesInExpr(const Expr& expr,
                           const FunctionDecl& function,
                           std::unordered_set<std::string>& moved) const;
+    // Closures (see docs/language/0067-closures.md) - collects every bare NameExpr text
+    // referenced *anywhere* in `expr`'s own subtree, unconditionally (no scope-awareness - a
+    // name shadowed by a nested block's own local is still collected). This over-approximation
+    // is deliberate and safe for how it's actually used (deciding a closure's own move-only
+    // capture set): the caller subtracts the closure's own top-level param names afterward,
+    // which handles the common case (a closure param shadowing an outer name); a name shadowed
+    // by a *nested* local *within* the closure body is a narrower, documented imprecision (see
+    // that doc's own Known Imprecision) rather than one this collector tries to resolve
+    // precisely - mirrors this whole checker's own already-documented "no alias tracking, no
+    // cross-branch move merging" stance.
+    static void collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names);
+    static void collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names);
+
     void checkMovesInStmt(const Stmt& stmt,
                           const FunctionDecl& function,
                           std::unordered_set<std::string>& moved) const;

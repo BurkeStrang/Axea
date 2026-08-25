@@ -95,6 +95,36 @@ struct IrFieldGet final : IrInst
     std::string field;
 };
 
+// A closure literal (see docs/language/0067-closures.md) - `capturesObject` is an already-built
+// captures struct (an ordinary IrStructNew, reused unchanged - a captures struct's own fields are
+// always plain Axea-typed values, never a function pointer, so it needs no dedicated instruction
+// of its own). This instruction builds the closure *value* itself: the classic "fat pointer" pair
+// {fn ptr, opaque captures ptr}, structurally keyed by signature alone (`paramTypes`/
+// `returnType` - mirrors Optional<T>/Result<T,E>'s own "same shape regardless of instance"
+// structural keying) rather than per-literal, since the captures are already hidden behind
+// `capturesObject`'s own opaque pointer - LlvmIrEmitter registers (memoized) one
+// `%axea.Closure.<id> = type { RetType (i8*, ParamTypes...)*, i8* }` per distinct signature, not
+// per closure literal.
+struct IrClosureNew final : IrInst
+{
+    std::string trampolineFunctionName;
+    int capturesObject;
+    std::vector<std::string> paramTypes;
+    std::string returnType;
+};
+
+// Calling a closure *value* (see docs/language/0067-closures.md) - genuinely different from
+// IrCall, which always targets a statically-known name: `closureObject` is a runtime value, and
+// the call must go through its own field-0 function pointer, indirectly. `closureObject`'s own
+// signature (needed to emit the exact `call RetType (ParamTypes...) %fnPtr(...)` text) is never
+// duplicated here - LlvmIrEmitter re-derives it the same way it already re-derives every other
+// register's own type, from where `closureObject` was itself constructed.
+struct IrClosureCall final : IrInst
+{
+    int closureObject;
+    std::vector<int> args;
+};
+
 struct IrFieldSet final : IrInst
 {
     int object;

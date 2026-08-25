@@ -662,3 +662,29 @@ TEST("CapabilityChecker infers read for an Array parameter that is only joined -
                        "x = describe([1, 2, 3, 4])");
     EXPECT_TRUE(capabilities.at("describe")[0] == Capability::Read);
 }
+
+TEST("CapabilityChecker's move-only closure capture requires Capability::Take on a captured "
+     "struct-typed param of the enclosing function (see docs/language/0067-closures.md) - "
+     "unconditionally, regardless of what the closure body does with its own copy afterward")
+{
+    const auto capabilities = capabilitiesOf("struct Point { x: i32 } "
+                                             "makeGetter(p: Point) -> fn() -> i32 { "
+                                             "  return fn() -> i32 { return p.x } "
+                                             "} "
+                                             "getter = makeGetter(Point { x: 5 })");
+    EXPECT_TRUE(capabilities.at("makeGetter")[0] == Capability::Take);
+}
+
+TEST("CapabilityChecker's move-only capture rejects capturing the same struct-typed local into "
+     "two different closures - the second capture is a use of an already-moved value, mirroring "
+     "exactly how a second `take`-consuming call on the same value is already rejected")
+{
+    EXPECT_THROWS(capabilitiesOf("struct Point { x: i32  y: i32 } "
+                                 "run() -> i32 { "
+                                 "  p = Point { x: 1, y: 2 } "
+                                 "  a: fn() -> i32 = fn() -> i32 { return p.x } "
+                                 "  b: fn() -> i32 = fn() -> i32 { return p.y } "
+                                 "  return a() + b() "
+                                 "} "
+                                 "y = run()"));
+}

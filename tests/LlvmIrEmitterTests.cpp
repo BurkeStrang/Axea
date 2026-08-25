@@ -2440,3 +2440,55 @@ TEST("LlvmIrEmitter forwards an already-union-typed value through another union-
     }
     EXPECT_EQ(allocCount, 1);
 }
+
+TEST("LlvmIrEmitter lowers a closure literal's own body into a genuine new top-level function "
+     "(the trampoline), reached only through the closure value's own field-0 function pointer - "
+     "never a direct, ordinary @closure$N(...) call (see docs/language/0067-closures.md)")
+{
+    auto ir = emitLlvmIr("add: fn(i32, i32) -> i32 = fn(x: i32, y: i32) -> i32 { return x + y } "
+                         "y = add(2, 3)");
+    EXPECT_TRUE(ir.find("define i32 @closure$0(") != std::string::npos);
+    EXPECT_TRUE(ir.find("%axea.Closure.0 = type { i32 (i8*, i32, i32)*, i8* }") !=
+                std::string::npos);
+    // Never called directly by name - only indirectly, through a loaded function-pointer
+    // register (no "@closure$0(" call site anywhere in the emitted call sequence).
+    EXPECT_TRUE(ir.find("call i32 @closure$0(") == std::string::npos);
+}
+
+TEST("LlvmIrEmitter's closure struct is a real, structurally-keyed \"fat pointer\" - two "
+     "closures with the exact same signature but different captures share one "
+     "%axea.Closure.<id> type, even though each gets its own distinct captures struct")
+{
+    auto ir = emitLlvmIr("makeAdder(base: i32) -> fn(i32) -> i32 { "
+                         "  return fn(x: i32) -> i32 { return x + base } "
+                         "} "
+                         "makeMultiplier(factor: i32, extra: i32) -> fn(i32) -> i32 { "
+                         "  return fn(x: i32) -> i32 { return x * factor + extra } "
+                         "} "
+                         "add5 = makeAdder(5) "
+                         "mul3 = makeMultiplier(3, 1)");
+    // Only one %axea.Closure.<id> type *declaration* exists - both closures share the exact
+    // same fn(i32)->i32 signature, regardless of how many things each one captures. (Searching
+    // for the full declaration text specifically, not just any mention of "%axea.Closure." -
+    // that substring legitimately appears many more times, as an ordinary type annotation
+    // wherever a closure value flows through the program.)
+    const std::string declText = "%axea.Closure.0 = type { i32 (i8*, i32)*, i8* }";
+    const auto first = ir.find(declText);
+    const auto second = ir.find(declText, first + declText.size());
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(second == std::string::npos);
+    // Two distinct captures structs though - one field (base), two fields (factor, extra).
+    EXPECT_TRUE(ir.find("%closure.captures.0 = type { i32 }") != std::string::npos);
+    EXPECT_TRUE(ir.find("%closure.captures.1 = type { i32, i32 }") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter calls a closure value through an indirect call - load its own field-0 "
+     "function pointer, then 'call RetType (ParamTypes...) %reg(captures, args...)', never a "
+     "direct-by-name call")
+{
+    auto ir = emitLlvmIr("apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+                         "doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } "
+                         "y = apply(doubler, 5)");
+    EXPECT_TRUE(ir.find("getelementptr %axea.Closure.0, %axea.Closure.0* %") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 (i8*, i32) %") != std::string::npos);
+}
