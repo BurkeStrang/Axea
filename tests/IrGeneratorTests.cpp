@@ -27,11 +27,16 @@ namespace
         capabilityChecker.check(program);
 
         RegionChecker regionChecker;
-        regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+        regionChecker.check(program,
+                            capabilityChecker.effectiveCapabilities(),
+                            capabilityChecker.closureEffectiveCapabilities());
 
         IrGenerator irGenerator;
-        return irGenerator.generate(
-            program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+        return irGenerator.generate(program,
+                                    capabilityChecker.effectiveCapabilities(),
+                                    regionChecker.regions(),
+                                    capabilityChecker.closureEffectiveCapabilities(),
+                                    regionChecker.closureRegions());
     }
 
     const IrFunction& functionNamed(const IrProgram& program, const std::string& name)
@@ -536,4 +541,114 @@ TEST("IrGenerator lowers Array/List slicing into the same IrStrSlice instruction
     EXPECT_TRUE(slice != nullptr);
     EXPECT_EQ(slice->start, -1);
     EXPECT_TRUE(slice->end != -1);
+}
+
+TEST("IrGenerator's closure trampoline emits a real IrBorrowRead (not the pre-existing "
+     "unconditional IrMove fallback) for a struct-typed closure parameter that CapabilityChecker "
+     "inferred as read-only and RegionChecker resolved as Borrowed (see "
+     "docs/language/0067-closures.md's own struct-typed closure parameter support). Nested inside "
+     "a function whose own return type is itself struct-like (Point) - RegionChecker only walks "
+     "a function's own body at all when its own return type could carry an aliasing risk (see "
+     "checkFunction's own early-return check), so a closure nested inside an i32-returning "
+     "function would never actually get analyzed either.")
+{
+    auto program = generateIr("struct Point { x: i32 } "
+                              "run() -> Point { "
+                              "  get: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } "
+                              "  n = get(Point { x: 5 }) "
+                              "  return Point { x: n } "
+                              "} "
+                              "y = run()");
+    const auto& trampoline = functionNamed(program, "closure$0");
+
+    // Two params in the trampoline's own IR: __captures (always IrBorrowRead - see
+    // generateClosureTrampoline) and p itself.
+    const IrBorrowRead* borrowRead = nullptr;
+    const IrMove* move = nullptr;
+    int borrowReadCount = 0;
+    for (const auto& inst : trampoline.body)
+    {
+        if (const auto* b = dynamic_cast<const IrBorrowRead*>(inst.get()))
+        {
+            borrowRead = b;
+            ++borrowReadCount;
+        }
+        if (const auto* m = dynamic_cast<const IrMove*>(inst.get()))
+        {
+            move = m;
+        }
+    }
+    EXPECT_TRUE(borrowRead != nullptr);
+    // __captures's own IrBorrowRead, plus p's own - not collapsed into just one.
+    EXPECT_EQ(borrowReadCount, 2);
+    EXPECT_TRUE(move == nullptr);
+}
+
+TEST("IrGenerator's closure trampoline still falls back to its own original unconditional "
+     "IrMove for a `take`-declared struct-typed closure parameter - ownership genuinely "
+     "transfers, so RegionChecker resolves it as Owned, not Borrowed. Nested inside a function "
+     "whose own return type is itself struct-like, for the same reason the read-only test just "
+     "above needs it (RegionChecker skips walking a function's body at all otherwise).")
+{
+    auto program = generateIr("struct Point { x: i32 } "
+                              "run() -> Point { "
+                              "  consume: fn(Point) -> i32 = fn(take p: Point) -> i32 { "
+                              "    return p.x "
+                              "  } "
+                              "  n = consume(Point { x: 5 }) "
+                              "  return Point { x: n } "
+                              "} "
+                              "y = run()");
+    const auto& trampoline = functionNamed(program, "closure$0");
+
+    int moveCount = 0;
+    for (const auto& inst : trampoline.body)
+    {
+        if (dynamic_cast<const IrMove*>(inst.get()))
+        {
+            ++moveCount;
+        }
+    }
+    // p's own IrMove alone - __captures always gets IrBorrowRead, never IrMove (see
+    // generateClosureTrampoline), regardless of what any actual closure param resolves to.
+    EXPECT_EQ(moveCount, 1);
+}
+
+TEST("IrGenerator lowers a self-referential (recursive) closure's own self-call into a genuine "
+     "direct IrCall back to the trampoline's own name, forwarding its own captures register as "
+     "the hidden first argument - never an indirect IrClosureCall, since no closure *value* "
+     "exists yet at the point the literal's own body is still being compiled (see "
+     "docs/language/0067-closures.md's self-referential closures)")
+{
+    auto program = generateIr("run() -> i32 { "
+                              "  fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
+                              "    if n <= 1 { return 1 } "
+                              "    return n * fact(n - 1) "
+                              "  } "
+                              "  return fact(5) "
+                              "} "
+                              "y = run()");
+    const auto& trampoline = functionNamed(program, "closure$0");
+
+    // `if n <= 1 { return 1 }` has no explicit `else`, so the branch's own elseBlock is empty -
+    // `return n * fact(n - 1)` is a separate statement in the trampoline's own top-level body,
+    // reached only when the `if` doesn't take its own early return.
+    const IrCall* recursiveCall = nullptr;
+    int closureCallCount = 0;
+    for (const auto& inst : trampoline.body)
+    {
+        if (const auto* call = dynamic_cast<const IrCall*>(inst.get()))
+        {
+            recursiveCall = call;
+        }
+        if (dynamic_cast<const IrClosureCall*>(inst.get()))
+        {
+            ++closureCallCount;
+        }
+    }
+    EXPECT_TRUE(recursiveCall != nullptr);
+    EXPECT_EQ(recursiveCall->callee, "closure$0");
+    // The forwarded captures register, plus (n - 1).
+    EXPECT_EQ(recursiveCall->args.size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(closureCallCount, 0);
 }

@@ -103,7 +103,8 @@ TEST("LlvmIrEmitter every numbered SSA register is defined before any later-numb
             calleeName.starts_with("axea.strbuf.") || calleeName.starts_with("axea.char.") ||
             calleeName.starts_with("axea.utf8.") || calleeName.starts_with("axea.i32.") ||
             calleeName.starts_with("axea.i64.") || calleeName.starts_with("axea.f64.") ||
-            calleeName.starts_with("axea.bool."))
+            calleeName.starts_with("axea.bool.") || calleeName.starts_with("axea.retain.") ||
+            calleeName.starts_with("axea.drop."))
         {
             definePos = nextDefine;
             continue;
@@ -2448,7 +2449,7 @@ TEST("LlvmIrEmitter lowers a closure literal's own body into a genuine new top-l
     auto ir = emitLlvmIr("add: fn(i32, i32) -> i32 = fn(x: i32, y: i32) -> i32 { return x + y } "
                          "y = add(2, 3)");
     EXPECT_TRUE(ir.find("define i32 @closure$0(") != std::string::npos);
-    EXPECT_TRUE(ir.find("%axea.Closure.0 = type { i32 (i8*, i32, i32)*, i8* }") !=
+    EXPECT_TRUE(ir.find("%axea.Closure.0 = type { i32 (i8*, i32, i32)*, i8*, void (i8*)* }") !=
                 std::string::npos);
     // Never called directly by name - only indirectly, through a loaded function-pointer
     // register (no "@closure$0(" call site anywhere in the emitted call sequence).
@@ -2472,12 +2473,17 @@ TEST("LlvmIrEmitter's closure struct is a real, structurally-keyed \"fat pointer
     // for the full declaration text specifically, not just any mention of "%axea.Closure." -
     // that substring legitimately appears many more times, as an ordinary type annotation
     // wherever a closure value flows through the program.)
-    const std::string declText = "%axea.Closure.0 = type { i32 (i8*, i32)*, i8* }";
+    const std::string declText = "%axea.Closure.0 = type { i32 (i8*, i32)*, i8*, void (i8*)* }";
     const auto first = ir.find(declText);
     const auto second = ir.find(declText, first + declText.size());
     EXPECT_TRUE(first != std::string::npos);
     EXPECT_TRUE(second == std::string::npos);
-    // Two distinct captures structs though - one field (base), two fields (factor, extra).
+    // Two distinct captures structs though - one field (base), two fields (factor, extra) -
+    // captures structs go through the same emitStructNew/structs_ machinery as a real struct
+    // (no hidden refcount field anymore - move semantics needs none - so each has exactly its
+    // own real field count). Each closure literal also gets its own per-shape drop wrapper,
+    // reached dynamically through the fat pointer's own field-2 function pointer (see
+    // emitClosureDropHelper) - the field-0 function-pointer trick's own drop-lifecycle analog.
     EXPECT_TRUE(ir.find("%closure.captures.0 = type { i32 }") != std::string::npos);
     EXPECT_TRUE(ir.find("%closure.captures.1 = type { i32, i32 }") != std::string::npos);
 }
@@ -2491,4 +2497,56 @@ TEST("LlvmIrEmitter calls a closure value through an indirect call - load its ow
                          "y = apply(doubler, 5)");
     EXPECT_TRUE(ir.find("getelementptr %axea.Closure.0, %axea.Closure.0* %") != std::string::npos);
     EXPECT_TRUE(ir.find("call i32 (i8*, i32) %") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter wraps a bare top-level function name passed as a call argument into a real "
+     "closure value, via a synthesized trampoline that just forwards into the real function (see "
+     "docs/language/0067-closures.md's implicit function-reference-to-closure coercion)")
+{
+    auto ir = emitLlvmIr("double(x: i32) -> i32 { return x * 2 } "
+                         "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+                         "y = apply(double, 5)");
+    EXPECT_TRUE(ir.find("define i32 @fnref$double(") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @double(") != std::string::npos);
+    // The always-empty captures struct this coercion needs (a bare function name captures
+    // nothing) is shared across every reference, not one per site.
+    EXPECT_TRUE(ir.find("%closure.captures.fnref = type {") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter memoizes one trampoline per distinct function name for the implicit "
+     "function-reference-to-closure coercion - three separate references to the same top-level "
+     "function share one @fnref$<name> trampoline, not three")
+{
+    auto ir = emitLlvmIr("double(x: i32) -> i32 { return x * 2 } "
+                         "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+                         "getDouble() -> fn(i32) -> i32 { return double } "
+                         "run() -> i32 { "
+                         "  d: fn(i32) -> i32 = double "
+                         "  a = apply(double, 5) "
+                         "  return a "
+                         "} "
+                         "y = run()");
+    const std::string defText = "define i32 @fnref$double(";
+    const auto first = ir.find(defText);
+    const auto second = ir.find(defText, first + defText.size());
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(second == std::string::npos);
+}
+
+TEST("LlvmIrEmitter compiles a self-referential (recursive) closure's own self-call into an "
+     "ordinary direct call to its own trampoline function, forwarding its own captures pointer "
+     "straight through - never through the indirect function-pointer machinery a real closure "
+     "*value* call needs (see docs/language/0067-closures.md's self-referential closures)")
+{
+    auto ir = emitLlvmIr("run() -> i32 { "
+                         "  fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
+                         "    if n <= 1 { return 1 } "
+                         "    return n * fact(n - 1) "
+                         "  } "
+                         "  return fact(5) "
+                         "} "
+                         "y = run()");
+    EXPECT_TRUE(ir.find("define i32 @closure$0(%closure.captures.0* %0, i32 %1)") !=
+                std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @closure$0(%closure.captures.0* %0,") != std::string::npos);
 }

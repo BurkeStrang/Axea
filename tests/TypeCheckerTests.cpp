@@ -2049,11 +2049,90 @@ TEST("TypeChecker rejects a closure whose body doesn't return a value of its own
     EXPECT_THROWS(check("f: fn(i32) -> i32 = fn(x: i32) -> i32 { if x > 0 { return x } }"));
 }
 
-TEST("TypeChecker rejects a struct-typed closure parameter - out of scope this phase (see "
-     "docs/language/0067-closures.md's own Known Imprecision)")
+TEST("TypeChecker accepts a bare top-level function name passed as a call argument where a "
+     "matching closure type is declared (see docs/language/0067-closures.md's implicit "
+     "function-reference-to-closure coercion)")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "f = fn(p: Point) -> i32 { return p.x }"));
+    check("double(x: i32) -> i32 { return x * 2 } "
+          "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+          "y = apply(double, 5)");
+}
+
+TEST("TypeChecker accepts a bare top-level function name assigned to a declared closure-typed "
+     "local")
+{
+    check("double(x: i32) -> i32 { return x * 2 } "
+          "d: fn(i32) -> i32 = double "
+          "y = d(5)");
+}
+
+TEST("TypeChecker accepts a bare top-level function name returned where the enclosing function "
+     "declares a matching closure-typed return")
+{
+    check("double(x: i32) -> i32 { return x * 2 } "
+          "getDouble() -> fn(i32) -> i32 { return double } "
+          "g = getDouble() "
+          "y = g(5)");
+}
+
+TEST("TypeChecker rejects a bare top-level function name whose own signature doesn't match the "
+     "declared closure type")
+{
+    EXPECT_THROWS(check("double(x: i32) -> i32 { return x * 2 } "
+                        "d: fn(i32) -> str = double"));
+}
+
+TEST("TypeChecker still resolves a same-named local over a top-level function for the implicit "
+     "function-reference-to-closure coercion - the ordinary 'inner scope wins' rule")
+{
+    EXPECT_THROWS(check("double(x: i32) -> i32 { return x * 2 } "
+                        "run() -> i32 { "
+                        "  double = 5 "
+                        "  d: fn(i32) -> i32 = double "
+                        "  return d(1) "
+                        "} "
+                        "y = run()"));
+}
+
+TEST("TypeChecker accepts a struct-typed closure parameter (see "
+     "docs/language/0067-closures.md's implicit function-reference-to-closure coercion "
+     "corrections)")
+{
+    check("struct Point { x: i32 } "
+          "f: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } "
+          "y = f(Point { x: 5 })");
+}
+
+TEST("TypeChecker accepts a self-referential (recursive) closure - no new syntax, `f`'s own "
+     "signature is pre-bound in scope before its body is checked, so a self-call inside resolves "
+     "through the exact same closure-typed-local call path any other closure call already does "
+     "(see docs/language/0067-closures.md)")
+{
+    check("fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
+          "  if n <= 1 { return 1 } "
+          "  return n * fact(n - 1) "
+          "} "
+          "y = fact(5)");
+}
+
+TEST("TypeChecker accepts a self-referential closure with no declared type on its own binding - "
+     "self-reference doesn't require the `f: fn(...)->...` spelling, just a direct closure "
+     "literal RHS")
+{
+    check("fact = fn(n: i32) -> i32 { "
+          "  if n <= 1 { return 1 } "
+          "  return n * fact(n - 1) "
+          "} "
+          "y = fact(5)");
+}
+
+TEST("TypeChecker still resolves a same-named local (not the closure being defined) inside a "
+     "self-referential closure's own body when that name is shadowed by one of its own params - "
+     "the closure's own param always wins, exactly like any other closure's own param shadowing "
+     "an outer name")
+{
+    check("f: fn(i32) -> i32 = fn(f: i32) -> i32 { return f + 1 } "
+          "y = f(5)");
 }
 
 TEST("TypeChecker accepts capturing a struct-typed local into exactly one closure (move-only, "

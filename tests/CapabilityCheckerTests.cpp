@@ -675,6 +675,72 @@ TEST("CapabilityChecker's move-only closure capture requires Capability::Take on
     EXPECT_TRUE(capabilities.at("makeGetter")[0] == Capability::Take);
 }
 
+TEST("CapabilityChecker infers a struct-typed closure *parameter*'s own capability from how the "
+     "closure body uses it, exactly like a real top-level function's param - keyed by the "
+     "closure literal's own synthetic 'closure$N' identity (see "
+     "docs/language/0067-closures.md's own registerClosure and closureEffectiveCapabilities). "
+     "Nested inside a real function body: CapabilityChecker (like RegionChecker) only ever "
+     "analyzes a *function's own* body, never bare top-level script statements - this exact "
+     "closure literal, written as a top-level assignment with no enclosing function, would never "
+     "be discovered at all.")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Point { x: i32 } "
+                       "run() -> i32 { "
+                       "  get: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } "
+                       "  return get(Point { x: 5 }) "
+                       "} "
+                       "y = run()");
+    EXPECT_TRUE(capabilities.at("closure$0")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a struct-typed closure parameter whose own field is "
+     "mutated inside the closure body")
+{
+    const auto capabilities = capabilitiesOf("struct Point { x: i32 } "
+                                             "run() -> i32 { "
+                                             "  bump: fn(Point) -> i32 = fn(p: Point) -> i32 { "
+                                             "    p.x = p.x + 1 "
+                                             "    return p.x "
+                                             "  } "
+                                             "  return bump(Point { x: 5 }) "
+                                             "} "
+                                             "y = run()");
+    EXPECT_TRUE(capabilities.at("closure$0")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker rejects an explicitly-declared closure parameter capability that's too "
+     "weak for how the closure's own body actually uses it - the identical error a real "
+     "under-declared function parameter already gets")
+{
+    EXPECT_THROWS(capabilitiesOf("struct Point { x: i32 } "
+                                 "run() -> i32 { "
+                                 "  bump = fn(read p: Point) -> i32 { "
+                                 "    p.x = p.x + 1 "
+                                 "    return p.x "
+                                 "  } "
+                                 "  return bump(Point { x: 5 }) "
+                                 "} "
+                                 "y = run()"));
+}
+
+TEST("CapabilityChecker rejects using a struct-typed closure parameter again after it's already "
+     "been `take`n inside the same closure body - the closure's own body gets an independent "
+     "move-check, exactly like a real top-level function's body")
+{
+    EXPECT_THROWS(capabilitiesOf("struct Point { x: i32 } "
+                                 "consume(take pt: Point) -> i32 { return pt.x } "
+                                 "run() -> i32 { "
+                                 "  consumeTwice = fn(take p: Point) -> i32 { "
+                                 "    a = consume(p) "
+                                 "    b = consume(p) "
+                                 "    return a + b "
+                                 "  } "
+                                 "  return consumeTwice(Point { x: 5 }) "
+                                 "} "
+                                 "y = run()"));
+}
+
 TEST("CapabilityChecker's move-only capture rejects capturing the same struct-typed local into "
      "two different closures - the second capture is a use of an already-moved value, mirroring "
      "exactly how a second `take`-consuming call on the same value is already rejected")

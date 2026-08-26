@@ -209,6 +209,14 @@ private:
     std::string closureReturnType(const std::string& type) const;
     void emitClosureNew(const IrClosureNew& closureNew, FunctionContext& fctx);
     void emitClosureCall(const IrClosureCall& closureCall, FunctionContext& fctx);
+    // Closure drop lifecycle - one generic @axea.drop.<closureTypeName> per *signature*
+    // (registerClosureInstantiation's own "%axea.Closure.<id>" name), called once when that
+    // instantiation is first registered: null-checks, loads field 2 (the per-literal drop-wrapper
+    // function pointer - see registerClosureInstantiation's own comment) and field 1 (the opaque
+    // captures pointer), calls the former with the latter, then frees the fat-pointer struct
+    // itself. Every literal sharing this signature reuses this same helper - the dynamic dispatch
+    // through field 2 is what lets one generic function correctly drop any of them.
+    void emitClosureDropHelper(const std::string& closureTypeName);
 
     bool isSliceType(const std::string& type) const;
     // "{T*, i32}" -> "T".
@@ -567,6 +575,17 @@ private:
     // string alone, so this can't be registered lazily from within
     // stringifyValueOfType the way collections are.
     void emitStructToStringHelpers(const IrProgram& program);
+    // Move semantics (structs/enums only) - `@axea.drop.<Name>` for every struct in
+    // `program.structs`, mirroring emitStructToStringHelpers' own shape and "build every one
+    // unconditionally, upfront" choice exactly. Single ownership is proven at compile time (see
+    // RegionChecker's move-checking), so there's no runtime refcount left to check - `drop`
+    // unconditionally recurses into every struct/enum-typed field (tag-gated to only the
+    // *active* variant for an enum - see program.enums) before calling `@free` on the object
+    // itself. Every other field type (primitive, or one of the heap types this phase doesn't
+    // cover, or an Optional<Struct>/Result<Struct,E> payload) is left untouched by construction -
+    // a documented, bounded extension of this codebase's existing "leak, don't free" policy for
+    // those, never touched incorrectly.
+    void emitStructRefcountHelpers(const IrProgram& program);
     // `@axea.tostring.<kind>.<id>(ptr) -> i8*` for a fixed array, List/
     // Stack/PriorityQueue (share List's own representation), Deque/Queue
     // (share Deque's), Map/Set/LinkedList/SortedMap/SortedSet
@@ -1282,4 +1301,8 @@ private:
     bool printRuntimeRegistered_ = false;
     std::ostringstream toStrRuntimeText_;
     std::ostringstream printRuntimeText_;
+    // Real memory reclamation (structs/enums only) - emitStructRefcountHelpers' own generated
+    // text, mirroring toStrRuntimeText_'s own "written into directly, spliced at the very end"
+    // pattern.
+    std::ostringstream structRefcountRuntimeText_;
 };

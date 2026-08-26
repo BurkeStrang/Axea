@@ -2,9 +2,27 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 namespace
 {
+    // Shared<T> (the move-semantics work's own explicit refcounting escape hatch) - a param's own
+    // declared type text is always the raw, canonical "Shared<T>" form (Parser::parseTypeName's
+    // own output, never mangled - unlike a locally-constructed Shared<T> value's own resolved
+    // type, which simpleTypeOfExpr's ShareExpr case already returns pre-mangled). Every
+    // structs_.contains(...)-style consumer needs the mangled "Shared.<T>" form consistently
+    // (registerSharedType's own key into structs_), so any raw type-string read directly off a
+    // Param (not through simpleTypeOfExpr's own NameExpr case, which already normalizes this)
+    // needs to pass through this first. A no-op for anything that isn't a "Shared<...>" string.
+    std::string mangleSharedTypeName(const std::string& rawTypeString)
+    {
+        if (rawTypeString.starts_with("Shared<") && rawTypeString.back() == '>')
+        {
+            return "Shared." + rawTypeString.substr(7, rawTypeString.size() - 8);
+        }
+        return rawTypeString;
+    }
+
     // True if every path through this straight-line instruction list is
     // guaranteed to hit a Return - either directly, or via a Branch whose
     // thenBlock and elseBlock both alwaysTerminate. Mirrors
@@ -389,6 +407,16 @@ void IrGenerator::registerStructs(const Program& program)
     // declared type (which lowerStmt's AssignmentStmt case registers lazily, the first time that
     // specific assignment is lowered, since there's no equivalent "whole program" pass over
     // statement bodies here).
+    // Shared<T> (see registerSharedType's own comment) - same eager signature-scanning reasoning
+    // as the union loop above: structs_.contains("Shared." + T) needs to see it from a function's
+    // very first reference, before its body is ever lowered.
+    auto registerSharedIfPresent = [this](const std::string& typeString)
+    {
+        if (typeString.starts_with("Shared<") && typeString.back() == '>')
+        {
+            registerSharedType(typeString.substr(7, typeString.size() - 8));
+        }
+    };
     for (const auto& [name, function] : functions_)
     {
         for (const auto& param : function->params)
@@ -397,10 +425,15 @@ void IrGenerator::registerStructs(const Program& program)
             {
                 registerUnionType(param.type);
             }
+            registerSharedIfPresent(param.type);
         }
         if (function->returnType && function->returnType->find('|') != std::string::npos)
         {
             registerUnionType(*function->returnType);
+        }
+        if (function->returnType)
+        {
+            registerSharedIfPresent(*function->returnType);
         }
     }
 }
@@ -417,9 +450,39 @@ bool IrGenerator::isObviouslyStructTyped(const Expr& expr, const FunctionDecl& f
         {
             if (param.name == name->name)
             {
-                return structs_.contains(param.type);
+                return structs_.contains(mangleSharedTypeName(param.type));
             }
         }
+    }
+    return false;
+}
+
+bool IrGenerator::isProvablyFreshStructValue(const Expr& expr) const
+{
+    if (dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        return true;
+    }
+    // `EnumName.Variant(args)` construction (see docs/language/0064-enums.md) - a real, freshly
+    // built IrStructNew, not a real method call at all (see lowerExpr's own identical check for
+    // this shape).
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        const auto* name = dynamic_cast<const NameExpr*>(methodCall->object.get());
+        return name && enums_.contains(name->name);
+    }
+    // `EnumName.Variant` (no-payload) construction - same reasoning.
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        const auto* name = dynamic_cast<const NameExpr*>(field->object.get());
+        return name && enums_.contains(name->name);
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        const auto it = functions_.find(call->callee);
+        return it != functions_.end() && it->second->returnType &&
+               (structs_.contains(*it->second->returnType) ||
+                enums_.contains(*it->second->returnType));
     }
     return false;
 }
@@ -892,6 +955,24 @@ std::optional<std::string> IrGenerator::enumNameOfExpr(const Expr& expr,
     return std::nullopt;
 }
 
+const StructDecl& IrGenerator::registerSharedType(const std::string& elementTypeName)
+{
+    const std::string mangledName = "Shared." + elementTypeName;
+    if (const auto it = structs_.find(mangledName); it != structs_.end())
+    {
+        return *it->second;
+    }
+
+    std::vector<Field> fields;
+    fields.push_back(Field{"refcount", "i32"});
+    fields.push_back(Field{"value", elementTypeName});
+    auto decl = std::make_unique<StructDecl>(mangledName, std::move(fields));
+    const StructDecl* raw = decl.get();
+    structs_[mangledName] = raw;
+    sharedTypeDecls_.push_back(std::move(decl));
+    return *raw;
+}
+
 const EnumDecl& IrGenerator::registerUnionType(const std::string& canonicalName)
 {
     if (const auto it = enums_.find(canonicalName); it != enums_.end())
@@ -953,6 +1034,25 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
     {
         return structLiteral->typeName;
     }
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        // Shared<T> (the move-semantics work's own explicit refcounting escape hatch) - returns
+        // the already-mangled "Shared.<T>" form (registerSharedType's own key into structs_), not
+        // the canonical "Shared<T>" form a user-facing type annotation would use - every
+        // structs_.contains(...)-style consumer throughout this file then recognizes it uniformly,
+        // whether it arrived via this direct case or via a name whose scope.findSimpleType entry
+        // was populated from this same result (AssignmentStmt's own scope.defineSimpleType call a
+        // few hundred lines below, used for union-wrapping decisions, reads this function
+        // directly - if this case didn't exist, `x = Shared(p)` with no declared type would never
+        // get x's own type recorded there at all, and a later `x.field` read couldn't recognize
+        // the need to auto-deref). resolveStructOrEnumType (not this function recursively) for
+        // the inner value, since T might be constructed via an enum-variant shape
+        // (`Shared(Shape.Rect(...))`), which this function alone doesn't recognize.
+        if (const auto elementType = resolveStructOrEnumType(*shareExpr->value, function, scope))
+        {
+            return "Shared." + *elementType;
+        }
+    }
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
         if (function)
@@ -961,7 +1061,7 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             {
                 if (param.name == name->name)
                 {
-                    return param.type;
+                    return mangleSharedTypeName(param.type);
                 }
             }
         }
@@ -975,7 +1075,104 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             return *it->second->returnType;
         }
     }
+    // `.clone()` (Shared<T>) - a real bug found while testing: `other = sp.clone(); other.x`
+    // crashed with an opaque unordered_map::at, the exact same failure mode the closure-literal
+    // comment just below already documents for a different cause - `other`'s own type was never
+    // recorded via scope.defineSimpleType (this function has no MethodCallExpr case at all, so
+    // `sp.clone()` fell straight through to nullopt), so a later `other.x` couldn't recognize the
+    // need to auto-deref through the wrapper and tried to read field "x" directly off the
+    // "Shared.Point" struct itself, which only has "refcount"/"value". `.clone()`'s own result
+    // type is always identical to its receiver's own type, so this just recurses.
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr);
+        methodCall && methodCall->method == "clone")
+    {
+        return simpleTypeOfExpr(*methodCall->object, function, scope);
+    }
+    // A closure literal (see docs/language/0067-closures.md) - a real, pre-existing bug found
+    // while verifying self-referential closures: an *undeclared*-type closure-literal assignment
+    // (`f = fn(x: i32) -> i32 {...}`, as opposed to `f: fn(i32)->i32 = fn(...){...}`) fell through
+    // to this function returning nullopt, so scope.defineSimpleType was never called for it - a
+    // later `f(5)` then couldn't recognize `f` as a closure-typed local at all (the "closure-typed
+    // local" check in lowerExpr's own CallExpr case), silently falling through to an ordinary
+    // IrCall targeting a nonexistent top-level function named "f" instead, caught only much later
+    // as an opaque unordered_map::at inside LlvmIrEmitter. Computed directly from the literal's
+    // own param/return type text (raw, not resolved - mirrors every other closure param/return
+    // type string IrGenerator already trusts as-is elsewhere, e.g. IrClosureNew's own paramTypes;
+    // this function keeps no real type table at all, per its own comment above).
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        std::string paramsCsv;
+        for (std::size_t i = 0; i < closureExpr->params.size(); ++i)
+        {
+            if (i > 0)
+            {
+                paramsCsv += ",";
+            }
+            paramsCsv += closureExpr->params[i].type;
+        }
+        return "fn(" + paramsCsv + ")->" + closureExpr->returnType.value_or("unit");
+    }
     return std::nullopt;
+}
+
+std::optional<std::string> IrGenerator::resolveStructOrEnumType(const Expr& expr,
+                                                                const FunctionDecl* function,
+                                                                const IrScope& scope) const
+{
+    if (const auto simple = simpleTypeOfExpr(expr, function, scope))
+    {
+        return simple;
+    }
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        if (const auto* name = dynamic_cast<const NameExpr*>(methodCall->object.get());
+            name && enums_.contains(name->name))
+        {
+            return name->name;
+        }
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        if (const auto* name = dynamic_cast<const NameExpr*>(field->object.get());
+            name && enums_.contains(name->name))
+        {
+            return name->name;
+        }
+    }
+    // ShareExpr needs no separate case here - simpleTypeOfExpr (checked first, just above)
+    // already handles it directly, returning the mangled "Shared.<T>" form; see that function's
+    // own ShareExpr case for why it needed to live there instead of only here.
+    return std::nullopt;
+}
+
+void IrGenerator::retainFieldValueIfNeeded(int valueReg,
+                                           const Expr& sourceExpr,
+                                           const std::string& fieldAxeaType,
+                                           Context& ctx)
+{
+    (void)sourceExpr; // no longer consulted - see this function's own updated doc comment
+    if (structs_.contains(fieldAxeaType) || enums_.contains(fieldAxeaType) ||
+        fieldAxeaType.starts_with("fn("))
+    {
+        consumeTrackedRegister(ctx, valueReg);
+    }
+}
+
+bool IrGenerator::consumeTrackedRegister(Context& ctx, int reg)
+{
+    if (!ctx.liveScopeStack)
+    {
+        return false;
+    }
+    for (auto* frame : *ctx.liveScopeStack)
+    {
+        if (const auto it = std::find(frame->begin(), frame->end(), reg); it != frame->end())
+        {
+            frame->erase(it);
+            return true;
+        }
+    }
+    return false;
 }
 
 void IrGenerator::collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names)
@@ -1230,6 +1427,10 @@ int IrGenerator::wrapForUnion(int valueReg,
     tagInst->value = tagValue;
     const int tagReg = emit(ctx, std::move(tagInst));
 
+    // Real memory reclamation (structs/enums only) - see StructLiteralExpr's own identical
+    // comment on this same hazard; `*valueType` is exactly this payload field's own Axea type.
+    retainFieldValueIfNeeded(valueReg, valueExpr, *valueType, ctx);
+
     std::vector<std::pair<std::string, int>> fields;
     fields.emplace_back("__tag", tagReg);
     fields.emplace_back(*valueType + "_0", valueReg);
@@ -1253,6 +1454,28 @@ int IrGenerator::lowerMatchArm(int scrutineeReg,
 
     // Binds this arm's own extracted payload fields (if any) and lowers its body - shared by
     // both the "tag matched" case and the (comparison-skipped) last-arm case below.
+    const auto armVariantIt =
+        std::find_if(enumDecl.variants.begin(),
+                     enumDecl.variants.end(),
+                     [&](const EnumVariant& v) { return v.name == arm.variantName; });
+
+    // Real memory reclamation (structs/enums only) - a match-arm payload binding is a field read
+    // out of the scrutinee, exactly like `x = someEnum.field` already is via AssignmentStmt, but
+    // this path bypasses AssignmentStmt entirely (armScope.define is a raw scope binding, not a
+    // lowered statement) so it never went through retainFieldValueIfNeeded/structLocals tracking
+    // at all - a real, confirmed UAF (the scrutinee's own release, at the enclosing function's own
+    // return, freed the exact payload this binding points to, with nothing retaining it first,
+    // and nothing dropping it either). Fixed the same way BlockExpr tracks its own locals: a
+    // dedicated frame, pushed onto liveScopeStack for the arm body's own lexical extent (so an
+    // early `return` *inside* the arm body sees it via emitReturn's own stack walk) and explicitly
+    // drained via a self-aliasing-safe drop loop when the arm falls through normally (the match
+    // itself is a plain value-producing expression, e.g. `Rect(a,b) => a` with no `return` of its
+    // own - nothing else would ever drop these registers in that case). "Self-aliasing-safe"
+    // mirrors emitReturn's own retain-before-drop trick exactly: if the arm's own result register
+    // is itself one of these bindings (the overwhelmingly common case - returning the payload is
+    // the whole point of destructuring it), retain it once *before* the drop loop so the drop
+    // that would otherwise free out from under it just nets back to the count it already had.
+    std::vector<int> armStructLocals;
     auto lowerArmBody = [&](IrScope& bodyScope, Context& bodyCtx) -> int
     {
         IrScope armScope(&bodyScope, /*isBarrier=*/true);
@@ -1262,9 +1485,53 @@ int IrGenerator::lowerMatchArm(int scrutineeReg,
             fieldInst->object = scrutineeReg;
             fieldInst->field = arm.variantName + "_" + std::to_string(i);
             const int fieldReg = emit(bodyCtx, std::move(fieldInst));
+            if (armVariantIt != enumDecl.variants.end() && i < armVariantIt->fieldTypes.size() &&
+                (structs_.contains(armVariantIt->fieldTypes[i]) ||
+                 enums_.contains(armVariantIt->fieldTypes[i])))
+            {
+                armStructLocals.push_back(fieldReg);
+            }
             armScope.define(arm.bindingNames[i], fieldReg);
         }
-        return lowerExpr(*arm.body, armScope, bodyCtx);
+
+        // Move semantics: matching an owned scrutinee moves its payload out - the scrutinee
+        // itself must no longer be dropped as a whole (that would double-drop the exact fields
+        // just bound above). A harmless no-op if scrutineeReg isn't tracked at all (a Borrowed
+        // scrutinee was never added to any frame to begin with - see RegionChecker's own
+        // "field access is a zero-cost borrow" FieldExpr comment for the matching sema-level
+        // rule).
+        if (!armStructLocals.empty())
+        {
+            consumeTrackedRegister(bodyCtx, scrutineeReg);
+        }
+
+        if (bodyCtx.liveScopeStack && !armStructLocals.empty())
+        {
+            bodyCtx.liveScopeStack->push_back(&armStructLocals);
+        }
+
+        const int result = lowerExpr(*arm.body, armScope, bodyCtx);
+
+        if (!armStructLocals.empty())
+        {
+            // Move semantics: if the arm's own result is itself one of these bindings
+            // (returning the destructured payload is the whole point of matching), consuming it
+            // here removes it from armStructLocals before the drop loop below runs, so it flows
+            // out un-dropped - mirrors emitReturn's own identical self-aliasing handling.
+            consumeTrackedRegister(bodyCtx, result);
+            for (auto it = armStructLocals.rbegin(); it != armStructLocals.rend(); ++it)
+            {
+                auto dropInst = std::make_unique<IrDrop>();
+                dropInst->value = *it;
+                emitVoid(bodyCtx, std::move(dropInst));
+            }
+            if (bodyCtx.liveScopeStack)
+            {
+                bodyCtx.liveScopeStack->pop_back();
+            }
+        }
+
+        return result;
     };
 
     if (isLast)
@@ -1293,12 +1560,20 @@ int IrGenerator::lowerMatchArm(int scrutineeReg,
 
     IrScope thenScope(&scope, /*isBarrier=*/true);
     std::vector<int> thenStructLocals;
-    Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+    // Copy-then-override `ctx`, not aggregate-init - inherits liveScopeStack/selfRecursiveName/
+    // etc. unchanged (real memory reclamation and self-referential closures both need these to
+    // survive into a nested branch's own Context; aggregate-init with only 4 positional fields
+    // would silently reset every field beyond those 4 back to its own default instead).
+    Context thenCtx = ctx;
+    thenCtx.out = &branch->thenBlock;
+    thenCtx.structLocals = &thenStructLocals;
     branch->thenValue = lowerArmBody(thenScope, thenCtx);
 
     IrScope elseScope(&scope, /*isBarrier=*/true);
     std::vector<int> elseStructLocals;
-    Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+    Context elseCtx = ctx;
+    elseCtx.out = &branch->elseBlock;
+    elseCtx.structLocals = &elseStructLocals;
     branch->elseValue =
         lowerMatchArm(scrutineeReg, tagReg, enumDecl, arms, armIndex + 1, elseScope, elseCtx);
 
@@ -1446,6 +1721,31 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        // Shared<T> (the move-semantics work's own explicit refcounting escape hatch) - moves
+        // `value` into a fresh { i32 refcount, T value } allocation via the exact same
+        // emitStructNew-backed IrStructNew machinery a plain struct literal already uses; the
+        // refcount field starts at the literal constant 1, exactly like a plain struct/enum's own
+        // construction did before Part B (Shared<T> is the one place that construction-time
+        // convention still applies - see registerSharedType's own comment on why this is a real,
+        // ordinary struct field here, not a hidden one needing special-cased emission).
+        const int value = lowerExpr(*shareExpr->value, scope, ctx);
+        consumeTrackedRegister(ctx, value);
+        const auto elementTypeName =
+            resolveStructOrEnumType(*shareExpr->value, ctx.function, scope);
+        const StructDecl& sharedDecl =
+            registerSharedType(elementTypeName ? *elementTypeName : std::string());
+        auto refcountConst = std::make_unique<IrConstInt>();
+        refcountConst->value = 1;
+        const int refcountReg = emit(ctx, std::move(refcountConst));
+        auto inst = std::make_unique<IrStructNew>();
+        inst->typeName = sharedDecl.name;
+        inst->fields.emplace_back("refcount", refcountReg);
+        inst->fields.emplace_back("value", value);
+        return emit(ctx, std::move(inst));
+    }
+
     if (dynamic_cast<const NoneExpr*>(&expr))
     {
         // Unreachable in a well-typed program - TypeChecker::checkStmt's
@@ -1490,14 +1790,18 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         IrScope thenScope(&scope, /*isBarrier=*/true);
         std::vector<int> thenStructLocals;
-        Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+        Context thenCtx = ctx;
+        thenCtx.out = &branch->thenBlock;
+        thenCtx.structLocals = &thenStructLocals;
         auto unwrapInst = std::make_unique<IrOptionalUnwrap>();
         unwrapInst->object = operand;
         branch->thenValue = emit(thenCtx, std::move(unwrapInst));
 
         IrScope elseScope(&scope, /*isBarrier=*/true);
         std::vector<int> elseStructLocals;
-        Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+        Context elseCtx = ctx;
+        elseCtx.out = &branch->elseBlock;
+        elseCtx.structLocals = &elseStructLocals;
         const std::string& returnTypeName = *ctx.function->returnType;
         int failureResult;
         if (returnTypeName.starts_with("Result<"))
@@ -1570,6 +1874,30 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(printInst));
         }
 
+        // A real recursive call back into the trampoline currently being compiled (see
+        // docs/language/0067-closures.md's self-referential closures and Context's own
+        // selfRecursiveName comment) - checked before the "closure-typed local" check just below,
+        // since no real closure *value* exists yet to indirect through at the point this closure
+        // literal's own body is still being compiled; `scope` has no binding for this name at all
+        // (it's neither one of this closure's own params nor one of its captured fields), so the
+        // closure-typed-local check below would never match it anyway - this is a genuinely
+        // different call shape (a direct, ordinary IrCall to the trampoline's own name, forwarding
+        // its own captures register straight through), not an early-out on the same one.
+        if (ctx.selfRecursiveName && *ctx.selfRecursiveName == call->callee)
+        {
+            std::vector<int> args;
+            args.reserve(call->arguments.size() + 1);
+            args.push_back(ctx.selfRecursiveCapturesRegister);
+            for (const auto& argument : call->arguments)
+            {
+                args.push_back(lowerExpr(*argument, scope, ctx));
+            }
+            auto inst = std::make_unique<IrCall>();
+            inst->callee = ctx.selfRecursiveTrampolineName;
+            inst->args = std::move(args);
+            return emit(ctx, std::move(inst));
+        }
+
         // `callback(x)` where `callback` is a closure-typed local/param (see
         // docs/language/0067-closures.md) - checked before the ordinary functions_ lookup below,
         // for the same "shares Identifier(args) syntax with a real call" reason
@@ -1616,14 +1944,37 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         args.reserve(call->arguments.size());
         for (std::size_t i = 0; i < call->arguments.size(); ++i)
         {
-            int argReg = lowerExpr(*call->arguments[i], scope, ctx);
+            // A bare top-level function name, used where a closure-typed parameter is declared
+            // (see docs/language/0067-closures.md) - checked before lowerExpr, which would
+            // otherwise throw "undefined variable" trying to resolve a bare function name in
+            // scope.
+            const std::optional<int> functionRef =
+                tryLowerFunctionRef(*call->arguments[i], scope, ctx);
+            int argReg = functionRef ? *functionRef : lowerExpr(*call->arguments[i], scope, ctx);
             // Implicit union wrapping (see docs/language/0065-unions.md) -
             // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
             // syntax.
-            if (calleeIt != functions_.end() && i < calleeIt->second->params.size())
+            if (!functionRef && calleeIt != functions_.end() && i < calleeIt->second->params.size())
             {
                 argReg = wrapForUnion(
                     argReg, *call->arguments[i], calleeIt->second->params[i].type, scope, ctx);
+                // Real memory reclamation (structs/enums only) - a `take`-declared (Region::Owned)
+                // struct/enum-typed param is genuinely released for real at the callee's own
+                // function exit (see generateFunction's own param-frame setup), so the caller
+                // must retain the argument first (unless provably fresh) - otherwise the callee's
+                // own release frees memory a still-live caller-side binding may depend on (found
+                // via a real crash: a top-level struct passed to a `take` param, then auto-
+                // printed afterward once program-generated code prints every top-level binding).
+                if (!functionRef)
+                {
+                    if (const auto regionsIt = allFunctionRegions_.find(calleeIt->second->name);
+                        regionsIt != allFunctionRegions_.end() && i < regionsIt->second.size() &&
+                        regionsIt->second[i] == Region::Owned)
+                    {
+                        retainFieldValueIfNeeded(
+                            argReg, *call->arguments[i], calleeIt->second->params[i].type, ctx);
+                    }
+                }
             }
             args.push_back(argReg);
         }
@@ -1660,6 +2011,10 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
             {
                 const int fieldReg = lowerExpr(*methodCall->arguments[i], scope, ctx);
+                // Real memory reclamation (structs/enums only) - see StructLiteralExpr's own
+                // identical comment on this same hazard.
+                retainFieldValueIfNeeded(
+                    fieldReg, *methodCall->arguments[i], variantIt->fieldTypes[i], ctx);
                 fields.emplace_back(methodCall->method + "_" + std::to_string(i), fieldReg);
             }
 
@@ -1723,6 +2078,24 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             isBufferExpr(*methodCall->object, ctx.function, scope);
         const int object = lowerExpr(*methodCall->object, scope, ctx);
 
+        // `.clone()` (Shared<T> - the move-semantics work's own explicit refcounting escape
+        // hatch) - checked before every other method name below; unambiguous by name alone
+        // (TypeChecker's own ShareExpr/checkExpr case already guarantees the receiver is
+        // Shared<T> before this ever compiles, so no type re-resolution is needed here). Bumps
+        // the refcount and returns the exact same pointer - a second, independently-valid handle
+        // to the same allocation.
+        if (methodCall->method == "clone")
+        {
+            // Deliberately does NOT return `object` (the same register) - a distinct dest
+            // register is what keeps this clone's own drop obligation from being silently
+            // conflated with the original's by every register-identity-based tracking mechanism
+            // downstream (consumeTrackedRegister et al.) - see LlvmIrEmitter's own IrRetain
+            // dispatch for the fix this was found alongside (a real, confirmed refcount-leak bug).
+            auto retainInst = std::make_unique<IrRetain>();
+            retainInst->value = object;
+            return emit(ctx, std::move(retainInst));
+        }
+
         if (methodCall->method == "parse")
         {
             // Unambiguous by name alone - no disambiguation kind needed
@@ -1784,14 +2157,18 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
             IrScope thenScope(&scope, /*isBarrier=*/true);
             std::vector<int> thenStructLocals;
-            Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+            Context thenCtx = ctx;
+            thenCtx.out = &branch->thenBlock;
+            thenCtx.structLocals = &thenStructLocals;
             auto unwrapInst = std::make_unique<IrOptionalUnwrap>();
             unwrapInst->object = object;
             branch->thenValue = emit(thenCtx, std::move(unwrapInst));
 
             IrScope elseScope(&scope, /*isBarrier=*/true);
             std::vector<int> elseStructLocals;
-            Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+            Context elseCtx = ctx;
+            elseCtx.out = &branch->elseBlock;
+            elseCtx.structLocals = &elseStructLocals;
             branch->elseValue = lowerExpr(*methodCall->arguments.front(), elseScope, elseCtx);
 
             return emit(ctx, std::move(branch));
@@ -1814,6 +2191,7 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 auto inst = std::make_unique<IrPriorityQueuePush>();
                 inst->priorityQueue = object;
                 inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             if (stackKind.value_or(false))
@@ -1821,11 +2199,20 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 auto inst = std::make_unique<IrStackPush>();
                 inst->stack = object;
                 inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             auto inst = std::make_unique<IrListPush>();
             inst->list = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            // Move semantics: an inserted struct/enum-typed value is consumed by the collection -
+            // this is the fix for the collection-insert UAF found this session (previously
+            // patched with a runtime retain at the sema level only; the source's own scope-exit
+            // drop must also be suppressed here, or the collection would end up holding a
+            // dangling pointer once that scope ends). A harmless no-op for a primitive/fresh
+            // value (never tracked). Collections themselves still leak by policy, unchanged - so
+            // a consumed struct/enum element becomes part of that same accepted leak, not a UAF.
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -1875,11 +2262,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 auto inst = std::make_unique<IrDequePushFront>();
                 inst->deque = object;
                 inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             auto inst = std::make_unique<IrLinkedListPushFront>();
             inst->list = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -1890,11 +2279,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 auto inst = std::make_unique<IrDequePushBack>();
                 inst->deque = object;
                 inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             auto inst = std::make_unique<IrLinkedListPushBack>();
             inst->list = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -1933,6 +2324,7 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             auto inst = std::make_unique<IrQueueEnqueue>();
             inst->queue = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -2018,12 +2410,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 inst->sortedMap = object;
                 inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
                 inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
+                consumeTrackedRegister(ctx, inst->key);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             auto inst = std::make_unique<IrMapSet>();
             inst->map = object;
             inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
             inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
+            consumeTrackedRegister(ctx, inst->key);
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -2052,11 +2448,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 auto inst = std::make_unique<IrSortedSetAdd>();
                 inst->sortedSet = object;
                 inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+                consumeTrackedRegister(ctx, inst->value);
                 return emit(ctx, std::move(inst));
             }
             auto inst = std::make_unique<IrSetAdd>();
             inst->set = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
+            consumeTrackedRegister(ctx, inst->value);
             return emit(ctx, std::move(inst));
         }
 
@@ -2165,7 +2563,22 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             }
         }
 
-        const int object = lowerExpr(*field->object, scope, ctx);
+        int object = lowerExpr(*field->object, scope, ctx);
+
+        // Shared<T> auto-deref (see TypeChecker's own identical checkFieldType case) - unwrap
+        // through the wrapper's own "value" field first (registerSharedType's own field naming),
+        // then fall through to the ordinary field-get below unchanged, now against T instead of
+        // Shared<T>. resolveStructOrEnumType (not simpleTypeOfExpr) since it's the one that
+        // returns the mangled "Shared.<T>" form - see that function's own ShareExpr case.
+        if (const auto objectType = resolveStructOrEnumType(*field->object, ctx.function, scope);
+            objectType && objectType->starts_with("Shared."))
+        {
+            auto unwrapInst = std::make_unique<IrFieldGet>();
+            unwrapInst->object = object;
+            unwrapInst->field = "value";
+            object = emit(ctx, std::move(unwrapInst));
+        }
+
         auto inst = std::make_unique<IrFieldGet>();
         inst->object = object;
         inst->field = field->field;
@@ -2294,9 +2707,26 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
     {
         std::vector<std::pair<std::string, int>> fields;
         fields.reserve(literal->fields.size());
+        const StructDecl* structDecl =
+            structs_.contains(literal->typeName) ? structs_.at(literal->typeName) : nullptr;
         for (const auto& [fieldName, fieldExpr] : literal->fields)
         {
-            fields.emplace_back(fieldName, lowerExpr(*fieldExpr, scope, ctx));
+            const int fieldReg = lowerExpr(*fieldExpr, scope, ctx);
+            // Real memory reclamation (structs/enums only) - an existing struct/enum value
+            // stored directly into a fresh struct's own field needs its own independent
+            // reference too (see retainFieldValueIfNeeded's own comment).
+            if (structDecl)
+            {
+                for (const auto& declaredField : structDecl->fields)
+                {
+                    if (declaredField.name == fieldName)
+                    {
+                        retainFieldValueIfNeeded(fieldReg, *fieldExpr, declaredField.type, ctx);
+                        break;
+                    }
+                }
+            }
+            fields.emplace_back(fieldName, fieldReg);
         }
         auto inst = std::make_unique<IrStructNew>();
         inst->typeName = literal->typeName;
@@ -2313,14 +2743,18 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         IrScope thenScope(&scope, /*isBarrier=*/true);
         std::vector<int> thenStructLocals;
-        Context thenCtx{&branch->thenBlock, ctx.registerCount, ctx.function, &thenStructLocals};
+        Context thenCtx = ctx;
+        thenCtx.out = &branch->thenBlock;
+        thenCtx.structLocals = &thenStructLocals;
         emitVoid(thenCtx, std::make_unique<IrRegionEnter>());
         branch->thenValue = lowerExpr(*ifExpr->thenBranch, thenScope, thenCtx);
         emitVoid(thenCtx, std::make_unique<IrRegionExit>());
 
         IrScope elseScope(&scope, /*isBarrier=*/true);
         std::vector<int> elseStructLocals;
-        Context elseCtx{&branch->elseBlock, ctx.registerCount, ctx.function, &elseStructLocals};
+        Context elseCtx = ctx;
+        elseCtx.out = &branch->elseBlock;
+        elseCtx.structLocals = &elseStructLocals;
         emitVoid(elseCtx, std::make_unique<IrRegionEnter>());
         branch->elseValue = lowerExpr(*ifExpr->elseBranch, elseScope, elseCtx);
         emitVoid(elseCtx, std::make_unique<IrRegionExit>());
@@ -2339,6 +2773,15 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         std::vector<int> structLocals;
         Context blockCtx = ctx;
         blockCtx.structLocals = &structLocals;
+        // Real memory reclamation (structs/enums only) - pushes this block's own frame for the
+        // lexical extent of its own body, so an early `return` lowered anywhere inside (however
+        // deeply nested) sees it via emitReturn's own stack walk. Popped unconditionally via
+        // ordinary C++ scoping below - no early-return short-circuit exists at this level (see
+        // Context::liveScopeStack's own comment).
+        if (blockCtx.liveScopeStack)
+        {
+            blockCtx.liveScopeStack->push_back(&structLocals);
+        }
 
         for (const auto& statement : block->statements)
         {
@@ -2357,12 +2800,22 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             dropInst->value = *it;
             emitVoid(blockCtx, std::move(dropInst));
         }
+        if (blockCtx.liveScopeStack)
+        {
+            blockCtx.liveScopeStack->pop_back();
+        }
 
         return result;
     }
 
     if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
     {
+        // Self-referential closures (see docs/language/0067-closures.md) - read-and-clear, not
+        // just read: a *nested* closure literal encountered while lowering this one's own body
+        // (below) must never see a stale value left over from here.
+        const std::optional<std::string> selfName =
+            std::exchange(pendingSelfReferenceName_, std::nullopt);
+
         // Move-only capture (see docs/language/0067-closures.md) - the same over-approximating
         // free-variable scan CapabilityChecker/Interpreter's own copies already use, minus the
         // closure's own param names.
@@ -2392,6 +2845,12 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 continue;
             }
             const int capturedReg = lowerExpr(capturedNameExpr, scope, ctx);
+            // Real memory reclamation (structs/enums only) - a captured struct/enum-typed local
+            // always needs its own independent reference (it's always an existing binding, never
+            // provably fresh - see retainFieldValueIfNeeded's own comment); this is what keeps a
+            // struct captured by an escaping closure alive after the enclosing scope that
+            // originally owned it releases its own copy.
+            retainFieldValueIfNeeded(capturedReg, capturedNameExpr, *capturedType, ctx);
             captureFields.emplace_back(capturedName, capturedReg);
             captureStructFields.emplace_back(capturedName, llvmSafeTypeName(*capturedType));
         }
@@ -2415,8 +2874,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         capturesStructInst->fields = captureFields;
         const int capturesReg = emit(ctx, std::move(capturesStructInst));
 
+        const auto capIt = closureParamCapabilities_.find(closureExpr);
+        const auto regIt = closureParamRegions_.find(closureExpr);
         closureTrampolines_.push_back(generateClosureTrampoline(
-            *closureExpr, trampolineName, capturesStructName, actuallyCaptured));
+            *closureExpr,
+            trampolineName,
+            capturesStructName,
+            actuallyCaptured,
+            capIt != closureParamCapabilities_.end() ? &capIt->second : nullptr,
+            regIt != closureParamRegions_.end() ? &regIt->second : nullptr,
+            selfName));
 
         std::vector<std::string> paramTypes;
         paramTypes.reserve(closureExpr->params.size());
@@ -2474,8 +2941,20 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             inst->otherPayloadTypeName = okExpr ? errTypeName : okTypeName;
             value = emit(ctx, std::move(inst));
         }
+        else if (const auto functionRef = tryLowerFunctionRef(*assignment->value, scope, ctx))
+        {
+            value = *functionRef;
+        }
         else
         {
+            // Self-referential closures (see docs/language/0067-closures.md and Context's own
+            // selfRecursiveName comment) - only meaningful when `value` is directly a closure
+            // literal; consumed by lowerExpr's own ClosureExpr case a few frames below, which
+            // clears it immediately so it never leaks into an unrelated closure literal.
+            if (dynamic_cast<const ClosureExpr*>(assignment->value.get()))
+            {
+                pendingSelfReferenceName_ = assignment->name;
+            }
             value = lowerExpr(*assignment->value, scope, ctx);
         }
         // Implicit union wrapping (see docs/language/0065-unions.md) -
@@ -2499,10 +2978,46 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         {
             scope.define(assignment->name, value);
         }
-        if (ctx.function && ctx.structLocals &&
-            isObviouslyStructTyped(*assignment->value, *ctx.function))
+        // Real memory reclamation (structs/enums only) - every struct/enum-typed local, not just
+        // isObviouslyStructTyped's own narrow (struct-literal-or-struct-param-only) heuristic:
+        // resolves `assignment`'s own type the identical way scope.defineSimpleType a few lines
+        // below already does (declared type, or simpleTypeOfExpr's own best-effort inference).
+        // Retains the value first, *unless* it's provably already a fresh +1 (a direct struct
+        // literal, enum construction, or a real user function's own already-`emitReturn`-retained
+        // result - see isProvablyFreshStructValue) - then queues it for release at this scope's
+        // own exit (or the enclosing function/closure's own return, whichever comes first - see
+        // emitReturn) regardless of freshness, since every binding gets exactly one release at
+        // the end of its own lifetime no matter how it was created. No `ctx.function` requirement
+        // (unlike the narrow heuristic it replaces) - simpleTypeOfExpr already tolerates a null
+        // enclosing function, so a closure trampoline's own struct-typed locals get the same
+        // real tracking a top-level function's already do.
+        if (ctx.structLocals)
         {
-            ctx.structLocals->push_back(value);
+            std::optional<std::string> resolvedType;
+            if (assignment->declaredType &&
+                assignment->declaredType->find('|') == std::string::npos)
+            {
+                resolvedType = *assignment->declaredType;
+            }
+            else if (const auto resolved =
+                         resolveStructOrEnumType(*assignment->value, ctx.function, scope))
+            {
+                resolvedType = *resolved;
+            }
+            if (resolvedType &&
+                (structs_.contains(*resolvedType) || enums_.contains(*resolvedType) ||
+                 resolvedType->starts_with("fn(")))
+            {
+                // Move semantics: consumes the source (removes it from whichever frame currently
+                // tracks it, if any) before this binding claims its own tracking below - a
+                // harmless no-op for a fresh value (never tracked anywhere yet). The "fn("
+                // disjunct is a closure value (see docs/language/0067-closures.md) - previously
+                // never tracked here at all (closures leaked unconditionally, by original design)
+                // - now given the same real drop lifecycle a plain struct/enum already has, see
+                // emitClosureDropHelper.
+                consumeTrackedRegister(ctx, value);
+                ctx.structLocals->push_back(value);
+            }
         }
         // Records this name's array length, if known, so a later `.length`
         // on it can constant-fold (see arrayLengthOf and
@@ -2608,13 +3123,13 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             returnStmt->value ? dynamic_cast<const ErrExpr*>(returnStmt->value.get()) : nullptr;
         const bool isOkOrErrReturn =
             (okExpr || errExpr) && ctx.function && ctx.function->returnType;
-        auto inst = std::make_unique<IrReturn>();
+        int returnValue = -1;
         if (isNoneReturn)
         {
             auto noneInst = std::make_unique<IrOptionalNew>();
             noneInst->value = -1;
             noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
-            inst->value = emit(ctx, std::move(noneInst));
+            returnValue = emit(ctx, std::move(noneInst));
         }
         else if (isOkOrErrReturn)
         {
@@ -2624,21 +3139,29 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             resultInst->isOk = okExpr != nullptr;
             resultInst->value = lowerExpr(okExpr ? *okExpr->value : *errExpr->value, scope, ctx);
             resultInst->otherPayloadTypeName = okExpr ? errTypeName : okTypeName;
-            inst->value = emit(ctx, std::move(resultInst));
+            returnValue = emit(ctx, std::move(resultInst));
         }
         else
         {
-            inst->value = returnStmt->value ? lowerExpr(*returnStmt->value, scope, ctx) : -1;
+            // A bare top-level function name, used where a closure-typed return is declared (see
+            // docs/language/0067-closures.md) - checked before lowerExpr, which would otherwise
+            // throw "undefined variable" trying to resolve a bare function name in scope.
+            const std::optional<int> functionRef =
+                returnStmt->value ? tryLowerFunctionRef(*returnStmt->value, scope, ctx)
+                                  : std::nullopt;
+            returnValue = functionRef         ? *functionRef
+                          : returnStmt->value ? lowerExpr(*returnStmt->value, scope, ctx)
+                                              : -1;
             // Implicit union wrapping (see docs/language/0065-unions.md) -
             // `return 5` from a function declared `-> i32 | str` needs no
             // wrapper syntax.
-            if (returnStmt->value && ctx.function && ctx.function->returnType)
+            if (!functionRef && returnStmt->value && ctx.function && ctx.function->returnType)
             {
-                inst->value = wrapForUnion(
-                    inst->value, *returnStmt->value, *ctx.function->returnType, scope, ctx);
+                returnValue = wrapForUnion(
+                    returnValue, *returnStmt->value, *ctx.function->returnType, scope, ctx);
             }
         }
-        emitVoid(ctx, std::move(inst));
+        emitReturn(ctx, returnValue);
         return;
     }
 
@@ -2652,11 +3175,50 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
     {
         const int object = lowerExpr(*fieldAssign->object, scope, ctx);
         const int value = lowerExpr(*fieldAssign->value, scope, ctx);
+
+        // Real memory reclamation (structs/enums only) - `obj.field = value` overwrites an
+        // existing, independently-owned reference (the field's own current value) with a new
+        // one; the field slot needs its own retain on the new value (unless provably fresh) and
+        // a release of what it used to hold, in that order - retain-then-release, not the
+        // reverse, is what makes `obj.a = obj.a`/`obj.a = obj.b` (already aliasing the same
+        // object) safe with no special-casing, the identical reasoning emitReturn's own
+        // self-aliasing handling uses.
+        const auto objectType = resolveStructOrEnumType(*fieldAssign->object, ctx.function, scope);
+        const Field* declaredField = nullptr;
+        if (objectType && structs_.contains(*objectType))
+        {
+            for (const auto& field : structs_.at(*objectType)->fields)
+            {
+                if (field.name == fieldAssign->field)
+                {
+                    declaredField = &field;
+                    break;
+                }
+            }
+        }
+        int oldValue = -1;
+        if (declaredField &&
+            (structs_.contains(declaredField->type) || enums_.contains(declaredField->type)))
+        {
+            retainFieldValueIfNeeded(value, *fieldAssign->value, declaredField->type, ctx);
+            auto oldFieldGet = std::make_unique<IrFieldGet>();
+            oldFieldGet->object = object;
+            oldFieldGet->field = fieldAssign->field;
+            oldValue = emit(ctx, std::move(oldFieldGet));
+        }
+
         auto inst = std::make_unique<IrFieldSet>();
         inst->object = object;
         inst->field = fieldAssign->field;
         inst->value = value;
         emitVoid(ctx, std::move(inst));
+
+        if (oldValue != -1)
+        {
+            auto dropInst = std::make_unique<IrDrop>();
+            dropInst->value = oldValue;
+            emitVoid(ctx, std::move(dropInst));
+        }
         return;
     }
 
@@ -2665,6 +3227,10 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         const int object = lowerExpr(*indexAssign->object, scope, ctx);
         const int indexReg = lowerExpr(*indexAssign->index, scope, ctx);
         const int value = lowerExpr(*indexAssign->value, scope, ctx);
+        // Move semantics: mirrors the collection-insert fix above - a struct/enum-typed value
+        // stored via index-assignment (array/slice only - List<T> uses .push()/.set(), handled
+        // separately) is consumed by the array; a harmless no-op for a primitive value.
+        consumeTrackedRegister(ctx, value);
         auto inst = std::make_unique<IrIndexSet>();
         inst->object = object;
         inst->index = indexReg;
@@ -2781,8 +3347,8 @@ int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& sco
 
     if (condition)
     {
-        Context condCtx{
-            &loopInst->conditionBlock, ctx.registerCount, ctx.function, ctx.structLocals};
+        Context condCtx = ctx;
+        condCtx.out = &loopInst->conditionBlock;
         loopInst->conditionValue = lowerExpr(*condition, scope, condCtx);
     }
 
@@ -2794,7 +3360,8 @@ int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& sco
     const auto preSnapshot = scope.snapshot();
     loopPreSnapshotStack_.push_back(
         preSnapshot); // innermost loop's snapshot, for nested break/continue
-    Context bodyCtx{&loopInst->body, ctx.registerCount, ctx.function, ctx.structLocals};
+    Context bodyCtx = ctx;
+    bodyCtx.out = &loopInst->body;
     lowerExpr(body, scope, bodyCtx); // trailing block value discarded - only `break value` produces
                                      // the loop's own value
     loopPreSnapshotStack_.pop_back();
@@ -2810,6 +3377,36 @@ int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& sco
     }
 
     return emit(ctx, std::move(loopInst));
+}
+
+void IrGenerator::emitReturn(Context& ctx, int valueRegOrNegOne)
+{
+    // Move semantics: if the returned value is itself one of these tracked locals (the common
+    // self-aliasing case, e.g. `return p`), consume it first - removes it from whichever frame
+    // holds it, so the drop loop below naturally skips it and it flows out to the caller
+    // un-dropped, now owned by whatever received the return value. A harmless no-op if it isn't
+    // tracked at all (a fresh value, or a Borrowed value never added to any frame).
+    if (valueRegOrNegOne != -1)
+    {
+        consumeTrackedRegister(ctx, valueRegOrNegOne);
+    }
+
+    if (ctx.liveScopeStack)
+    {
+        for (const auto* frame : *ctx.liveScopeStack)
+        {
+            for (auto it = frame->rbegin(); it != frame->rend(); ++it)
+            {
+                auto dropInst = std::make_unique<IrDrop>();
+                dropInst->value = *it;
+                emitVoid(ctx, std::move(dropInst));
+            }
+        }
+    }
+
+    auto returnInst = std::make_unique<IrReturn>();
+    returnInst->value = valueRegOrNegOne;
+    emitVoid(ctx, std::move(returnInst));
 }
 
 IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
@@ -2833,6 +3430,16 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     int registerCount = 0;
     Context ctx{&irFunction.body, &registerCount, &function, nullptr};
 
+    // Real memory reclamation (structs/enums only) - the base (outermost) live-scope frame for
+    // this function, holding every Owned struct-typed param's own register (narrow, matching
+    // this codebase's own pre-existing struct-only Drop coverage for now - broadened once every
+    // struct/enum-typed local is tracked too, not just this heuristic subset). Released, at
+    // every actual return point (not just structurally appended once at the very end), by
+    // emitReturn - see Context::liveScopeStack's own comment.
+    std::vector<int> paramStructLocals;
+    std::vector<std::vector<int>*> liveScopeStack{&paramStructLocals};
+    ctx.liveScopeStack = &liveScopeStack;
+
     emitVoid(ctx, std::make_unique<IrRegionEnter>());
 
     std::vector<int> paramRegisters;
@@ -2848,6 +3455,11 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
             auto inst = std::make_unique<IrMove>();
             inst->value = paramRegister;
             emitVoid(ctx, std::move(inst));
+            if (structs_.contains(mangleSharedTypeName(function.params[i].type)) ||
+                function.params[i].type.starts_with("fn("))
+            {
+                paramStructLocals.push_back(paramRegister);
+            }
         }
         else if (capabilities[i] == Capability::Write)
         {
@@ -2865,16 +3477,6 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
 
     lowerExpr(*function.body, scope, ctx);
 
-    for (std::size_t i = 0; i < function.params.size(); ++i)
-    {
-        if (regions[i] == Region::Owned && structs_.contains(function.params[i].type))
-        {
-            auto inst = std::make_unique<IrDrop>();
-            inst->value = paramRegisters[i];
-            emitVoid(ctx, std::move(inst));
-        }
-    }
-
     // Only reachable for a unit-returning function in a well-typed program -
     // TypeChecker::definitelyReturns already guarantees any non-unit
     // function's body always hits an explicit `return` on every path.
@@ -2885,9 +3487,7 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     // discarded expression, not something to return.
     if (!alwaysTerminates(irFunction.body))
     {
-        auto returnInst = std::make_unique<IrReturn>();
-        returnInst->value = -1;
-        emitVoid(ctx, std::move(returnInst));
+        emitReturn(ctx, -1);
     }
 
     emitVoid(ctx, std::make_unique<IrRegionExit>());
@@ -2899,7 +3499,10 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
 IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr,
                                                   const std::string& trampolineName,
                                                   const std::string& capturesStructName,
-                                                  const std::vector<std::string>& capturedNames)
+                                                  const std::vector<std::string>& capturedNames,
+                                                  const std::vector<Capability>* capabilities,
+                                                  const std::vector<Region>* regions,
+                                                  const std::optional<std::string>& selfName)
 {
     IrFunction irFunction;
     irFunction.name = trampolineName;
@@ -2922,6 +3525,12 @@ IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr
     // docs/language/0067-closures.md's own Known Imprecision).
     Context ctx{&irFunction.body, &registerCount, nullptr, nullptr};
 
+    // Real memory reclamation (structs/enums only) - see generateFunction's own identical
+    // comment on this same mechanism.
+    std::vector<int> paramStructLocals;
+    std::vector<std::vector<int>*> liveScopeStack{&paramStructLocals};
+    ctx.liveScopeStack = &liveScopeStack;
+
     emitVoid(ctx, std::make_unique<IrRegionEnter>());
 
     // Every param's own register is allocated first, consecutively, with nothing else emitted in
@@ -2935,18 +3544,45 @@ IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr
         inst->value = capturesRegister;
         emitVoid(ctx, std::move(inst));
     }
+    // Self-referential closures (see docs/language/0067-closures.md and Context's own
+    // selfRecursiveName comment) - both fields are harmless to set unconditionally
+    // (selfRecursiveName being nullopt is what actually gates lowerExpr's own CallExpr check).
+    ctx.selfRecursiveName = selfName;
+    ctx.selfRecursiveTrampolineName = trampolineName;
+    ctx.selfRecursiveCapturesRegister = capturesRegister;
     std::vector<int> paramRegisters;
     paramRegisters.reserve(closureExpr.params.size());
     for (std::size_t i = 0; i < closureExpr.params.size(); ++i)
     {
         const int paramRegister = freshRegister(ctx);
         paramRegisters.push_back(paramRegister);
-        // Always Owned/Move - never struct-typed (this phase's own scope cut), so this has no
-        // observable effect at the LLVM level either way, mirroring generateFunction's own
-        // identical treatment of a non-struct param.
-        auto inst = std::make_unique<IrMove>();
-        inst->value = paramRegister;
-        emitVoid(ctx, std::move(inst));
+        // Struct-typed closure parameters (see docs/language/0067-closures.md) - mirrors
+        // generateFunction's own identical per-param region/capability choice exactly; a param
+        // with no real data behind it (capabilities/regions null, i.e. no struct-typed param in
+        // this closure at all) always gets the pre-existing, always-safe Owned/Move choice.
+        if (!regions || (*regions)[i] == Region::Owned)
+        {
+            auto inst = std::make_unique<IrMove>();
+            inst->value = paramRegister;
+            emitVoid(ctx, std::move(inst));
+            if (structs_.contains(mangleSharedTypeName(closureExpr.params[i].type)) ||
+                closureExpr.params[i].type.starts_with("fn("))
+            {
+                paramStructLocals.push_back(paramRegister);
+            }
+        }
+        else if (capabilities && (*capabilities)[i] == Capability::Write)
+        {
+            auto inst = std::make_unique<IrBorrowWrite>();
+            inst->value = paramRegister;
+            emitVoid(ctx, std::move(inst));
+        }
+        else
+        {
+            auto inst = std::make_unique<IrBorrowRead>();
+            inst->value = paramRegister;
+            emitVoid(ctx, std::move(inst));
+        }
     }
 
     for (std::size_t i = 0; i < closureExpr.params.size(); ++i)
@@ -2966,9 +3602,7 @@ IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr
 
     if (!alwaysTerminates(irFunction.body))
     {
-        auto returnInst = std::make_unique<IrReturn>();
-        returnInst->value = -1;
-        emitVoid(ctx, std::move(returnInst));
+        emitReturn(ctx, -1);
     }
 
     emitVoid(ctx, std::make_unique<IrRegionExit>());
@@ -2977,11 +3611,125 @@ IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr
     return irFunction;
 }
 
-IrProgram
-IrGenerator::generate(const Program& program,
-                      const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
-                      const std::unordered_map<std::string, std::vector<Region>>& regions)
+IrFunction IrGenerator::generateFunctionRefTrampoline(const FunctionDecl& function,
+                                                      const std::string& trampolineName,
+                                                      const std::string& capturesStructName)
 {
+    IrFunction irFunction;
+    irFunction.name = trampolineName;
+    irFunction.returnType =
+        function.returnType ? std::optional(llvmSafeTypeName(*function.returnType)) : std::nullopt;
+    irFunction.paramNames.push_back("__captures");
+    irFunction.paramTypes.push_back(capturesStructName);
+    for (const auto& param : function.params)
+    {
+        irFunction.paramNames.push_back(param.name);
+        irFunction.paramTypes.push_back(llvmSafeTypeName(param.type));
+    }
+
+    IrScope scope;
+    int registerCount = 0;
+    Context ctx{&irFunction.body, &registerCount, nullptr, nullptr};
+
+    emitVoid(ctx, std::make_unique<IrRegionEnter>());
+
+    // Mirrors generateClosureTrampoline's own param-register layout exactly (captures param
+    // first, consecutively, nothing interleaved) - the captures register itself is never read
+    // (this trampoline has nothing to IrFieldGet out of it), just kept for slot alignment.
+    const int capturesRegister = freshRegister(ctx);
+    {
+        auto inst = std::make_unique<IrBorrowRead>();
+        inst->value = capturesRegister;
+        emitVoid(ctx, std::move(inst));
+    }
+    std::vector<int> paramRegisters;
+    paramRegisters.reserve(function.params.size());
+    for (std::size_t i = 0; i < function.params.size(); ++i)
+    {
+        const int paramRegister = freshRegister(ctx);
+        paramRegisters.push_back(paramRegister);
+        auto inst = std::make_unique<IrMove>();
+        inst->value = paramRegister;
+        emitVoid(ctx, std::move(inst));
+    }
+
+    auto callInst = std::make_unique<IrCall>();
+    callInst->callee = function.name;
+    callInst->args = paramRegisters;
+    const int resultReg = emit(ctx, std::move(callInst));
+
+    emitReturn(ctx, function.returnType ? resultReg : -1);
+
+    emitVoid(ctx, std::make_unique<IrRegionExit>());
+
+    irFunction.registerCount = registerCount;
+    return irFunction;
+}
+
+std::optional<int>
+IrGenerator::tryLowerFunctionRef(const Expr& valueExpr, IrScope& scope, Context& ctx)
+{
+    const auto* name = dynamic_cast<const NameExpr*>(&valueExpr);
+    if (!name || scope.contains(name->name))
+    {
+        return std::nullopt;
+    }
+    const auto it = functions_.find(name->name);
+    if (it == functions_.end())
+    {
+        return std::nullopt;
+    }
+
+    if (functionRefCapturesStruct_.empty())
+    {
+        functionRefCapturesStruct_ = "closure.captures.fnref";
+        closureCaptureStructs_[functionRefCapturesStruct_] = {};
+    }
+
+    std::string trampolineName;
+    if (const auto trampIt = functionRefTrampolines_.find(name->name);
+        trampIt != functionRefTrampolines_.end())
+    {
+        trampolineName = trampIt->second;
+    }
+    else
+    {
+        trampolineName = "fnref$" + name->name;
+        functionRefTrampolines_[name->name] = trampolineName;
+        closureTrampolines_.push_back(
+            generateFunctionRefTrampoline(*it->second, trampolineName, functionRefCapturesStruct_));
+    }
+
+    auto capturesInst = std::make_unique<IrStructNew>();
+    capturesInst->typeName = functionRefCapturesStruct_;
+    const int capturesReg = emit(ctx, std::move(capturesInst));
+
+    std::vector<std::string> paramTypes;
+    paramTypes.reserve(it->second->params.size());
+    for (const auto& param : it->second->params)
+    {
+        paramTypes.push_back(param.type);
+    }
+
+    auto closureNewInst = std::make_unique<IrClosureNew>();
+    closureNewInst->trampolineFunctionName = trampolineName;
+    closureNewInst->capturesObject = capturesReg;
+    closureNewInst->paramTypes = std::move(paramTypes);
+    closureNewInst->returnType = it->second->returnType.value_or("unit");
+    return emit(ctx, std::move(closureNewInst));
+}
+
+IrProgram IrGenerator::generate(
+    const Program& program,
+    const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
+    const std::unordered_map<std::string, std::vector<Region>>& regions,
+    const std::unordered_map<const ClosureExpr*, std::vector<Capability>>& closureCapabilities,
+    const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions,
+    const std::unordered_set<std::string>& movedTopLevelBindings)
+{
+    closureParamCapabilities_ = closureCapabilities;
+    closureParamRegions_ = closureRegions;
+    allFunctionRegions_ = regions;
     registerStructs(program);
 
     IrProgram irProgram;
@@ -3048,8 +3796,16 @@ IrGenerator::generate(const Program& program,
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             lowerStmt(*assignment, topScope, topCtx);
-            irProgram.topLevelBindings.emplace_back(assignment->name,
-                                                    topScope.find(assignment->name));
+            // Move semantics: a top-level binding that RegionChecker determined was consumed by
+            // some later top-level statement (e.g. `u = User{...}; archive(u)`, where `archive`
+            // takes `u`) must not be auto-printed - this synthetic print is codegen-only, never
+            // part of the real AST RegionChecker itself walks, so it's the one place that has to
+            // separately honor a move it can't see for itself.
+            if (!movedTopLevelBindings.contains(assignment->name))
+            {
+                irProgram.topLevelBindings.emplace_back(assignment->name,
+                                                        topScope.find(assignment->name));
+            }
         }
         else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
         {
@@ -3113,6 +3869,20 @@ IrGenerator::generate(const Program& program,
     for (auto& [name, fields] : closureCaptureStructs_)
     {
         irProgram.structs[name] = std::move(fields);
+    }
+
+    // Shared<T> (see registerSharedType's own comment) - same "discovered lazily while lowering
+    // function bodies above, flushed here" reason unions/closure captures are flushed here rather
+    // than right after registerStructs.
+    for (const auto& decl : sharedTypeDecls_)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        fields.reserve(decl->fields.size());
+        for (const auto& field : decl->fields)
+        {
+            fields.emplace_back(field.name, field.type);
+        }
+        irProgram.structs[decl->name] = std::move(fields);
     }
 
     return irProgram;

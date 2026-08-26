@@ -120,6 +120,22 @@ struct NoneExpr final : Expr
 {
 };
 
+// `Shared(value)` - the explicit, opt-in escape hatch for genuine multi-owner sharing (the sole
+// use of runtime refcounting left in the language now that plain structs/enums use pure move
+// semantics - see the move-semantics RFC). Structurally identical to SomeExpr above: T is
+// synthesized bottom-up from `value`'s own checked type (must be struct- or enum-typed - see
+// TypeChecker's own ShareExpr case), never needs surrounding context. `value` is moved into the
+// new Shared<T> allocation, exactly like any other consuming use.
+struct ShareExpr final : Expr
+{
+    explicit ShareExpr(std::unique_ptr<Expr> value)
+        : value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> value;
+};
+
 // `Ok(value)`/`Err(value)` (see docs/language/0063-result.md) - wrap `value`
 // into a `Result<T,E>`, structurally identical to SomeExpr above (one
 // bottom-up-typed payload expression). Unlike SomeExpr, though, *neither*

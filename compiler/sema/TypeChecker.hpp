@@ -52,6 +52,14 @@ enum class TypeKind
     Never,
 
     Optional,
+    // `Shared<T>` - the move-semantics work's own explicit, opt-in refcounting escape hatch (the
+    // sole way to have more than one owner of a struct/enum value, now that plain structs/enums
+    // use pure move semantics). Reuses `Type::elementTypeName` for its own wrapped T, same
+    // single-type-parameter shape as Optional above; T must itself resolve to TypeKind::Struct or
+    // TypeKind::Enum (see ShareExpr's own checkExpr case) - Shared<i32> or Shared<List<T>> are
+    // rejected, since primitives/collections have no move-semantics story to opt out of in the
+    // first place.
+    Shared,
     // `Result<T,E>` (see docs/language/0063-result.md) - shares `Type`'s
     // existing `elementTypeName`/`valueTypeName` fields with Map<K,V>
     // rather than getting its own: elementTypeName is T (the Ok payload,
@@ -230,6 +238,21 @@ private:
     // user-facing point of TypeScript-style unions (`f(5)`/`f("hi")` for `f(x: i32 | str)`, no
     // wrapper syntax needed).
     bool isUnionMember(const Type& valueType, const Type& targetType) const;
+    // Implicit function-reference-to-closure coercion (see docs/language/0067-closures.md) - a
+    // bare top-level function name, used wherever a closure type is expected, is valid whenever
+    // its own real signature matches exactly (same param types, same return type). `env` is
+    // consulted first (not just `functions_`) so a local that happens to share a name with a
+    // top-level function is never mistaken for a function reference - the ordinary "inner scope
+    // wins" rule this whole feature already established for closure *calls* applies here too.
+    bool
+    isFunctionRefAssignableToClosure(const Expr& expr, const Type& targetType, TypeEnv& env) const;
+    // The `fn(T1,T2)->R` Type a closure literal's own signature (params/returnType text)
+    // resolves to - independent of its own body, which is why this is its own helper: a
+    // self-referential closure (see docs/language/0067-closures.md) needs its own name pre-bound
+    // to exactly this type *before* its body is checked, so a self-call inside the body resolves
+    // through the same "closure-typed local" call path every other closure call already does.
+    // Also reused by checkExpr's own ClosureExpr case, once the body has actually been checked.
+    Type closureSignatureType(const ClosureExpr& closureExpr) const;
     // Shared arg-count/per-arg-type checking (with the array->slice/String->str/union-wrap
     // coercions - see each one's own comment) for a resolved callee's (params, returnType) -
     // originally CallExpr's own inline logic, factored out so a module-qualified call

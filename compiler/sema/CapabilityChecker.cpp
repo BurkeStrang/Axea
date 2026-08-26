@@ -84,6 +84,11 @@ void CapabilityChecker::collectReferencedNames(const Expr& expr,
         collectReferencedNames(*someExpr->value, names);
         return;
     }
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        collectReferencedNames(*shareExpr->value, names);
+        return;
+    }
     if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
     {
         collectReferencedNames(*okExpr->value, names);
@@ -292,6 +297,12 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
     {
         inferExpr(*someExpr->value, function, changed);
+        return;
+    }
+
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        inferExpr(*shareExpr->value, function, changed);
         return;
     }
 
@@ -518,6 +529,12 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
                 raise(function.name, *paramIndex, Capability::Take, changed);
             }
         }
+
+        // Struct-typed closure *parameters* (as opposed to captures, handled just above) - see
+        // registerClosure's own comment for why this reuses the exact same per-function walk a
+        // real top-level FunctionDecl's own body already gets.
+        const FunctionDecl& syntheticFn = registerClosure(*closureExpr);
+        inferExpr(*closureExpr->body, syntheticFn, changed);
         return;
     }
 
@@ -632,6 +649,12 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
     {
         checkMovesInExpr(*someExpr->value, function, moved);
+        return;
+    }
+
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        checkMovesInExpr(*shareExpr->value, function, moved);
         return;
     }
 
@@ -818,6 +841,16 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
             }
             moved.insert(capturedName);
         }
+
+        // Struct-typed closure parameters (see docs/language/0067-closures.md) - a fresh
+        // `moved` set of its own (a closure's own params are fresh bindings, unrelated to the
+        // enclosing function's own moved-set), against the same synthetic FunctionDecl
+        // inferExpr's own fixpoint pass already minted for this literal - guaranteed already
+        // registered by the time this runs, since check()'s own checkMovesInExpr driver loop
+        // always runs after the fixpoint loop has fully finished.
+        const FunctionDecl& syntheticFn = *closureFunctions_.at(closureExpr);
+        std::unordered_set<std::string> closureMoved;
+        checkMovesInExpr(*closureExpr->body, syntheticFn, closureMoved);
         return;
     }
 
@@ -890,6 +923,22 @@ void CapabilityChecker::checkMovesInStmt(const Stmt& stmt,
     // ContinueStmt: nothing to check.
 }
 
+const FunctionDecl& CapabilityChecker::registerClosure(const ClosureExpr& closureExpr)
+{
+    if (const auto it = closureFunctions_.find(&closureExpr); it != closureFunctions_.end())
+    {
+        return *it->second;
+    }
+    const std::string syntheticName = "closure$" + std::to_string(closureCounter_++);
+    auto syntheticFn = std::make_unique<FunctionDecl>(
+        syntheticName, closureExpr.params, closureExpr.returnType, nullptr);
+    functions_[syntheticName] = syntheticFn.get();
+    inferred_[syntheticName] = std::vector<Capability>(closureExpr.params.size(), Capability::Read);
+    const FunctionDecl& ref = *syntheticFn;
+    closureFunctions_[&closureExpr] = std::move(syntheticFn);
+    return ref;
+}
+
 void CapabilityChecker::check(const Program& program)
 {
     for (const auto& item : program.items)
@@ -922,11 +971,27 @@ void CapabilityChecker::check(const Program& program)
     // so this always converges quickly even with (mutual) recursion.
     bool changed = true;
     std::size_t iterations = 0;
-    const std::size_t maxIterations = functions_.size() * 4 + 4;
-    while (changed && iterations < maxIterations)
+    while (changed && iterations < functions_.size() * 4 + 4)
     {
         changed = false;
+        // A snapshot, not a live iteration of functions_ itself - inferExpr's own ClosureExpr
+        // case (registerClosure) inserts a *new* entry into functions_/inferred_ the first time
+        // each closure literal is discovered, which may happen from anywhere inside this very
+        // pass (including nested inside another closure discovered earlier in the *same* pass);
+        // std::unordered_map iteration is undefined behavior once the map being iterated gets a
+        // new key inserted mid-walk. Snapshotting into an ordinary std::vector first sidesteps
+        // that entirely - insertions during this pass just extend functions_ for the *next*
+        // std::unordered_map read after this pass finishes, never invalidating the snapshot
+        // being walked right now. (The bound above reads functions_.size() before any closure is
+        // discovered, same as before this phase - a slight undercount once closures exist, but
+        // still a generous fixpoint bound, not a correctness requirement.)
+        std::vector<const FunctionDecl*> snapshot;
+        snapshot.reserve(functions_.size());
         for (const auto& [name, function] : functions_)
+        {
+            snapshot.push_back(function);
+        }
+        for (const FunctionDecl* function : snapshot)
         {
             inferExpr(*function->body, *function, changed);
         }
@@ -954,8 +1019,26 @@ void CapabilityChecker::check(const Program& program)
         effective_[name] = std::move(resolved);
     }
 
+    // Struct-typed closure parameters (see docs/language/0067-closures.md and registerClosure) -
+    // every closure literal discovered above already has its own resolved entry in effective_
+    // (keyed by its synthetic name, just like any real function); this just re-exposes that same
+    // data keyed by the literal's own identity instead, the form IrGenerator/RegionChecker can
+    // actually look it up by.
+    for (const auto& [closureExpr, syntheticFn] : closureFunctions_)
+    {
+        closureEffective_[closureExpr] = effective_.at(syntheticFn->name);
+    }
+
     for (const auto& [name, function] : functions_)
     {
+        // Skip a synthetic closure entry here (its own `body` is always null - see
+        // registerClosure) - its own move-check already happens via checkMovesInExpr's own
+        // ClosureExpr case, reached while walking whatever *real* function's body the closure
+        // literal actually lives inside of.
+        if (!function->body)
+        {
+            continue;
+        }
         std::unordered_set<std::string> moved;
         checkMovesInExpr(*function->body, *function, moved);
     }
@@ -965,4 +1048,10 @@ const std::unordered_map<std::string, std::vector<Capability>>&
 CapabilityChecker::effectiveCapabilities() const
 {
     return effective_;
+}
+
+const std::unordered_map<const ClosureExpr*, std::vector<Capability>>&
+CapabilityChecker::closureEffectiveCapabilities() const
+{
+    return closureEffective_;
 }

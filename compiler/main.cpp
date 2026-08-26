@@ -1108,7 +1108,9 @@ int main(int argc, char** argv)
             capabilityChecker.check(program);
 
             RegionChecker regionChecker;
-            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+            regionChecker.check(program,
+                                capabilityChecker.effectiveCapabilities(),
+                                capabilityChecker.closureEffectiveCapabilities());
 
             Interpreter interpreter;
             interpreter.run(program);
@@ -1165,7 +1167,9 @@ int main(int argc, char** argv)
             capabilityChecker.check(program);
 
             RegionChecker regionChecker;
-            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+            regionChecker.check(program,
+                                capabilityChecker.effectiveCapabilities(),
+                                capabilityChecker.closureEffectiveCapabilities());
 
             auto isStructType = [&program](const std::string& typeName)
             {
@@ -1212,11 +1216,17 @@ int main(int argc, char** argv)
             capabilityChecker.check(program);
 
             RegionChecker regionChecker;
-            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+            regionChecker.check(program,
+                                capabilityChecker.effectiveCapabilities(),
+                                capabilityChecker.closureEffectiveCapabilities());
 
             IrGenerator irGenerator;
-            auto irProgram = irGenerator.generate(
-                program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+            auto irProgram = irGenerator.generate(program,
+                                                  capabilityChecker.effectiveCapabilities(),
+                                                  regionChecker.regions(),
+                                                  capabilityChecker.closureEffectiveCapabilities(),
+                                                  regionChecker.closureRegions(),
+                                                  regionChecker.movedTopLevelBindings());
 
             for (const auto& externDecl : irProgram.externs)
             {
@@ -1250,11 +1260,17 @@ int main(int argc, char** argv)
             capabilityChecker.check(program);
 
             RegionChecker regionChecker;
-            regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+            regionChecker.check(program,
+                                capabilityChecker.effectiveCapabilities(),
+                                capabilityChecker.closureEffectiveCapabilities());
 
             IrGenerator irGenerator;
-            auto irProgram = irGenerator.generate(
-                program, capabilityChecker.effectiveCapabilities(), regionChecker.regions());
+            auto irProgram = irGenerator.generate(program,
+                                                  capabilityChecker.effectiveCapabilities(),
+                                                  regionChecker.regions(),
+                                                  capabilityChecker.closureEffectiveCapabilities(),
+                                                  regionChecker.closureRegions(),
+                                                  regionChecker.movedTopLevelBindings());
 
             LlvmIrEmitter emitter;
             std::cout << emitter.emit(irProgram);

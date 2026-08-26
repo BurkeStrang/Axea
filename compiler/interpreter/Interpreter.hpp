@@ -99,7 +99,13 @@ struct EnumInstance
 // section: there's no way to mutate a capture and have it observed back in the enclosing scope).
 struct ClosureInstance
 {
-    const ClosureExpr* declaration;
+    // Exactly one of these two is set: `declaration` for a real `fn(...){...}` literal,
+    // `wrappedFunction` for a bare top-level function name used where a closure value is
+    // expected (see docs/language/0067-closures.md's own implicit function-reference-to-closure
+    // coercion) - a trivial wrapper with no captures of its own, since a named top-level
+    // function never closes over anything.
+    const ClosureExpr* declaration = nullptr;
+    const FunctionDecl* wrappedFunction = nullptr;
     std::unordered_map<std::string, Value> captures;
 };
 
@@ -393,6 +399,19 @@ private:
     // parentless Environment (mirroring callFunction's own "no parent" isolation) seeded with
     // its own captured values first, then its own params bound to `args`.
     Value callClosure(const ClosureInstance& instance, std::vector<Value> args);
+    // Implicit function-reference-to-closure coercion (see docs/language/0067-closures.md) -
+    // nullopt if `valueExpr` isn't a bare top-level function name not otherwise bound as a local
+    // (the ordinary case: the caller should evaluate `valueExpr` normally instead), otherwise a
+    // real ClosureInstance wrapping it. Checked *before* evaluate() at each of the three
+    // boundaries this needs (assignment, return, call argument) - evaluate() would otherwise
+    // throw "undefined variable" trying to look up a bare function name in the environment (a
+    // function isn't bound in any Environment; it's resolved by name, via functions_, only at an
+    // actual call site). Deliberately takes no declared-type text to gate on: TypeChecker's own
+    // isFunctionRefAssignableToClosure already guarantees a bare, unbound top-level function name
+    // can only ever appear as a value expression where a closure type was expected in the first
+    // place - the interpreter trusts that, the same way it trusts every other already-validated
+    // invariant TypeChecker establishes.
+    std::optional<Value> tryWrapFunctionRef(const Expr& valueExpr, const Environment& env) const;
     // Collects every bare NameExpr text referenced *anywhere* in `expr`'s own subtree,
     // unconditionally - the interpreter's own copy of the identical collector
     // CapabilityChecker::collectReferencedNames already has (see that method's own comment for

@@ -187,7 +187,8 @@ namespace
 } // namespace
 
 RegionEnv::RegionEnv(const RegionEnv* parent)
-    : parent_(parent)
+    : parent_(parent),
+      movedAccumulator_(parent ? parent->movedAccumulator_ : nullptr)
 {
 }
 
@@ -207,6 +208,31 @@ RegionInfo RegionEnv::get(const std::string& name) const
         return parent_->get(name);
     }
     throw std::runtime_error("undefined variable: " + name);
+}
+
+bool RegionEnv::has(const std::string& name) const
+{
+    if (bindings_.contains(name))
+    {
+        return true;
+    }
+    return parent_ && parent_->has(name);
+}
+
+void RegionEnv::markMoved(const std::string& name)
+{
+    RegionInfo info = get(name);
+    info.moved = true;
+    define(name, info);
+    if (movedAccumulator_)
+    {
+        movedAccumulator_->insert(name);
+    }
+}
+
+void RegionEnv::setMovedAccumulator(std::unordered_set<std::string>* accumulator)
+{
+    movedAccumulator_ = accumulator;
 }
 
 void RegionChecker::registerDecls(const Program& program)
@@ -251,7 +277,10 @@ void RegionChecker::registerDecls(const Program& program)
     }
 }
 
-void RegionChecker::requireOwned(const RegionInfo& info, const FunctionDecl& function) const
+void RegionChecker::requireOwned(const Expr& sourceExpr,
+                                 const RegionInfo& info,
+                                 RegionEnv& env,
+                                 const FunctionDecl& function) const
 {
     if (info.kind == Region::Borrowed)
     {
@@ -260,6 +289,44 @@ void RegionChecker::requireOwned(const RegionInfo& info, const FunctionDecl& fun
             "': parameter '" + info.sourceParam +
             "' is borrowed and does not outlive the call - declare 'take' if ownership "
             "should transfer");
+    }
+    // Move semantics (structs/enums only): a returned Owned struct/enum value is consumed by the
+    // return - mark it moved so the (unreachable, but still-checked-for-other-paths) code after a
+    // `return` can't be mistaken for a further legal use of the same name.
+    if (!info.structType.empty())
+    {
+        if (const auto* name = dynamic_cast<const NameExpr*>(&sourceExpr))
+        {
+            env.markMoved(name->name);
+        }
+    }
+}
+
+void RegionChecker::consumeOwned(const Expr& sourceExpr,
+                                 const RegionInfo& info,
+                                 RegionEnv& env,
+                                 const FunctionDecl& function) const
+{
+    // Move-checking (this new mechanism) is scoped to structs/enums only, matching the
+    // refcounting-removal work it replaces - every other heap type (array/List/Map/.../closures)
+    // keeps only the pre-existing, narrower "safe to return" checking, unchanged.
+    if (info.structType.empty())
+    {
+        return;
+    }
+    if (info.kind == Region::Borrowed)
+    {
+        std::string describedName = info.sourceParam;
+        if (const auto* name = dynamic_cast<const NameExpr*>(&sourceExpr))
+        {
+            describedName = name->name;
+        }
+        throw std::runtime_error("function '" + function.name +
+                                 "' cannot move out of borrowed value '" + describedName + "'");
+    }
+    if (const auto* name = dynamic_cast<const NameExpr*>(&sourceExpr))
+    {
+        env.markMoved(name->name);
     }
 }
 
@@ -273,7 +340,31 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     for (std::size_t i = 0; i < function.params.size(); ++i)
     {
         const auto& param = function.params[i];
-        const std::string structType = structs_.contains(param.type) ? param.type : "";
+        // Enums (see docs/language/0064-enums.md) carry the identical aliasing risk a struct
+        // param does (both are heap-allocated, reference-semantics values reached via a raw
+        // pointer) but were never added here when enums were introduced after this checker's own
+        // original design - a real, separate gap found while wiring match-arm move-checking below:
+        // an enum-typed param fell through every branch of the `borrowed` formula a few lines down
+        // (not struct, not array, not any collection), making it *unconditionally* Region::Owned
+        // regardless of its declared capability, silently defeating both the borrow-escape check
+        // and (now) match-arm binding-region correctness for any borrowed enum param.
+        // Shared<T> (the move-semantics work's own explicit refcounting escape hatch) - a real,
+        // confirmed use-after-free found while testing: this checker previously had no concept
+        // of "Shared<...>" at all, so a Shared<T> param fell through every branch of the
+        // `borrowed` formula below exactly like the enum gap the comment above already
+        // documents - unconditionally Region::Owned regardless of its declared capability. A
+        // *borrowed* (no `take`) Shared<T> param was then genuinely dropped at the callee's own
+        // function exit, freeing the object out from under the caller's own still-live handle.
+        const bool isShared = param.type.starts_with("Shared<") && param.type.back() == '>';
+        std::string structType =
+            (structs_.contains(param.type) || enums_.contains(param.type)) ? param.type : "";
+        if (isShared)
+        {
+            // Also drives consumeOwned's own move-tracking gate (non-empty structType), so a
+            // Shared<T> value is move-tracked exactly like a plain struct/enum - see the
+            // consumeOwned-based enforcement this checker already applies uniformly.
+            structType = param.type;
+        }
         std::string elementStructType;
         const bool isArray = isArrayTypeString(param.type);
         const bool isList = isListTypeString(param.type);
@@ -303,6 +394,16 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         const bool isSortedSet = isSortedSetTypeString(param.type);
         const bool isString = isStringTypeString(param.type);
         const bool isBuffer = isBufferTypeString(param.type);
+        // Closures (see the move-semantics work's closure drop-lifecycle addition) are heap-
+        // allocated fat pointers exactly like Shared<T> above, and hit the identical gap: without
+        // this, a closure param falls through every branch below and is unconditionally
+        // Region::Owned regardless of its declared capability, so a *borrowed* (no `take`) closure
+        // param would be genuinely dropped at the callee's own function exit - now that closures
+        // have a real drop lifecycle, that frees the captures struct out from under the caller's
+        // own still-live closure. structType intentionally stays untouched (not set to param.type)
+        // - consumeOwned's own move-tracking stays scoped to structs/enums/Shared<T>, unchanged;
+        // this only fixes the borrowed/owned classification itself.
+        const bool isClosure = param.type.starts_with("fn(");
         if (isArray)
         {
             const std::string elementName = arrayElementTypeName(param.type);
@@ -380,10 +481,11 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         // 0040-sorted-maps.md, 0041-sorted-sets.md, 0042-string.md, and
         // 0043-buffer.md); a primitive parameter is always Owned regardless
         // of its read/write/take capability.
-        const bool borrowed = (!structType.empty() || isArray || isList || isStack ||
-                               isLinkedList || isDeque || isQueue || isPriorityQueue || isMap ||
-                               isSet || isSortedMap || isSortedSet || isString || isBuffer) &&
-                              capabilities[i] != Capability::Take;
+        const bool borrowed =
+            (!structType.empty() || isArray || isList || isStack || isLinkedList || isDeque ||
+             isQueue || isPriorityQueue || isMap || isSet || isSortedMap || isSortedSet ||
+             isString || isBuffer || isShared || isClosure) &&
+            capabilities[i] != Capability::Take;
         env.define(param.name,
                    RegionInfo{borrowed ? Region::Borrowed : Region::Owned,
                               borrowed ? param.name : "",
@@ -393,24 +495,13 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
     }
     regions_[function.name] = std::move(paramRegions);
 
-    // Nothing can leak through a non-struct, non-array, non-List, non-Stack,
-    // non-LinkedList, non-Deque, non-Queue, non-PriorityQueue, non-Map,
-    // non-Set, non-SortedMap, non-SortedSet, non-String, non-Buffer return
-    // type: primitives are always copied by value, and unit carries no
-    // value at all.
-    if (!function.returnType ||
-        (!structs_.contains(*function.returnType) && !isArrayTypeString(*function.returnType) &&
-         !isListTypeString(*function.returnType) && !isStackTypeString(*function.returnType) &&
-         !isLinkedListTypeString(*function.returnType) &&
-         !isDequeTypeString(*function.returnType) && !isQueueTypeString(*function.returnType) &&
-         !isPriorityQueueTypeString(*function.returnType) &&
-         !isMapTypeString(*function.returnType) && !isSetTypeString(*function.returnType) &&
-         !isSortedMapTypeString(*function.returnType) &&
-         !isSortedSetTypeString(*function.returnType) &&
-         !isStringTypeString(*function.returnType) && !isBufferTypeString(*function.returnType)))
-    {
-        return;
-    }
+    // NOTE: this used to early-return here when the function's own return type couldn't possibly
+    // leak a struct/array/collection ("nothing can leak through a non-struct return type, skip the
+    // whole body-walk"). That was sound for this checker's *original* job (return-safety only) but
+    // is no longer sound now that this same walk also performs move-checking (see
+    // consumeOwned/requireOwned's move-marking): a function returning `i32` can still contain an
+    // illegal `Shape.Rect(p, p)` double-move with nothing to do with its own return type, and
+    // skipping the walk would silently let that compile. The body is now always walked.
 
     // Every individual `return` site is already checked independently,
     // however deeply nested in if/else (regionOfStmt's ReturnStmt case,
@@ -435,7 +526,30 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
-        return env.get(name->name);
+        // A bare top-level function name used where a closure-typed value is expected (see
+        // docs/language/0067-closures.md's implicit function-reference-to-closure coercion,
+        // and IrGenerator's own identical tryLowerFunctionRef special-case) - checked only when
+        // it's *not* an actual local/param binding, so a real variable always wins first. A
+        // function reference is a fresh value, never an alias of anything, so plain Owned with no
+        // structType is correct - this was unreachable via a function's own body before (a
+        // function reference used inside a function body was already covered some other way, or
+        // this exact gap simply hadn't been exercised there), and only became reachable once
+        // top-level statements started being move/region-checked at all.
+        if (!env.has(name->name) && functions_.contains(name->name))
+        {
+            return RegionInfo{Region::Owned, "", ""};
+        }
+        // The actual move-checking enforcement point: every read of a name funnels through here,
+        // so checking `moved` at this single site protects every downstream consuming use
+        // uniformly (assignment source, call argument, struct-literal field, return value, ...) -
+        // markMoved only ever *sets* the flag; nothing previously ever *checked* it, which is
+        // exactly why `Shape.Rect(p, p)` wasn't actually being rejected (found via direct testing).
+        const RegionInfo info = env.get(name->name);
+        if (info.moved)
+        {
+            throw std::runtime_error("use of moved value '" + name->name + "'");
+        }
+        return info;
     }
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
@@ -445,7 +559,10 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         if (const auto* objectName = dynamic_cast<const NameExpr*>(field->object.get());
             objectName && enums_.contains(objectName->name))
         {
-            return RegionInfo{Region::Owned, "", ""};
+            // structType set to the enum's own name (not left empty) - a freshly constructed
+            // no-payload variant is a real enum value move-checking needs to see, exactly like a
+            // StructLiteralExpr's own typeName.
+            return RegionInfo{Region::Owned, "", objectName->name};
         }
 
         const RegionInfo objectInfo =
@@ -461,11 +578,21 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
                     {
                         continue;
                     }
-                    if (structs_.contains(declaredField.type))
+                    if (structs_.contains(declaredField.type) ||
+                        enums_.contains(declaredField.type))
                     {
-                        // Struct-typed field: aliases the same shared instance as the object.
-                        return RegionInfo{
-                            objectInfo.kind, objectInfo.sourceParam, declaredField.type};
+                        // Struct/enum-typed field: always Borrowed, regardless of the parent
+                        // object's own region. Move semantics (this checker's own core rule) has
+                        // no partial-move support - a field cannot be independently moved out of
+                        // its parent while leaving the rest of the parent intact, so a field read
+                        // is treated as a zero-cost borrow, scoped to (at most) the parent's own
+                        // lifetime. `p.field` can still be read freely / passed to other borrowed
+                        // params; only *moving* it (return, take-call argument, another owning
+                        // field, a collection insert) is rejected, via consumeOwned's Borrowed
+                        // check. (A whole-value match-arm destructure is the one supported way to
+                        // move a payload out of something - there the *entire* scrutinee is
+                        // consumed at once, so there's no partial-parent left to reason about.)
+                        return RegionInfo{Region::Borrowed, field->field, declaredField.type};
                     }
                     // Primitive field: Value stores it by value, always a fresh copy.
                     return RegionInfo{Region::Owned, "", ""};
@@ -477,12 +604,30 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
     {
+        const auto structIt = structs_.find(literal->typeName);
         RegionInfo borrowed{Region::Owned, "", ""};
         bool anyBorrowed = false;
         for (const auto& [fieldName, fieldExpr] : literal->fields)
         {
             const RegionInfo fieldInfo =
                 regionOfExpr(*fieldExpr, env, function, currentLoopBreakRegions);
+            // Move semantics: a struct/enum-*owning* field consumes its value on construction -
+            // case 03 (`Shape.Rect(p, p)`) fires here: the second field's own regionOfExpr call
+            // (env.get on the NameExpr) sees `p` already marked moved by the first field's
+            // consumeOwned call, just below, and throws "use of moved value" before we even get
+            // back to this loop body.
+            if (structIt != structs_.end())
+            {
+                for (const auto& declaredField : structIt->second->fields)
+                {
+                    if (declaredField.name == fieldName && (structs_.contains(declaredField.type) ||
+                                                            enums_.contains(declaredField.type)))
+                    {
+                        consumeOwned(*fieldExpr, fieldInfo, env, function);
+                        break;
+                    }
+                }
+            }
             if (fieldInfo.kind == Region::Borrowed && !anyBorrowed)
             {
                 anyBorrowed = true;
@@ -661,15 +806,29 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
     if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
     {
-        for (const auto& argument : call->arguments)
+        // Move semantics: a `take`-declared param consumes its argument. capabilities_ (not
+        // regions_) is the lookup used here deliberately - regions_ is still being built
+        // function-by-function in this same pass, so a forward reference to a callee defined
+        // later in the file wouldn't have its regions_ entry populated yet; capabilities_ is a
+        // complete, precomputed map handed to us whole by CapabilityChecker before this pass
+        // even starts.
+        const auto capIt = capabilities_.find(call->callee);
+        for (std::size_t i = 0; i < call->arguments.size(); ++i)
         {
-            regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+            const RegionInfo argInfo =
+                regionOfExpr(*call->arguments[i], env, function, currentLoopBreakRegions);
+            if (capIt != capabilities_.end() && i < capIt->second.size() &&
+                capIt->second[i] == Capability::Take)
+            {
+                consumeOwned(*call->arguments[i], argInfo, env, function);
+            }
         }
 
         std::string structType;
         const auto it = functions_.find(call->callee);
         if (it != functions_.end() && it->second->returnType &&
-            structs_.contains(*it->second->returnType))
+            (structs_.contains(*it->second->returnType) ||
+             enums_.contains(*it->second->returnType)))
         {
             structType = *it->second->returnType;
         }
@@ -691,11 +850,33 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         if (const auto* objectName = dynamic_cast<const NameExpr*>(methodCall->object.get());
             objectName && enums_.contains(objectName->name))
         {
-            for (const auto& argument : methodCall->arguments)
+            const EnumDecl* enumDecl = enums_.at(objectName->name);
+            const EnumVariant* variant = nullptr;
+            for (const auto& candidate : enumDecl->variants)
             {
-                regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+                if (candidate.name == methodCall->method)
+                {
+                    variant = &candidate;
+                    break;
+                }
             }
-            return RegionInfo{Region::Owned, "", ""};
+            for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
+            {
+                const RegionInfo argInfo =
+                    regionOfExpr(*methodCall->arguments[i], env, function, currentLoopBreakRegions);
+                // Move semantics: a struct/enum-typed payload field consumes its argument on
+                // construction, mirroring StructLiteralExpr's own field-population check above -
+                // `Shape.Rect(p, p)` is rejected the identical way, just through this path.
+                if (variant && i < variant->fieldTypes.size() &&
+                    (structs_.contains(variant->fieldTypes[i]) ||
+                     enums_.contains(variant->fieldTypes[i])))
+                {
+                    consumeOwned(*methodCall->arguments[i], argInfo, env, function);
+                }
+            }
+            // structType set to the enum's own name - see FieldExpr's identical no-payload case
+            // above for why this matters (move-checking needs to see this is a real enum value).
+            return RegionInfo{Region::Owned, "", objectName->name};
         }
 
         // `math.sqrt(x)` module-qualified call (see docs/language/0066-modules.md) - same
@@ -721,9 +902,24 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
         const RegionInfo objectInfo =
             regionOfExpr(*methodCall->object, env, function, currentLoopBreakRegions);
-        for (const auto& argument : methodCall->arguments)
+        // Move semantics: this whole branch is builtin collection/string/buffer methods only -
+        // real user-defined struct methods reach this checker as an ordinary CallExpr with a
+        // mangled "Type.method" callee (receiver as arguments[0]), handled by the CallExpr case
+        // above, not here. Inserting a struct/enum-typed value into a collection consumes it,
+        // exactly like passing it to a `take` param - this is the fix for the collection-insert
+        // UAF found this session (previously patched with a runtime retain; a compile-time move
+        // error is strictly better). "set" is Map/SortedMap's own two-argument form (key, value) -
+        // both can be struct/enum-typed and both get consumed on insert.
+        static const std::unordered_set<std::string> insertingMethods = {
+            "push", "push_front", "push_back", "enqueue", "add"};
+        for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
         {
-            regionOfExpr(*argument, env, function, currentLoopBreakRegions);
+            const RegionInfo argInfo =
+                regionOfExpr(*methodCall->arguments[i], env, function, currentLoopBreakRegions);
+            if (insertingMethods.contains(methodCall->method) || methodCall->method == "set")
+            {
+                consumeOwned(*methodCall->arguments[i], argInfo, env, function);
+            }
         }
         // "push" returns unit. "pop" removes and returns an element - once
         // removed, nothing else in the list still aliases it, so it's always
@@ -760,6 +956,22 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
     {
         regionOfExpr(*cast->operand, env, function, currentLoopBreakRegions);
         return RegionInfo{Region::Owned, "", ""}; // a numeric cast always yields a primitive
+    }
+
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        // `Shared(x)` moves x into the new allocation - a genuine consuming use, exactly like a
+        // struct-literal field (TypeChecker's own ShareExpr case already guarantees x is
+        // struct/enum-typed). The resulting Shared<T> value itself is deliberately *not*
+        // move-tracked the way a plain struct/enum is (structType left empty below) - Shared<T>
+        // carries its own real runtime refcount, so an untracked extra copy is at worst an extra
+        // kept-alive reference (accepted, matching every other "leak, don't free" scope note in
+        // this codebase), never a use-after-free the way it would be for a counter-free plain
+        // struct.
+        const RegionInfo valueInfo =
+            regionOfExpr(*shareExpr->value, env, function, currentLoopBreakRegions);
+        consumeOwned(*shareExpr->value, valueInfo, env, function);
+        return RegionInfo{Region::Owned, "", ""};
     }
 
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
@@ -805,10 +1017,44 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
     {
         regionOfExpr(*ifExpr->condition, env, function, currentLoopBreakRegions);
+
+        // Move-tracking branch isolation: each branch gets its own child env (so a name moved on
+        // one path never poisons the sibling path's own use of it) and its own fresh moved-name
+        // accumulator, inherited automatically by every nested scope the branch creates (see
+        // RegionEnv's constructor). After both branches are visited, a name moved in *either* one
+        // is conservatively treated as moved for code after the whole if/else (no "only moved on
+        // the taken path" precision - documented, safe-by-construction limitation).
+        std::unordered_set<std::string> thenMoved;
+        RegionEnv thenEnv(&env);
+        thenEnv.setMovedAccumulator(&thenMoved);
         const RegionInfo thenInfo =
-            regionOfExpr(*ifExpr->thenBranch, env, function, currentLoopBreakRegions);
+            regionOfExpr(*ifExpr->thenBranch, thenEnv, function, currentLoopBreakRegions);
+
+        std::unordered_set<std::string> elseMoved;
+        RegionEnv elseEnv(&env);
+        elseEnv.setMovedAccumulator(&elseMoved);
         const RegionInfo elseInfo =
-            regionOfExpr(*ifExpr->elseBranch, env, function, currentLoopBreakRegions);
+            regionOfExpr(*ifExpr->elseBranch, elseEnv, function, currentLoopBreakRegions);
+
+        // Only merge names that actually exist in the outer scope - a name declared fresh
+        // *inside* one branch (and possibly moved there too) has nothing to merge; env.get()
+        // would throw "undefined variable" for it, or worse, coincidentally collide with an
+        // unrelated same-named outer binding if we didn't filter here.
+        for (const auto& name : thenMoved)
+        {
+            if (env.has(name))
+            {
+                env.markMoved(name);
+            }
+        }
+        for (const auto& name : elseMoved)
+        {
+            if (env.has(name))
+            {
+                env.markMoved(name);
+            }
+        }
+
         if (thenInfo.kind == Region::Borrowed)
         {
             return thenInfo;
@@ -821,25 +1067,89 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
     }
 
     // `match` (see docs/language/0064-enums.md) - same "conservatively Borrowed if any branch
-    // could be" reasoning as IfExpr just above, generalized from two branches to N arms. Each
-    // arm gets its own fresh child RegionEnv for its own bound names (a variant's own extracted
-    // payload fields) - always Owned, the same "still walked, always Owned" treatment
-    // SomeExpr/OkExpr/ErrExpr's own payload already gets (a freshly-extracted value, not itself
-    // a reference back into the scrutinee - see those Expr types' own comments).
+    // could be" reasoning as IfExpr just above, generalized from two branches to N arms, with the
+    // same branch-isolated move-tracking. Arm bindings' own Owned/Borrowed-ness now follows the
+    // scrutinee's (see below), not unconditionally Owned as before - this is the fix for this
+    // session's match-arm UAF (`Rect(a,b) => return a` on a borrowed scrutinee used to compile
+    // with zero tracking; it's now the same borrow-escape error returning any other borrowed
+    // value gets).
     if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
     {
-        regionOfExpr(*matchExpr->scrutinee, env, function, currentLoopBreakRegions);
+        const RegionInfo scrutineeInfo =
+            regionOfExpr(*matchExpr->scrutinee, env, function, currentLoopBreakRegions);
+
+        // Move semantics: matching an Owned enum scrutinee consumes it exactly once, moving each
+        // arm's payload bindings out - the scrutinee itself becomes unusable afterward (mirrors
+        // any other consuming use). Matching a Borrowed scrutinee instead produces Borrowed
+        // bindings, scoped to (at most) the scrutinee's own lifetime - the same "field access is a
+        // zero-cost borrow, not a partial move" rule FieldExpr's struct/enum case uses, just for a
+        // whole-value destructure instead of a single field. Either way this happens once, up
+        // front, *not* per-arm - only one arm ever actually executes at runtime, but the
+        // consumption itself doesn't depend on which one.
+        if (!scrutineeInfo.structType.empty() && scrutineeInfo.kind == Region::Owned)
+        {
+            consumeOwned(*matchExpr->scrutinee, scrutineeInfo, env, function);
+        }
+
+        const EnumDecl* scrutineeEnum =
+            !scrutineeInfo.structType.empty() && enums_.contains(scrutineeInfo.structType)
+                ? enums_.at(scrutineeInfo.structType)
+                : nullptr;
+
         RegionInfo result{Region::Owned, "", ""};
         bool haveResult = false;
         for (const auto& arm : matchExpr->arms)
         {
-            RegionEnv armEnv(&env);
-            for (const auto& bindingName : arm.bindingNames)
+            const EnumVariant* variant = nullptr;
+            if (scrutineeEnum)
             {
-                armEnv.define(bindingName, RegionInfo{Region::Owned, "", ""});
+                for (const auto& candidate : scrutineeEnum->variants)
+                {
+                    if (candidate.name == arm.variantName)
+                    {
+                        variant = &candidate;
+                        break;
+                    }
+                }
+            }
+
+            // Branch isolation (see IfExpr above for the full reasoning) - each arm gets its own
+            // child env and fresh moved-name accumulator, merged into the outer env afterward.
+            std::unordered_set<std::string> armMoved;
+            RegionEnv armEnv(&env);
+            armEnv.setMovedAccumulator(&armMoved);
+            for (std::size_t i = 0; i < arm.bindingNames.size(); ++i)
+            {
+                std::string bindingStructType;
+                if (variant && i < variant->fieldTypes.size() &&
+                    (structs_.contains(variant->fieldTypes[i]) ||
+                     enums_.contains(variant->fieldTypes[i])))
+                {
+                    bindingStructType = variant->fieldTypes[i];
+                }
+                // A primitive payload field (bindingStructType empty) is always Owned,
+                // regardless of the scrutinee's own region - it's copied by value and can never
+                // alias anything, the same "primitives don't alias" rule checkFunction's own
+                // param-region computation already applies. Only a struct/enum-typed binding
+                // actually inherits the scrutinee's Borrowed-ness.
+                const Region bindingKind =
+                    bindingStructType.empty() ? Region::Owned : scrutineeInfo.kind;
+                armEnv.define(arm.bindingNames[i],
+                              RegionInfo{bindingKind,
+                                         bindingKind == Region::Borrowed ? arm.bindingNames[i] : "",
+                                         bindingStructType});
             }
             const RegionInfo armInfo =
                 regionOfExpr(*arm.body, armEnv, function, currentLoopBreakRegions);
+
+            for (const auto& name : armMoved)
+            {
+                if (env.has(name))
+                {
+                    env.markMoved(name);
+                }
+            }
+
             if (armInfo.kind == Region::Borrowed)
             {
                 return armInfo;
@@ -884,6 +1194,49 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
+    // A closure literal (see docs/language/0067-closures.md) - genuinely walked (not just
+    // defaulted to Owned via the generic fallback below, which would silently skip checking the
+    // closure's own body for region issues) via a real child RegionEnv whose own parent is the
+    // *enclosing* scope, exactly like TypeChecker::checkExpr's own identical ClosureExpr case -
+    // the whole point of "closing over" it. `currentLoopBreakRegions` is null for the closure's
+    // own top-level body, mirroring TypeChecker's own identical choice there: a bare `break`/
+    // `continue` with no loop of the closure's *own* is already rejected before RegionChecker
+    // ever runs, so this can never actually be consulted unless the closure body has its own
+    // nested loop, which sets its own fresh one when it's reached. The closure value itself is
+    // always Owned - a freshly built value, never itself a reference back into anything.
+    if (const auto* closureExpr = dynamic_cast<const ClosureExpr*>(&expr))
+    {
+        // Struct-typed closure parameters (see docs/language/0067-closures.md) - same
+        // borrowed-iff-struct-typed-and-not-Take formula checkFunction uses for a real function's
+        // own params (simplified to the struct-only case - a closure param's own
+        // elementStructType-bearing collection types, e.g. List<Point>, are a narrower, still-
+        // Owned-by-default imprecision this pass doesn't yet resolve for closures, matching this
+        // checker's own pre-existing "closure literal is opaque" stance for anything but a bare
+        // struct param). A closure not found in closureCapabilities_ (no struct-typed param to
+        // begin with, or capabilities not threaded through by this particular caller) falls back
+        // to every param being Owned - this checker's own original, always-safe behavior.
+        const auto closureCapIt = closureCapabilities_.find(closureExpr);
+        std::vector<Region> paramRegions;
+        paramRegions.reserve(closureExpr->params.size());
+        RegionEnv closureEnv(&env);
+        for (std::size_t i = 0; i < closureExpr->params.size(); ++i)
+        {
+            const auto& param = closureExpr->params[i];
+            const std::string structType =
+                (structs_.contains(param.type) || enums_.contains(param.type)) ? param.type : "";
+            const bool borrowed = !structType.empty() &&
+                                  closureCapIt != closureCapabilities_.end() &&
+                                  closureCapIt->second[i] != Capability::Take;
+            const Region region = borrowed ? Region::Borrowed : Region::Owned;
+            closureEnv.define(param.name,
+                              RegionInfo{region, borrowed ? param.name : "", structType});
+            paramRegions.push_back(region);
+        }
+        closureRegions_[closureExpr] = std::move(paramRegions);
+        regionOfExpr(*closureExpr->body, closureEnv, function, nullptr);
+        return RegionInfo{Region::Owned, "", ""};
+    }
+
     return RegionInfo{Region::Owned, "", ""};
 }
 
@@ -894,8 +1247,14 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
 {
     if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
     {
-        env.define(assignment->name,
-                   regionOfExpr(*assignment->value, env, function, currentLoopBreakRegions));
+        RegionInfo info = regionOfExpr(*assignment->value, env, function, currentLoopBreakRegions);
+        // Move semantics: `x = p` (p an existing Owned struct/enum binding, or a Borrowed one -
+        // which consumeOwned rejects) consumes the source. The *new* binding `x` starts out
+        // unmoved regardless - it's a fresh, valid handle to whatever was just consumed (or, for
+        // every non-struct/enum type, an ordinary no-op pass-through, unchanged from before).
+        consumeOwned(*assignment->value, info, env, function);
+        info.moved = false;
+        env.define(assignment->name, info);
         return;
     }
 
@@ -903,8 +1262,9 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
     {
         if (returnStmt->value)
         {
-            requireOwned(regionOfExpr(*returnStmt->value, env, function, currentLoopBreakRegions),
-                         function);
+            const RegionInfo info =
+                regionOfExpr(*returnStmt->value, env, function, currentLoopBreakRegions);
+            requireOwned(*returnStmt->value, info, env, function);
         }
         return;
     }
@@ -917,16 +1277,47 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
 
     if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
     {
-        regionOfExpr(*fieldAssign->object, env, function, currentLoopBreakRegions);
-        regionOfExpr(*fieldAssign->value, env, function, currentLoopBreakRegions);
+        const RegionInfo objectInfo =
+            regionOfExpr(*fieldAssign->object, env, function, currentLoopBreakRegions);
+        const RegionInfo valueInfo =
+            regionOfExpr(*fieldAssign->value, env, function, currentLoopBreakRegions);
+        // Move semantics: `obj.field = value` re-populates an owning field, exactly like
+        // StructLiteralExpr's own field population - the field-store/collection-insert escape gap
+        // found this session (`self.field = borrowedParam` slipping past both checkers entirely).
+        if (!objectInfo.structType.empty())
+        {
+            if (const auto structIt = structs_.find(objectInfo.structType);
+                structIt != structs_.end())
+            {
+                for (const auto& declaredField : structIt->second->fields)
+                {
+                    if (declaredField.name == fieldAssign->field &&
+                        (structs_.contains(declaredField.type) ||
+                         enums_.contains(declaredField.type)))
+                    {
+                        consumeOwned(*fieldAssign->value, valueInfo, env, function);
+                        break;
+                    }
+                }
+            }
+        }
         return;
     }
 
     if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
     {
-        regionOfExpr(*indexAssign->object, env, function, currentLoopBreakRegions);
+        const RegionInfo objectInfo =
+            regionOfExpr(*indexAssign->object, env, function, currentLoopBreakRegions);
         regionOfExpr(*indexAssign->index, env, function, currentLoopBreakRegions);
-        regionOfExpr(*indexAssign->value, env, function, currentLoopBreakRegions);
+        const RegionInfo valueInfo =
+            regionOfExpr(*indexAssign->value, env, function, currentLoopBreakRegions);
+        // Move semantics: `arr[i] = value` on a struct/enum-element array/slice (the only
+        // receivers IndexAssignStmt ever sees - List<T> uses .push()/.set(), handled above)
+        // consumes value, mirroring the collection-insert fix above.
+        if (!objectInfo.elementStructType.empty())
+        {
+            consumeOwned(*indexAssign->value, valueInfo, env, function);
+        }
         return;
     }
 
@@ -963,8 +1354,11 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
 
 void RegionChecker::check(
     const Program& program,
-    const std::unordered_map<std::string, std::vector<Capability>>& capabilities)
+    const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
+    const std::unordered_map<const ClosureExpr*, std::vector<Capability>>& closureCapabilities)
 {
+    closureCapabilities_ = closureCapabilities;
+    capabilities_ = capabilities;
     registerDecls(program);
 
     for (const auto& item : program.items)
@@ -981,9 +1375,60 @@ void RegionChecker::check(
             }
         }
     }
+
+    // Top-level executable statements (see docs/language/0020-compiler-architecture.md - the
+    // implicit top-level "main") were never move/region-checked at all before this fix: this
+    // loop only ever matched FunctionDecl/ImplDecl, silently skipping every other Stmt kind. This
+    // is exactly the gap that let `u = User{...}; archive(u); print(u)` (a real SIGSEGV found
+    // this session) compile clean - `archive`'s own `take` consumed `u` for real, but nothing
+    // ever checked the top-level sequence for a use-after-move. One shared env and a synthetic,
+    // paramless FunctionDecl (its `name` is only ever read for error-message text - see
+    // requireOwned/consumeOwned - nothing else about it is dereferenced by regionOfExpr/
+    // regionOfStmt) - top-level moves now persist across the whole program the same way a
+    // function body's own moves persist across its own statements.
+    static const FunctionDecl topLevelFunction("<top-level>", {}, std::nullopt, nullptr);
+    RegionEnv topLevelEnv;
+    std::vector<std::string> topLevelBindingNames;
+    for (const auto& item : program.items)
+    {
+        if (dynamic_cast<const FunctionDecl*>(item.get()) ||
+            dynamic_cast<const ImplDecl*>(item.get()) ||
+            dynamic_cast<const StructDecl*>(item.get()) ||
+            dynamic_cast<const EnumDecl*>(item.get()) ||
+            dynamic_cast<const ExternDecl*>(item.get()))
+        {
+            continue;
+        }
+        if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
+        {
+            topLevelBindingNames.push_back(assignment->name);
+        }
+        regionOfStmt(*item, topLevelEnv, topLevelFunction, nullptr);
+    }
+
+    // See movedTopLevelBindings()'s own doc comment - IrGenerator's synthetic top-level auto-print
+    // needs this, since it never goes through regionOfStmt/regionOfExpr at all (it isn't real AST).
+    for (const auto& name : topLevelBindingNames)
+    {
+        if (topLevelEnv.get(name).moved)
+        {
+            movedTopLevelBindings_.insert(name);
+        }
+    }
+}
+
+const std::unordered_set<std::string>& RegionChecker::movedTopLevelBindings() const
+{
+    return movedTopLevelBindings_;
 }
 
 const std::unordered_map<std::string, std::vector<Region>>& RegionChecker::regions() const
 {
     return regions_;
+}
+
+const std::unordered_map<const ClosureExpr*, std::vector<Region>>&
+RegionChecker::closureRegions() const
+{
+    return closureRegions_;
 }

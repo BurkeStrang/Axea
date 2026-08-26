@@ -147,48 +147,163 @@ makeAdder(base: i32) -> fn(i32) -> i32
     return fn(x: i32) -> i32 { return x + base }
 }
 
+double(x: i32) -> i32
+{
+    return x * 2
+}
+
 run() -> i32
 {
     add5 = makeAdder(5)
     doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 }
-    return apply(add5, 10) + apply(doubler, 10)   // 15 + 20 = 35
+    // `double` is a bare top-level function name, not a closure literal - the implicit
+    // function-reference-to-closure coercion wraps it into a real closure value here.
+    fact: fn(i32) -> i32 = fn(n: i32) -> i32 {
+        // Self-referential closure - `fact` calling itself needs no new syntax at all.
+        if n <= 1 { return 1 }
+        return n * fact(n - 1)
+    }
+    return apply(add5, 10) + apply(doubler, 10) + apply(double, 10) + fact(5)
+    // 15 + 20 + 20 + 120 = 175
 }
 
 y = run()
 ```
 
 Verified byte-for-byte identical across the interpreter, `-O0`, and `-O1`, including a closure
-capturing a struct-typed local by move and one closure passed as another function's own
-parameter (a higher-order function).
+capturing a struct-typed local by move, one closure passed as another function's own parameter (a
+higher-order function), a bare top-level function name used the same way, a struct-typed closure
+*parameter*, and a self-referential (recursive) closure.
 
 ---
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **No bare-name function values.** `apply(double, 5)` - passing a *named top-level function* as
-  if it were a closure value - isn't supported; only a `fn(...) { ... }` literal (or a variable
-  already holding one) produces a real closure value. Wrapping a bare function reference into a
-  closure value implicitly is a plausible, deliberately deferred follow-up.
-- **Struct-typed closure *parameters* aren't supported.** `CapabilityChecker`'s own read/write/
-  take inference is keyed per top-level `FunctionDecl` name; a closure is anonymous, and
-  extending that machinery to cover it - a real, if bounded, amount of new plumbing - was
-  deliberately deferred rather than half-built this phase. A *captured* struct-typed local is
-  unaffected by this restriction (always move/`Take`, needing no per-param inference at all).
-- **The free-variable scan over-approximates.** A name shadowed by a local declared *inside* the
-  closure body (not one of its own top-level params) is still collected as if captured - safe
-  for how it's used (see Design), but a real, narrow gap from a fully scope-aware capture
-  analysis.
-- **`RegionChecker` treats a closure literal as an opaque, always-Owned value** via its own
-  generic fallback, without recursing into the closure's own body - safe (the fallback can't
-  accept an unsound program), but not maximally precise about region issues *inside* a closure
-  body specifically.
-- **Closures are never freed.** Neither the closure value's own fat-pointer struct nor its
-  captures struct is ever `IrDrop`-tracked - `isObviouslyStructTyped` (the mechanism that decides
-  what gets dropped at scope exit) doesn't recognize a closure-typed local. A real, if bounded
-  (this compiler has no other form of automatic memory reclamation for heap values either),
-  memory-management gap.
-- **No recursive/self-referential closures** - a closure literal has no name of its own to call
-  itself by.
+- ~~No bare-name function values~~ - **fixed**: `apply(double, 5)` - passing a *named top-level
+  function* where a closure value is expected - now works, at all three boundaries that need it
+  (call argument, declared-local assignment, and `return`). `TypeChecker::isFunctionRefAssignableToClosure`
+  validates the referenced function's own real signature matches the target closure type exactly
+  (checking `TypeEnv` first, so a same-named local always shadows the top-level function - the
+  ordinary "inner scope wins" rule this whole feature already established for closure *calls*
+  applies here too); each backend then wraps it into a real closure value at the same boundary,
+  checked *before* the generic evaluation path (which would otherwise throw "undefined variable"
+  trying to resolve a bare function name that's never actually bound anywhere). The interpreter's
+  `ClosureInstance::wrappedFunction` is a trivial forward with no captures of its own.
+  `IrGenerator::generateFunctionRefTrampoline` gives the LLVM backend the same thing: since
+  `IrClosureCall`'s own ABI always calls through a captures-struct-taking function pointer, and a
+  named function takes no such hidden first param, a bare function reference still needs a real
+  trampoline - one memoized per distinct function name (not per reference site), taking a single
+  shared, always-empty captures struct (`closure.captures.fnref`) it never reads, since a bare
+  function reference captures nothing.
+- ~~Struct-typed closure *parameters* aren't supported~~ - **fixed**: `CapabilityChecker::registerClosure`
+  mints each closure literal its own synthetic `FunctionDecl` (name/params only - never read via
+  `.body`, since the closure's own body is walked directly wherever `inferExpr`/`checkMovesInExpr`
+  already reach the `ClosureExpr` node) and registers it into the *same* `functions_`/`inferred_`
+  maps a real top-level function already uses - letting `raise`, `effectiveOrInferred`, the
+  fixpoint loop's own per-function walk, the final declared-vs-inferred merge, and
+  `checkMovesInExpr`'s own driver loop all work completely unchanged, with zero closure-specific
+  logic of their own (this doc's own guiding rule: "reuse the struct machinery until the
+  representation genuinely can't be a struct"). The fixpoint loop's own live
+  `for (name, function) : functions_` walk had to become a snapshot-then-iterate instead, since
+  discovering a closure now inserts a *new* key into that same map mid-walk (undefined behavior
+  otherwise for a live `std::unordered_map` iteration) - closures found during one pass simply
+  join the very next full pass, same fixpoint-convergence guarantee any single function's own
+  capabilities already had. `effectiveCapabilities()` gained a closure-keyed sibling,
+  `closureEffectiveCapabilities()` (keyed by `const ClosureExpr*`, since a closure has no name of
+  its own), threaded through `RegionChecker::check`/`IrGenerator::generate` as new optional
+  parameters (default empty, so every caller not wired through - most test helpers - keeps
+  compiling unchanged and gets this checker's own original, always-safe Owned/Read fallback).
+  `RegionChecker`'s own `ClosureExpr` case now computes each param's real `Owned`/`Borrowed`
+  region from that data (the identical `borrowed = struct-typed && capability != Take` formula
+  `checkFunction` already uses for a real function's own params), so a closure with a borrowed
+  struct param returning it directly is correctly rejected exactly like a real function would be
+  - the same fixture the fix's own end-to-end test needed a **struct-returning** enclosing
+  function to actually exercise: `RegionChecker::checkFunction` only ever walks a function's body
+  at all when *that function's own* return type could itself carry an aliasing risk, an
+  optimization that transitively also gates whether any closure nested inside it ever gets
+  region-checked. `IrGenerator::generateClosureTrampoline` consumes the same two pieces of data to
+  choose a real per-param `IrMove`/`IrBorrowRead`/`IrBorrowWrite` (plus a trailing `IrDrop` for an
+  `Owned` struct param), mirroring `generateFunction`'s own identical param loop, instead of the
+  phase's original unconditional `IrMove` for every param. A *captured* struct-typed local is
+  unaffected by any of this (always move/`Take`, needing no per-param inference at all).
+- ~~The free-variable scan over-approximates (shadowing)~~ - **corrected on closer inspection**:
+  this isn't actually a gap. This language's own assignment rule - `x = v` mutates the *nearest
+  existing* binding for `x` anywhere up the scope chain, and only defines a genuinely fresh local
+  when `x` doesn't already exist anywhere - means a closure body can never create a local that
+  merely *shadows* a captured name; `x = 20` inside a closure that captured `x` always mutates
+  the closure's own captured copy (confirmed directly: `x = 10; f: fn()->i32 = fn()->i32 { x =
+  20  return x }; return f()` returns 20, identically across the interpreter and both LLVM
+  optimization levels). Combined with the existing "only actually capture a name that's really
+  bound in the enclosing scope" filter (handling a genuinely new closure-local name) and the
+  existing per-closure param-name subtraction (handling param shadowing, recursively for nested
+  closures), the dumb collector's own over-approximation was already sound.
+- ~~`RegionChecker` treats a closure literal as opaque~~ - **fixed**: `RegionChecker::regionOfExpr`
+  now has a real `ClosureExpr` case - it binds the closure's own params into a fresh child
+  `RegionEnv` and recurses into the closure's own body with `regionOfExpr`, exactly like a real
+  function body, rather than falling through to the generic "always Owned" fallback every other
+  not-specially-handled expression kind still uses.
+- ~~Closures are never freed~~ - **corrected**: this turned out not to be a closure-specific gap
+  at all. `IrDrop`/`IrMove`/`IrBorrowRead`/`IrBorrowWrite`/`IrRegionEnter`/`IrRegionExit` are
+  emitted by `IrGenerator` but never consumed by *either* backend (`grep` for each one across
+  `LlvmIrEmitter.cpp`/`Interpreter.cpp` turns up nothing) - they're current, region-*checking*-
+  only markers with no runtime effect yet, for every heap type this compiler has, not just
+  closures. Nothing is freed by the compiled backend today; the interpreter relies on C++
+  `shared_ptr` refcounting instead of needing to. Actually implementing real memory reclamation
+  is a real, but wholly separate, project-wide undertaking - out of scope for a closures-specific
+  pass.
+- ~~No recursive/self-referential closures~~ - **fixed, no new syntax**: `f: fn(i32)->i32 =
+  fn(n: i32)->i32 { ... f(n-1) ... }` (or the undeclared-type `f = fn(...){...}` spelling) already
+  parsed; the fix is entirely in each pass's own `AssignmentStmt` handling, pre-binding `f`
+  *before* checking/evaluating the closure literal's own body, rather than any new grammar.
+  TypeChecker's `closureSignatureType` computes `f`'s own `fn(...)->...` type directly from the
+  literal's own param/return type text (independent of its own body, which is why this needed to
+  be its own helper - also now reused by `checkExpr`'s own `ClosureExpr` case) and pre-defines it
+  in `env` before checking the body, so a self-call resolves through the exact same
+  "closure-typed local" call path every other closure call already goes through - no new
+  call-resolution logic anywhere. The interpreter builds the `ClosureInstance` completely
+  unchanged, then *unconditionally* also sets `instance->captures[name] = Value{instance}` - a
+  real, deliberate reference cycle (`ClosureInstance` is `shared_ptr`-owned), added *after*
+  construction rather than taught to the ordinary free-variable scan, because that scan
+  structurally can never discover a self-*call* on its own (`f(x)`'s own `f` is a `CallExpr`'s
+  plain-string `callee` field, never a `NameExpr` node the scan would ever see - it only ever
+  finds a self-*reference used as a value*, e.g. `return f`, which the ordinary scan already
+  handles once `f` is pre-bound the same way TypeChecker's `env` is). The cycle means a
+  self-referential closure's own instance is never reclaimed by the interpreter's usual
+  `shared_ptr` refcounting - an accepted, documented trade-off (see "Closures are never freed"
+  above: real memory reclamation is already out of scope project-wide, not just for this case).
+  `IrGenerator` needed a genuinely different mechanism, since no closure *value* exists yet at the
+  point its own body is still being compiled to hand an `IrClosureCall` an object to indirect
+  through: a self-call instead compiles to a direct, ordinary `IrCall` back to the trampoline's
+  own name, forwarding the trampoline's own `__captures` register straight through as the hidden
+  first argument (the *same* captures object every call of this closure value already shares, so
+  no new one is ever built for the recursive call). `Context` gained
+  `selfRecursiveName`/`selfRecursiveTrampolineName`/`selfRecursiveCapturesRegister`, set once
+  `generateClosureTrampoline` knows its own captures register - naturally inherited into every
+  nested block *within that same trampoline* (a block's own `Context blockCtx = ctx` copy) and
+  just as naturally absent from any other function/trampoline (each always builds a fresh
+  `Context` from scratch). `lowerStmt`'s own `AssignmentStmt` case detects "is `value` directly a
+  closure literal" and stashes the name into a narrow, ambient
+  `pendingSelfReferenceName_` member (mirroring `TypeChecker::currentFunctionModule_`'s identical
+  convention) for `lowerExpr`'s own `ClosureExpr` case to consume-and-clear via `std::exchange` a
+  few frames later - clearing it immediately is what stops a *nested* closure literal (a genuinely
+  different, unrelated one) from ever inheriting a stale value.
+  **Narrower than the interpreter in one specific way**: only a self-*call* (`f(x)`) is supported
+  by the LLVM backend: a closure using its *own name as a plain value* inside its own body (e.g.
+  `return f` without calling it) still throws a clear `"undefined variable"` at IR-generation time,
+  since no placeholder-then-patch mechanism was built for tying that particular knot at the LLVM
+  level (the interpreter *does* support this narrower pattern too, for free, since its own fix is
+  entirely value-level rather than needing any new IR capability). A genuinely rare pattern next to
+  ordinary recursive calls, and one that fails loudly rather than silently miscompiling, so left as
+  a documented, narrower imprecision rather than built out this phase.
+  **A second, unrelated bug found while verifying this**: `IrGenerator::simpleTypeOfExpr` had no
+  `ClosureExpr` case at all, so an *undeclared*-type closure-literal assignment
+  (`f = fn(x: i32)->i32 {...}`, as opposed to `f: fn(i32)->i32 = fn(...){...}`) was never recorded
+  via `scope.defineSimpleType` - a *later* call to `f` (recursive or not) couldn't recognize it as
+  a closure-typed local at all, silently falling through to an ordinary `IrCall` targeting a
+  nonexistent top-level function named `f`, caught only much later as an opaque
+  `unordered_map::at` deep inside `LlvmIrEmitter`. This was a real, pre-existing bug (not one of
+  this doc's own original six), affecting *any* undeclared-type closure call, not just a
+  recursive one - fixed alongside this phase since recursion testing is what surfaced it.
 
 ---
 

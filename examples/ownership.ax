@@ -1,0 +1,78 @@
+// Plain structs move by default. Single ownership is proven at compile time, so
+// there is no runtime refcount anywhere below: no retain when a value is passed
+// or returned, no release-then-maybe-free check, no hidden counter field in the
+// struct layout at all. A value is dropped exactly once, unconditionally, at the
+// one point in the program that is provably its last use.
+
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+struct Line
+{
+    start: Point
+    end: Point
+}
+
+// Returning a struct just moves it out to the caller - nothing is retained on
+// the way out.
+make_point(x: i32, y: i32) -> Point
+{
+    return Point { x: x, y: y }
+}
+
+// `take` means this function becomes the sole owner of `a` and `b`. Moving them
+// into `start`/`end` is a real, zero-cost ownership transfer: once `line` exists,
+// it alone can reach these two points, so dropping `line` later needs no aliasing
+// check - it can just walk its fields and free them.
+make_line(take a: Point, take b: Point) -> Line
+{
+    return Line { start: a, end: b }
+}
+
+// A plain (borrowed) parameter costs nothing to read: no retain on the way in,
+// no release on the way out. `p` is never owned by this function.
+length_squared(p: Point) -> i32
+{
+    return p.x * p.x + p.y * p.y
+}
+
+// `take` consumes `line` - the caller can no longer use its own `line` after
+// this call. That is enforced at compile time (see the commented-out example at
+// the bottom of this file), not by a runtime check.
+describe(take line: Line) -> i32
+{
+    return length_squared(line.start) + length_squared(line.end)
+}
+
+run() -> i32
+{
+    a = make_point(3, 4)
+    b = make_point(1, 2)
+    line = make_line(a, b)
+    return describe(line)
+}
+
+total = run()
+print(total)
+
+// Everything below is rejected at compile time - not because a runtime check
+// catches it, but because the compiler can already see the aliasing statically.
+// That is the whole reason no refcount is needed above: the cases a refcount
+// would exist to guard against are compile errors instead.
+//
+//   run2() -> i32
+//   {
+//       p = Point { x: 1, y: 2 }
+//       // error: use of moved value 'p'
+//       line = Line { start: p, end: p }
+//       return line.start.x
+//   }
+//
+//   bad(p: Point) -> Line
+//   {
+//       // error: function 'bad' cannot move out of borrowed value 'p'
+//       return Line { start: p, end: p }
+//   }

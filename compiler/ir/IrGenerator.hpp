@@ -148,9 +148,25 @@ private:
 class IrGenerator
 {
 public:
-    IrProgram generate(const Program& program,
-                       const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
-                       const std::unordered_map<std::string, std::vector<Region>>& regions);
+    // `closureCapabilities`/`closureRegions` (see docs/language/0067-closures.md,
+    // CapabilityChecker::closureEffectiveCapabilities, RegionChecker::closureRegions) - default
+    // to empty so a caller that doesn't care about struct-typed closure parameters (most test
+    // helpers) keeps compiling unchanged; a closure literal with no entry in either falls back to
+    // generateClosureTrampoline's own original unconditional-IrMove behavior.
+    IrProgram
+    generate(const Program& program,
+             const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
+             const std::unordered_map<std::string, std::vector<Region>>& regions,
+             const std::unordered_map<const ClosureExpr*, std::vector<Capability>>&
+                 closureCapabilities = {},
+             const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions = {},
+             // Top-level bindings move-checking (RegionChecker::movedTopLevelBindings) determined
+             // were consumed somewhere in the program's own top-level statements (e.g. `u =
+             // User{...}; archive(u)`) - skipped by the synthetic top-level auto-print below (see
+             // its own use), since printing a moved-away binding would read memory a real
+             // user-written program already gave away. Defaults to empty so existing callers/test
+             // helpers that never call RegionChecker at all keep compiling and behaving unchanged.
+             const std::unordered_set<std::string>& movedTopLevelBindings = {});
 
 private:
     // Where instructions currently being lowered get appended, the running
@@ -166,6 +182,34 @@ private:
         int* registerCount;
         const FunctionDecl* function;
         std::vector<int>* structLocals;
+        // Self-referential closures (see docs/language/0067-closures.md) - set only inside a
+        // self-referential closure literal's own trampoline (by generateClosureTrampoline, once
+        // capturesRegister is known), naturally inherited by every nested block's own copy of
+        // `ctx` within that same trampoline (an if/loop body's own `Context blockCtx = ctx`), and
+        // just as naturally *not* inherited into any other function/trampoline - each of those
+        // always constructs its own fresh Context from scratch. lowerExpr's own CallExpr case
+        // checks `selfRecursiveName` before the ordinary "closure-typed local" check: a call to
+        // this exact name, from inside this exact trampoline, is a real recursive call to the
+        // trampoline itself (an ordinary IrCall, with capturesRegister forwarded as the hidden
+        // first argument) - not an indirect IrClosureCall through a closure value, since no such
+        // value can exist yet at the point the closure literal's own body is still being
+        // compiled.
+        std::optional<std::string> selfRecursiveName;
+        std::string selfRecursiveTrampolineName;
+        int selfRecursiveCapturesRegister = -1;
+        // Real memory reclamation (structs/enums only) - every currently-open scope's own list
+        // of struct/enum-typed registers still needing a release, outermost (the function/
+        // trampoline's own param frame) first. A pointer to one stack object owned by the
+        // enclosing generateFunction/generateClosureTrampoline call, shared by pointer identity
+        // across nested Context copies exactly like `registerCount` already is - a BlockExpr
+        // pushes its own `structLocals` frame onto this same stack for the lexical extent of its
+        // own body (ordinary C++ RAII-shaped push/pop; no early-return short-circuit exists at
+        // this level, since a target-language `return` only appends an IrReturn to the
+        // instruction *stream* - the C++ recursive lowering walk continues normally past it), so
+        // at any point during lowering, walking every frame currently on this stack gives
+        // exactly the set of struct/enum-typed bindings live at that exact source position. See
+        // IrGenerator::emitReturn, the one consumer.
+        std::vector<std::vector<int>*>* liveScopeStack = nullptr;
     };
 
     void registerStructs(const Program& program);
@@ -181,10 +225,40 @@ private:
     // IrFieldGet off that param. Mirrors generateFunction's own shape closely, simplified by this
     // phase's own scope cut (a closure's own declared params are never struct-typed, so no
     // per-param region/capability array is threaded through the way generateFunction's own is).
+    // `capabilities`/`regions` (see docs/language/0067-closures.md) mirror generateFunction's
+    // own identical per-param arrays; null when `closureExpr` has no entry in either map passed
+    // into generate() (no struct-typed param at all - the pre-existing, always-safe fallback of
+    // an unconditional IrMove for every param).
+    // `selfName` (see docs/language/0067-closures.md) - set only when this closure literal is
+    // the direct RHS of an assignment to that name (self-referential/recursive closures);
+    // nullopt otherwise. Stashed into the trampoline's own Context so lowerExpr's CallExpr case
+    // can recognize a real recursive call back into this same trampoline.
     IrFunction generateClosureTrampoline(const ClosureExpr& closureExpr,
                                          const std::string& trampolineName,
                                          const std::string& capturesStructName,
-                                         const std::vector<std::string>& capturedNames);
+                                         const std::vector<std::string>& capturedNames,
+                                         const std::vector<Capability>* capabilities,
+                                         const std::vector<Region>* regions,
+                                         const std::optional<std::string>& selfName);
+    // Implicit function-reference-to-closure coercion (see docs/language/0067-closures.md) - a
+    // bare top-level function name, used where a closure value is expected, needs a trampoline of
+    // its own too: unlike a real `fn(...){...}` literal, it captures nothing, but IrClosureCall's
+    // ABI always calls through a captures-struct-taking function pointer, so a named function
+    // (which takes no such hidden first param) can never be pointed to directly. This trampoline
+    // just ignores its own (always-empty) captures param and forwards straight into `function`.
+    IrFunction generateFunctionRefTrampoline(const FunctionDecl& function,
+                                             const std::string& trampolineName,
+                                             const std::string& capturesStructName);
+    // nullopt if `valueExpr` isn't a bare top-level function name not otherwise shadowed by a
+    // local (the ordinary case: the caller should lowerExpr `valueExpr` normally instead),
+    // otherwise the register of a real closure value wrapping it, memoized per function name so
+    // repeated references share one trampoline. Checked *before* lowerExpr at each of the three
+    // boundaries this needs (assignment, return, call argument) - lowerExpr's own NameExpr case
+    // would otherwise throw "undefined variable" resolving a bare function name (a function is
+    // never bound in any IrScope; it's resolved by name, via functions_, only at an actual call
+    // site) - mirrors Interpreter::tryWrapFunctionRef exactly, one IR-level register instead of
+    // one runtime Value.
+    std::optional<int> tryLowerFunctionRef(const Expr& valueExpr, IrScope& scope, Context& ctx);
 
     int lowerExpr(const Expr& expr, IrScope& scope, Context& ctx);
     // `match` (see docs/language/0064-enums.md) - lowers arms[armIndex..] into a chain of
@@ -203,6 +277,26 @@ private:
                       IrScope& scope,
                       Context& ctx);
     void lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx);
+    // Real memory reclamation (structs/enums only) - the one place an IrReturn is ever
+    // constructed (replacing 4 previously-independent call sites: the explicit ReturnStmt case,
+    // and the synthetic trailing return in generateFunction/generateClosureTrampoline/
+    // generateFunctionRefTrampoline - duplicating this shape independently at each is exactly
+    // how the early-return dead-code bug this fixes was introduced). `valueRegOrNegOne` is -1
+    // for a bare/unit return. If it's also one of the registers about to be released below (a
+    // self-aliasing return - `return x;` where `x` is itself a live struct/enum local/param),
+    // retains it *first* so the matching release nets back to the original, still-positive
+    // count instead of freeing a value still being handed to the caller - deliberately a
+    // register-*presence* check against `*ctx.liveScopeStack`, not a "return type is
+    // struct/enum" check: a value that isn't itself one of the tracked bindings (a fresh
+    // literal, a value already forwarded from another call under this scheme's own "every
+    // return hands back an already-correctly-refcounted value" convention) needs no retain at
+    // all here - retaining it anyway would leak, since nothing would ever release the extra
+    // count. Then walks every frame on `*ctx.liveScopeStack` (every struct/enum-typed binding
+    // live at this exact point in the recursive lowering) and releases each, before finally
+    // emitting the terminator itself. This is what makes a release actually reachable on an
+    // early-return path, unlike the old structurally-appended-after-the-body drop loops it
+    // replaces.
+    void emitReturn(Context& ctx, int valueRegOrNegOne);
     // Shared by `while` (condition non-null, dest discarded by the caller)
     // and `loop` (condition null, dest is the loop's produced value).
     // Returns the lowered IrLoop's own dest register.
@@ -224,6 +318,52 @@ private:
     // struct-typed parameter, as worth a Drop marker - not the result of a
     // call or a field access.
     bool isObviouslyStructTyped(const Expr& expr, const FunctionDecl& function) const;
+    // Real memory reclamation (structs/enums only) - true when `expr` is guaranteed to already
+    // hold a fresh, uniquely-owned reference (refcount already exactly 1, from construction or
+    // from a real Axea function's own `emitReturn`-based +1 return), needing no additional
+    // retain wherever it's stored into a new binding/slot: a direct struct literal, an
+    // `EnumName.Variant(...)`/`EnumName.Variant` construction, or an ordinary call to a *real,
+    // user-defined* Axea function whose declared return type is struct/enum-typed. Deliberately
+    // excludes every real impl *method* call and every builtin collection/string/buffer
+    // operation (`.get()`/`.pop()`/`.peek()`/...): those don't go through generateFunction's own
+    // emitReturn at all (a builtin op hands back a raw *aliased* pointer straight out of
+    // existing storage, never a fresh one) - treating one as "fresh" would under-retain and risk
+    // a real use-after-free once the original owner's own scope ends, so anything not provably
+    // fresh conservatively needs a retain instead (a harmless, bounded extra retain+eventual-
+    // leak in the worst case a genuinely-fresh value gets classified this way - never a
+    // correctness bug, unlike the reverse mistake).
+    bool isProvablyFreshStructValue(const Expr& expr) const;
+    // Real memory reclamation (structs/enums only) - `simpleTypeOfExpr` plus the one shape it
+    // doesn't recognize that this code specifically needs: `EnumName.Variant(args)`/
+    // `EnumName.Variant` construction (a MethodCallExpr/FieldExpr, not a NameExpr/literal/plain
+    // CallExpr - see isProvablyFreshStructValue's own identical check for this same shape). A
+    // separate helper rather than extending simpleTypeOfExpr itself, which several other,
+    // unrelated passes (union-wrap resolution) already depend on unchanged.
+    std::optional<std::string> resolveStructOrEnumType(const Expr& expr,
+                                                       const FunctionDecl* function,
+                                                       const IrScope& scope) const;
+    // Move semantics (structs/enums only) - shared by every site that stores a value into a
+    // *new* struct/enum-owning slot (a struct literal's own field, an enum variant's own payload,
+    // a union-wrap's own payload, a closure's own captures struct field, a take-call argument, a
+    // collection insert): if `fieldAxeaType` is struct/enum-typed, removes `valueReg` from
+    // whichever liveScopeStack frame currently tracks it for its own scope-exit drop (see
+    // consumeTrackedRegister) - ownership has moved into this new slot, so the *old* owning scope
+    // must no longer drop it (that would be a real double-free once a plain value is
+    // structurally, unconditionally dropped - see emitStructDropHelpers). A harmless no-op if
+    // valueReg was never tracked in the first place (a fresh literal/call result, or a Borrowed
+    // value that was never added to any frame to begin with) - SSA register numbers are unique
+    // within a function, so there's no risk of this touching an unrelated binding.
+    void retainFieldValueIfNeeded(int valueReg,
+                                  const Expr& sourceExpr,
+                                  const std::string& fieldAxeaType,
+                                  Context& ctx);
+    // The actual mechanism above delegates to: searches every currently-active frame in
+    // ctx.liveScopeStack (innermost to outermost) for `reg` and erases it from whichever one
+    // holds it, so that frame's own scope-exit drop loop no longer touches it - the new owner
+    // (wherever `reg` gets pushed into next, if anywhere) is what becomes responsible for its
+    // eventual drop instead. Returns whether it was found/removed (unused by most callers, but
+    // meaningful for emitReturn's own self-aliasing handling - see its own comment).
+    bool consumeTrackedRegister(Context& ctx, int reg);
 
     // Best-effort resolution of a fixed array's compile-time-known element
     // count, used only to constant-fold `.length` (see docs/language/0031-arrays.md
@@ -346,6 +486,16 @@ private:
     // this codebase's passes each keep their own copy rather than sharing one), minus the
     // validation TypeChecker already performed on the whole program before IrGenerator ever runs.
     const EnumDecl& registerUnionType(const std::string& canonicalName);
+    // Shared<T> (the move-semantics work's own explicit, opt-in refcounting escape hatch) - same
+    // lazy/idempotent registration shape as registerUnionType above, but registers a real 2-field
+    // {i32 refcount, T value} StructDecl into structs_ instead of a synthetic EnumDecl into
+    // enums_ - Shared<T> has no tag/variants, it's structurally just a struct. `elementTypeName`
+    // is T's own bare struct/enum name (TypeChecker's ShareExpr case already guarantees T is
+    // Struct or Enum, so this is always a clean identifier, no further mangling needed - unlike
+    // a union's own '|'-separated member list). The mangled name is "Shared." + elementTypeName
+    // (dot instead of the angle brackets/generics syntax, mirroring mangleUnionTypeName's own
+    // "must be a legal LLVM identifier" reasoning).
+    const StructDecl& registerSharedType(const std::string& elementTypeName);
     // Best-effort resolution of an expression's own "simple" Axea type name (a primitive, or a
     // struct/enum's own name) - nullopt if it can't be determined. Used only to decide, at an
     // implicit-union-wrap boundary (assignment/return/call argument - see wrapForUnion), *which*
@@ -383,6 +533,9 @@ private:
     // comment) - a real declared EnumDecl's pointer is instead owned by Program::items, which
     // already outlives the generator.
     std::vector<std::unique_ptr<EnumDecl>> unionDecls_;
+    // Owns every synthetic Shared<T> StructDecl registerSharedType builds - same reasoning as
+    // unionDecls_ above, just for structs_ instead of enums_.
+    std::vector<std::unique_ptr<StructDecl>> sharedTypeDecls_;
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     // Modules (see docs/language/0066-modules.md) - bare/real extern name -> the module that
     // declared it ("" for a root-file extern). An extern's own `name` is never module-qualified
@@ -409,6 +562,43 @@ private:
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
         closureCaptureStructs_;
     int closureCounter_ = 0;
+    // Implicit function-reference-to-closure coercion (see docs/language/0067-closures.md and
+    // tryLowerFunctionRef) - one shared, always-empty captures struct type ("closure.captures
+    // .fnref", lazily registered into closureCaptureStructs_ on first use) since a bare function
+    // reference never captures anything; one trampoline per distinct function name (memoized here
+    // rather than synthesized fresh per reference site, unlike a real closure literal's own
+    // per-literal trampoline, since every reference to the same function needs an identical
+    // trampoline body).
+    std::string functionRefCapturesStruct_;
+    std::unordered_map<std::string, std::string> functionRefTrampolines_;
+    // Struct-typed closure parameters (see docs/language/0067-closures.md) - the two maps
+    // generate()'s own new optional parameters are stashed into for the duration of one
+    // generate() call, so lowerExpr's own ClosureExpr case (deep in the call tree, well past
+    // generate()'s own top-level scope) can still look a given closure literal's own per-param
+    // capability/region arrays up when it calls generateClosureTrampoline.
+    std::unordered_map<const ClosureExpr*, std::vector<Capability>> closureParamCapabilities_;
+    std::unordered_map<const ClosureExpr*, std::vector<Region>> closureParamRegions_;
+    // Real memory reclamation (structs/enums only) - the same per-function `regions` map
+    // generate()'s own top-level loop already receives as a parameter, stashed as a member so an
+    // ordinary call site (lowerExpr's own CallExpr case, reached from inside a *different*
+    // function's own body) can look up whether the *callee's* own param is Region::Owned - the
+    // exact same criterion generateFunction's own release logic already uses - and retain a
+    // struct/enum-typed argument before passing it, if so. Without this, a `take`-declared
+    // struct/enum param gets released for real at the callee's own exit with no matching retain
+    // at the call site, silently freeing memory a still-live caller-side binding (e.g. a
+    // top-level variable, later auto-printed) may still depend on.
+    std::unordered_map<std::string, std::vector<Region>> allFunctionRegions_;
+    // Self-referential closures (see docs/language/0067-closures.md) - set by lowerStmt's own
+    // AssignmentStmt case right before lowering a closure-literal RHS, consumed (read then
+    // immediately cleared, via std::exchange) by lowerExpr's own ClosureExpr case a few frames
+    // later - a narrow, deliberately ambient piece of state threaded this way rather than as a
+    // new parameter on every lowerExpr/lowerStmt signature between the two, mirroring
+    // TypeChecker::currentFunctionModule_'s identical "one well-scoped ambient field beats
+    // threading one more parameter through everything" convention. Always nullopt again by the
+    // time any *other* AssignmentStmt's own closure literal (nested inside this one's body, or
+    // anywhere else) is reached, since the consuming read happens before any further recursive
+    // lowering of this closure's own body.
+    std::optional<std::string> pendingSelfReferenceName_;
     // Stack of pre-loop scope snapshots, one per currently-open loop (top =
     // innermost). Pushed/popped by lowerLoop; read by
     // currentLoopCarriedDiff for BreakStmt/ContinueStmt.

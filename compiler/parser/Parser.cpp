@@ -151,13 +151,13 @@ std::string Parser::parseTypeNameAtom()
     if ((name.text == "slice" || name.text == "List" || name.text == "Set" ||
          name.text == "Stack" || name.text == "LinkedList" || name.text == "Deque" ||
          name.text == "Queue" || name.text == "PriorityQueue" || name.text == "SortedSet" ||
-         name.text == "Optional") &&
+         name.text == "Optional" || name.text == "Shared") &&
         match(TokenKind::Less))
     {
         const std::string elementType = parseTypeName();
         expect(TokenKind::Greater,
                "expected '>' after slice/List/Set/Stack/LinkedList/Deque/Queue/PriorityQueue/"
-               "SortedSet/Optional element type");
+               "SortedSet/Optional/Shared element type");
         return name.text + "<" + elementType + ">";
     }
 
@@ -1833,6 +1833,22 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
                                          std::to_string(args.size()));
             }
             return std::make_unique<SomeExpr>(std::move(args.front()));
+        }
+
+        // `Shared(value)` - the move-semantics work's own explicit refcounting escape hatch, same
+        // one-runtime-argument shape as Some(value) above.
+        if (current().text == "Shared" && peek().kind == TokenKind::LeftParen)
+        {
+            advance();
+            expect(TokenKind::LeftParen, "expected '(' after 'Shared'");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after Shared(...) argument");
+            if (args.size() != 1)
+            {
+                throw std::runtime_error("Shared(...) expects exactly 1 argument, got " +
+                                         std::to_string(args.size()));
+            }
+            return std::make_unique<ShareExpr>(std::move(args.front()));
         }
 
         // `Ok(value)`/`Err(value)` (see docs/language/0063-result.md) - same

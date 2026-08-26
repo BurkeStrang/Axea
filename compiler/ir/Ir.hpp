@@ -766,11 +766,26 @@ struct IrRegionExit final : IrInst
 {
 };
 
-// A struct-typed local at its owning block's exit, or an owned (`take`)
-// struct-typed parameter at function exit. Not move-aware: a value that was
-// itself taken/moved elsewhere still gets a Drop marker here (documented
-// limitation - see docs/language/0021-axea-ir.md).
+// A struct/enum-typed binding (local or param) at the end of its own lifetime - move semantics
+// (structs/enums only): single ownership is proven at compile time (see RegionChecker's
+// move-checking), so LlvmIrEmitter lowers this to a genuine, unconditional
+// `call void @axea.drop.<Name>(...)`, recursing into owned fields and freeing (see
+// emitStructRefcountHelpers) - no runtime refcount involved. IrGenerator only ever emits this for
+// a register that's still tracked in its owning scope's frame at the point of drop -
+// IrGenerator::consumeTrackedRegister is what removes a register from its frame the moment
+// ownership moves elsewhere (an assignment, a call argument, a field/collection store, a
+// match-arm destructure, a return), which is what keeps a moved-away value from being dropped
+// twice with no special-casing at any individual site.
 struct IrDrop final : IrInst
+{
+    int value;
+};
+
+// Not currently emitted for a plain struct/enum (move semantics needs no runtime refcount - see
+// IrDrop's own updated comment) - reserved for Shared<T>'s own explicit, opt-in refcounting, not
+// yet built. LlvmIrEmitter recognizes but no-ops this instruction until then (see its own
+// emitInstructions dispatch).
+struct IrRetain final : IrInst
 {
     int value;
 };

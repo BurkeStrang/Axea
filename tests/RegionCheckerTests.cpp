@@ -24,7 +24,9 @@ namespace
         capabilityChecker.check(program);
 
         RegionChecker regionChecker;
-        regionChecker.check(program, capabilityChecker.effectiveCapabilities());
+        regionChecker.check(program,
+                            capabilityChecker.effectiveCapabilities(),
+                            capabilityChecker.closureEffectiveCapabilities());
     }
 } // namespace
 
@@ -613,4 +615,29 @@ TEST("RegionChecker treats a .join() of a borrowed Array parameter as Owned - al
 {
     checkRegions("describe(nums: [i32; 4]) -> String { return nums.join(\",\") } "
                  "x = describe([1, 2, 3, 4])");
+}
+
+TEST("RegionChecker rejects a struct-typed closure parameter (borrowed, since its own body only "
+     "reads it) being returned directly out of the closure body - the same aliasing rejection a "
+     "real function's own borrowed struct param already gets (see "
+     "docs/language/0067-closures.md's own closureCapabilities_/closureRegions_)")
+{
+    EXPECT_THROWS(
+        checkRegions("struct Point { x: i32  y: i32 } "
+                     "run() -> Point { "
+                     "  identity: fn(Point) -> Point = fn(p: Point) -> Point { return p } "
+                     "  return identity(Point { x: 1, y: 2 }) "
+                     "} "
+                     "y = run()"));
+}
+
+TEST("RegionChecker accepts a `take`-declared struct-typed closure parameter being returned "
+     "directly - ownership genuinely transfers, so this isn't an aliasing violation")
+{
+    checkRegions("struct Point { x: i32  y: i32 } "
+                 "run() -> Point { "
+                 "  identity: fn(Point) -> Point = fn(take p: Point) -> Point { return p } "
+                 "  return identity(Point { x: 1, y: 2 }) "
+                 "} "
+                 "y = run()");
 }

@@ -2516,6 +2516,26 @@ TEST("Interpreter calls a closure-typed parameter - a higher-order function")
     EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 15);
 }
 
+TEST("Interpreter wraps a bare top-level function name into a real closure value at each of the "
+     "three boundaries that need it - call argument, declared-local assignment, and return (see "
+     "docs/language/0067-closures.md's implicit function-reference-to-closure coercion)")
+{
+    const std::string source = "double(x: i32) -> i32 { return x * 2 } "
+                               "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
+                               "getDouble() -> fn(i32) -> i32 { return double } "
+                               "run() -> i32 { "
+                               "  d: fn(i32) -> i32 = double "
+                               "  a = apply(double, 5) "
+                               "  b = d(7) "
+                               "  g = getDouble() "
+                               "  c = g(9) "
+                               "  return a + b + c "
+                               "} "
+                               "y = run()";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 42);
+}
+
 TEST("Interpreter's closure captures a struct-typed local by move, still readable through the "
      "captured copy after the closure is created")
 {
@@ -2528,4 +2548,49 @@ TEST("Interpreter's closure captures a struct-typed local by move, still readabl
                                "y = run()";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 7);
+}
+
+TEST("Interpreter computes a self-referential (recursive) closure correctly - no new syntax, "
+     "`f`'s own name resolves to the closure being constructed even from inside its own body "
+     "(see docs/language/0067-closures.md)")
+{
+    const std::string source = "run() -> i32 { "
+                               "  fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
+                               "    if n <= 1 { return 1 } "
+                               "    return n * fact(n - 1) "
+                               "  } "
+                               "  return fact(5) "
+                               "} "
+                               "y = run()";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 120);
+}
+
+TEST("Interpreter's self-referential closure also works with no declared type on its own "
+     "binding, and alongside an ordinary capture from the enclosing scope")
+{
+    const std::string source = "run() -> i32 { "
+                               "  base = 0 "
+                               "  fib = fn(n: i32) -> i32 { "
+                               "    if n <= 1 { return n + base } "
+                               "    return fib(n - 1) + fib(n - 2) "
+                               "  } "
+                               "  return fib(10) "
+                               "} "
+                               "y = run()";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 55);
+}
+
+TEST("Interpreter calls a closure with a real struct-typed *parameter* (as opposed to a capture) "
+     "- passed in fresh at each call, not captured at the point the literal was created (see "
+     "docs/language/0067-closures.md)")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "sum: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x + p.y } "
+                               "a = sum(Point { x: 3, y: 4 }) "
+                               "b = sum(Point { x: 10, y: 20 })";
+    auto results = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 7);
+    EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 30);
 }

@@ -1,5 +1,6 @@
 #include "llvmir/LlvmIrEmitter.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -19,6 +20,22 @@ namespace
         std::ostringstream oss;
         oss << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(16) << bits;
         return oss.str();
+    }
+
+    // A union type's own canonical name ("i32|str") uses '|' as declared in Axea source, but a
+    // struct/enum field's own stored type text (IrProgram::structs' second-of-pair) is never
+    // re-mangled the way IrGenerator's own llvmSafeTypeName already mangles it before using it
+    // as an actual `program.structs`/`program.enums` *key* (see IrGenerator.cpp's own comment on
+    // this at the union-flattening site) - so a union-typed struct field's stored text still
+    // reads "i32|str" even though the union's own registered entry lives under "i32.str". Own
+    // copy of the identical rename, per this codebase's "each pass owns its own walk"
+    // convention - used only by emitStructRefcountHelpers, to correctly recognize a union-typed
+    // field as (if the union's own alternatives happen to include a struct/enum) potentially
+    // needing recursive release.
+    std::string mangleUnionTypeName(std::string name)
+    {
+        std::replace(name.begin(), name.end(), '|', '.');
+        return name;
     }
 
     std::string llvmEscape(const std::string& text)
@@ -357,6 +374,20 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
         // got before it.
         const std::string elementName = axeaTypeName.substr(14, axeaTypeName.size() - 15);
         return "{i32, " + llvmType(elementName) + "*, i32}*";
+    }
+    if (axeaTypeName.starts_with("Shared<") && axeaTypeName.back() == '>')
+    {
+        // Shared<T> (the move-semantics work's own explicit refcounting escape hatch) - a real
+        // bug found while testing: unlike every other generic type string ever reaching this
+        // function (already resolved through IrGenerator's own mangleSharedTypeName by the time
+        // it gets here, in the common case), a raw *function parameter's* declared type text can
+        // still arrive here unmangled, straight from Parser::parseTypeName's own canonical output
+        // - '<'/'>' aren't legal LLVM identifier characters, so the naive fallback below would
+        // produce literally invalid IR text ("%Shared<Point>*"), causing an opaque
+        // structs_.at(...)-style lookup failure downstream once something tries to resolve that
+        // text back to a registered struct. Mirrors IrGenerator::registerSharedType's own exact
+        // mangling ("Shared." + T) so the two stay consistent.
+        return "%Shared." + axeaTypeName.substr(7, axeaTypeName.size() - 8) + "*";
     }
     return "%" + axeaTypeName + "*"; // struct type: always by pointer
 }
@@ -758,7 +789,16 @@ LlvmIrEmitter::registerClosureInstantiation(const std::vector<std::string>& para
     // The classic "fat pointer" closure representation - captures are hidden behind field 1's
     // own opaque i8*, so field 0's own function-pointer type only ever depends on the closure's
     // declared signature, never on what any one literal actually captures (see
-    // closureInstantiationIds_'s own comment).
+    // closureInstantiationIds_'s own comment). Field 2 (added for closure drop-lifecycle support)
+    // is the same "opaque, per-signature, dispatched dynamically" trick applied to *dropping* a
+    // closure: since every literal sharing this signature collapses onto the same
+    // %axea.Closure.<id> type regardless of what it actually captures, there is no static way to
+    // know - from the fat pointer's own LLVM type alone - which specific captures-struct shape a
+    // given value holds at runtime (the same reason field 0 can't be the trampoline's own *real*
+    // type either - see emitClosureNew's own comment on that). Field 2 is a per-literal
+    // drop-wrapper function pointer, populated at construction time by emitClosureNew, that knows
+    // exactly which real captures-struct type to bitcast back to and drop - the generic
+    // @axea.drop.<name> helper below (one per *signature*, not per literal) just calls through it.
     std::string fnPtrType = returnLlvmType + " (i8*";
     for (const auto& paramLlvmType : paramLlvmTypes)
     {
@@ -766,11 +806,38 @@ LlvmIrEmitter::registerClosureInstantiation(const std::vector<std::string>& para
     }
     fnPtrType += ")*";
 
-    closureTypeDeclsText_ << name << " = type { " << fnPtrType << ", i8* }\n";
+    closureTypeDeclsText_ << name << " = type { " << fnPtrType << ", i8*, void (i8*)* }\n";
     closureFnPtrTypeById_[id] = fnPtrType;
     closureReturnTypeById_[id] = returnLlvmType;
+    emitClosureDropHelper(name);
 
     return name;
+}
+
+void LlvmIrEmitter::emitClosureDropHelper(const std::string& closureTypeName)
+{
+    const std::string pointerType = closureTypeName + "*";
+    std::ostringstream body;
+    body << "define void @axea.drop." << closureTypeName.substr(1) << "(" << pointerType
+         << " %v) {\n";
+    body << "entry:\n";
+    body << "  %isnull = icmp eq " << pointerType << " %v, null\n";
+    body << "  br i1 %isnull, label %done, label %body\n";
+    body << "body:\n";
+    body << "  %dropFnPtr = getelementptr " << closureTypeName << ", " << pointerType
+         << " %v, i32 0, i32 2\n";
+    body << "  %dropFn = load void (i8*)*, void (i8*)** %dropFnPtr\n";
+    body << "  %capturesPtr = getelementptr " << closureTypeName << ", " << pointerType
+         << " %v, i32 0, i32 1\n";
+    body << "  %captures = load i8*, i8** %capturesPtr\n";
+    body << "  call void %dropFn(i8* %captures)\n";
+    body << "  %raw = bitcast " << pointerType << " %v to i8*\n";
+    body << "  call void @free(i8* %raw)\n";
+    body << "  br label %done\n";
+    body << "done:\n";
+    body << "  ret void\n";
+    body << "}\n";
+    structRefcountRuntimeText_ << "\n" << body.str();
 }
 
 bool LlvmIrEmitter::isClosureType(const std::string& type) const
@@ -2046,6 +2113,151 @@ void LlvmIrEmitter::emitStructToStringHelpers(const IrProgram& program)
     }
 }
 
+void LlvmIrEmitter::emitStructRefcountHelpers(const IrProgram& program)
+{
+    // Move semantics (structs/enums only) - single ownership is proven at compile time (see
+    // RegionChecker's move-checking) for every *plain* struct/enum, so those need no runtime
+    // refcount at all: @axea.drop.<Name> unconditionally recurses into owned fields and frees.
+    // The one exception is Shared<T> (a synthetic "Shared.<T>" struct - see
+    // IrGenerator::registerSharedType), the move-semantics work's own explicit, opt-in escape
+    // hatch for genuine multi-owner sharing - the *only* place left in the whole backend that
+    // still needs a real runtime counter, since a `.clone()` call deliberately creates a second,
+    // independently-valid reference to the same allocation. For a "Shared."-prefixed name this
+    // generates the classic counted pair (@axea.retain.<Name> increments; @axea.release.<Name>
+    // decrements and only frees at zero) instead of the plain unconditional @axea.drop.<Name>.
+    for (const auto& [name, fields] : program.structs)
+    {
+        const bool isShared = name.starts_with("Shared.");
+        const std::string structType = "%" + name;
+        const std::string pointerType = structType + "*";
+        const std::string dropFnName = isShared ? "axea.release." + name : "axea.drop." + name;
+
+        if (isShared)
+        {
+            std::ostringstream retainBody;
+            retainBody << "define void @axea.retain." << name << "(" << pointerType << " %v) {\n";
+            retainBody << "entry:\n";
+            retainBody << "  %isnull = icmp eq " << pointerType << " %v, null\n";
+            retainBody << "  br i1 %isnull, label %done, label %body\n";
+            retainBody << "body:\n";
+            retainBody << "  %rcPtr = getelementptr " << structType << ", " << pointerType
+                       << " %v, i32 0, i32 0\n";
+            retainBody << "  %rc = load i32, i32* %rcPtr\n";
+            retainBody << "  %rc2 = add i32 %rc, 1\n";
+            retainBody << "  store i32 %rc2, i32* %rcPtr\n";
+            retainBody << "  br label %done\n";
+            retainBody << "done:\n";
+            retainBody << "  ret void\n";
+            retainBody << "}\n";
+            structRefcountRuntimeText_ << "\n" << retainBody.str();
+        }
+
+        std::ostringstream dropBody;
+        dropBody << "define void @" << dropFnName << "(" << pointerType << " %v) {\n";
+        dropBody << "entry:\n";
+        dropBody << "  %isnull = icmp eq " << pointerType << " %v, null\n";
+        if (isShared)
+        {
+            // registerSharedType always puts refcount at field index 0, value at index 1 - a
+            // real, ordinary field, not a hidden one, unlike the old pre-Part-B scheme (see that
+            // function's own comment).
+            dropBody << "  br i1 %isnull, label %done, label %body\n";
+            dropBody << "body:\n";
+            dropBody << "  %rcPtr = getelementptr " << structType << ", " << pointerType
+                     << " %v, i32 0, i32 0\n";
+            dropBody << "  %rc = load i32, i32* %rcPtr\n";
+            dropBody << "  %rc2 = sub i32 %rc, 1\n";
+            dropBody << "  store i32 %rc2, i32* %rcPtr\n";
+            dropBody << "  %iszero = icmp eq i32 %rc2, 0\n";
+            dropBody << "  br i1 %iszero, label %free, label %done\n";
+        }
+        else
+        {
+            dropBody << "  br i1 %isnull, label %done, label %free\n";
+        }
+        dropBody << "free:\n";
+
+        int nextTmp = 0;
+        // A field whose own Axea type (union-demangled - see mangleUnionTypeName) is itself a
+        // registered struct/enum gets a recursive release; every other field type (primitive, a
+        // heap type this phase doesn't cover, or an Optional<Struct>/Result<Struct,E> payload)
+        // is skipped by construction - left un-decremented, matching this codebase's existing
+        // "leak, don't free" policy for what's out of scope.
+        if (const auto enumIt = program.enums.find(name); enumIt != program.enums.end())
+        {
+            // `name` is really a flattened `{i32 tag, <every variant's own fields
+            // concatenated>}` struct (see IrGenerator::generate) - tag-gated so only the
+            // *active* variant's own fields are ever read (an inactive variant's own fields are
+            // undef, never safe to touch).
+            dropBody << "  %tagPtr = getelementptr " << structType << ", " << pointerType
+                     << " %v, i32 0, i32 0\n";
+            dropBody << "  %tag = load i32, i32* %tagPtr\n";
+            dropBody << "  switch i32 %tag, label %freeDone [\n";
+            for (std::size_t vi = 0; vi < enumIt->second.size(); ++vi)
+            {
+                dropBody << "    i32 " << vi << ", label %variant" << vi << "\n";
+            }
+            dropBody << "  ]\n";
+
+            for (std::size_t vi = 0; vi < enumIt->second.size(); ++vi)
+            {
+                const auto& [variantName, fieldCount] = enumIt->second[vi];
+                dropBody << "variant" << vi << ":\n";
+                for (int fi = 0; fi < fieldCount; ++fi)
+                {
+                    const auto [fieldIndex, fieldLlvmType] =
+                        fieldIndexAndType(name, variantName + "_" + std::to_string(fi));
+                    const std::string fieldAxeaType =
+                        mangleUnionTypeName(fields[fieldIndex].second);
+                    if (!structs_.contains(fieldAxeaType) && !program.enums.contains(fieldAxeaType))
+                    {
+                        continue;
+                    }
+                    const std::string fieldPtr = "%t" + std::to_string(nextTmp++);
+                    const std::string fieldVal = "%t" + std::to_string(nextTmp++);
+                    dropBody << "  " << fieldPtr << " = getelementptr " << structType << ", "
+                             << pointerType << " %v, i32 0, i32 " << fieldIndex << "\n";
+                    dropBody << "  " << fieldVal << " = load " << fieldLlvmType << ", "
+                             << fieldLlvmType << "* " << fieldPtr << "\n";
+                    dropBody << "  call void @axea.drop." << fieldAxeaType << "(" << fieldLlvmType
+                             << " " << fieldVal << ")\n";
+                }
+                dropBody << "  br label %freeDone\n";
+            }
+            dropBody << "freeDone:\n";
+        }
+        else
+        {
+            for (std::size_t i = 0; i < fields.size(); ++i)
+            {
+                const auto& [fieldName, fieldTypeName] = fields[i];
+                const std::string fieldAxeaType = mangleUnionTypeName(fieldTypeName);
+                if (!structs_.contains(fieldAxeaType) && !program.enums.contains(fieldAxeaType))
+                {
+                    continue;
+                }
+                const std::string fieldLlvmType = llvmType(fieldTypeName);
+                const std::string fieldPtr = "%t" + std::to_string(nextTmp++);
+                const std::string fieldVal = "%t" + std::to_string(nextTmp++);
+                dropBody << "  " << fieldPtr << " = getelementptr " << structType << ", "
+                         << pointerType << " %v, i32 0, i32 " << i << "\n";
+                dropBody << "  " << fieldVal << " = load " << fieldLlvmType << ", " << fieldLlvmType
+                         << "* " << fieldPtr << "\n";
+                dropBody << "  call void @axea.drop." << fieldAxeaType << "(" << fieldLlvmType
+                         << " " << fieldVal << ")\n";
+            }
+        }
+
+        dropBody << "  %raw = bitcast " << pointerType << " %v to i8*\n";
+        dropBody << "  call void @free(i8* %raw)\n";
+        dropBody << "  br label %done\n";
+        dropBody << "done:\n";
+        dropBody << "  ret void\n";
+        dropBody << "}\n";
+        structRefcountRuntimeText_ << "\n" << dropBody.str();
+    }
+}
+
 std::string LlvmIrEmitter::registerCollectionToStrRuntime(const std::string& llvmType)
 {
     if (const auto it = collectionToStrFnByLlvmType_.find(llvmType);
@@ -2950,6 +3162,15 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             fctx.registerTypes[loop->dest] =
                 firstBreakValue != -1 ? typeOf(firstBreakValue, fctx) : "void";
         }
+        else if (const auto* retainInst = dynamic_cast<const IrRetain*>(inst.get()))
+        {
+            // `.clone()`'s own dest (see emitInstructions' own IrRetain case) - always the same
+            // pointer *type* as what it retained, just a distinct SSA register from it.
+            if (retainInst->dest != -1)
+            {
+                fctx.registerTypes[retainInst->dest] = typeOf(retainInst->value, fctx);
+            }
+        }
         // FieldSet, Return, Break, Continue, BorrowRead/BorrowWrite, Move,
         // RegionEnter/RegionExit, Drop: no dest.
     }
@@ -3027,6 +3248,9 @@ void LlvmIrEmitter::emitStringGlobals(std::ostringstream& out) const
 
 void LlvmIrEmitter::emitStructTypeDecls(std::ostringstream& out)
 {
+    // Move semantics (structs/enums only) - no hidden refcount field anymore (see
+    // emitStructRefcountHelpers's own updated comment): single ownership is proven at compile
+    // time, so a plain struct/enum's LLVM layout is exactly its own real fields, nothing more.
     for (const auto& [name, fields] : structs_)
     {
         out << "%" << name << " = type { ";
@@ -5298,6 +5522,10 @@ void LlvmIrEmitter::emitStructNew(const IrStructNew& structNew, FunctionContext&
         *fctx.out << "  store " << fieldLlvmType << " " << ref(fieldValueReg, fctx) << ", "
                   << fieldLlvmType << "* %" << fieldPtrReg << "\n";
     }
+
+    // Move semantics (structs/enums only) - no refcount field to initialize anymore (see
+    // emitStructTypeDecls's own updated comment); a fresh allocation just needs its real fields
+    // populated, which the loop above already did.
 }
 
 void LlvmIrEmitter::emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx)
@@ -5521,6 +5749,31 @@ void LlvmIrEmitter::emitClosureNew(const IrClosureNew& closureNew, FunctionConte
     *fctx.out << "  %" << capturesFieldPtrReg << " = getelementptr " << closureType << ", "
               << pointerType << " " << ref(closureNew.dest, fctx) << ", i32 0, i32 1\n";
     *fctx.out << "  store i8* %" << capturesI8Reg << ", i8** %" << capturesFieldPtrReg << "\n";
+
+    // Field 2: this literal's own drop-wrapper function pointer (see
+    // registerClosureInstantiation's own comment on why dropping a closure needs dynamic
+    // dispatch through this field, the same reasoning field 0's own real-vs-generic function
+    // pointer split already established). One small wrapper per literal, generated here since
+    // this is the one place that still knows the *real* captures-struct type - it just bitcasts
+    // the opaque i8* back and forwards into that struct's own already-generated @axea.drop.<Name>
+    // (a real struct, dropped exactly like any other - see emitStructRefcountHelpers).
+    const std::string capturesStructName = capturesType.substr(1, capturesType.size() - 2);
+    const std::string dropWrapperName = "axea.dropwrapper." + capturesStructName;
+    std::ostringstream wrapperBody;
+    wrapperBody << "define void @" << dropWrapperName << "(i8* %opaque) {\n";
+    wrapperBody << "entry:\n";
+    wrapperBody << "  %real = bitcast i8* %opaque to " << capturesType << "\n";
+    wrapperBody << "  call void @axea.drop." << capturesStructName << "(" << capturesType
+                << " %real)\n";
+    wrapperBody << "  ret void\n";
+    wrapperBody << "}\n";
+    structRefcountRuntimeText_ << "\n" << wrapperBody.str();
+
+    const int dropWrapperFieldPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dropWrapperFieldPtrReg << " = getelementptr " << closureType << ", "
+              << pointerType << " " << ref(closureNew.dest, fctx) << ", i32 0, i32 2\n";
+    *fctx.out << "  store void (i8*)* @" << dropWrapperName << ", void (i8*)** %"
+              << dropWrapperFieldPtrReg << "\n";
 }
 
 void LlvmIrEmitter::emitClosureCall(const IrClosureCall& closureCall, FunctionContext& fctx)
@@ -9712,20 +9965,15 @@ void LlvmIrEmitter::emitLoop(const IrLoop& loop, FunctionContext& fctx)
         return;
     }
 
-    // Re-read every carried slot once more here so code *after* the loop
-    // (which references each carried variable via its body-end Axea
-    // register) sees the correct final value, regardless of which path
-    // reached the exit (natural condition-false, or any break) - the slot is
-    // always current by the time control gets here.
-    for (const auto& [preLoopReg, bodyEndReg, slotReg] : loopCtxFinal.carriedSlots)
-    {
-        const std::string llvmTypeStr = typeOf(preLoopReg, fctx);
-        const int loadReg = allocateRegister(fctx);
-        *fctx.out << "  %" << loadReg << " = load " << llvmTypeStr << ", " << llvmTypeStr << "* %"
-                  << slotReg << "\n";
-        fctx.llvmRegisterOf[bodyEndReg] = loadReg;
-    }
-
+    // The break-value phi (if any) must come *before* the carried-slot reads just below: LLVM
+    // requires every phi node in a basic block to appear first, before any non-phi instruction -
+    // emitting the carried-slot loads first (as this used to) produces a phi preceded by a load
+    // in the same block, which is invalid IR that clang's own verifier only catches at codegen
+    // time when running without the (deliberately disabled, see 0021-axea-ir.md) IR verifier.
+    // The two are independent (the phi's own values were already captured as resolved LLVM
+    // value-reference strings while lowering the loop body, via IrBreak's own handling - nothing
+    // here depends on the carried-slot reads below), so reordering is purely cosmetic to LLVM's
+    // own well-formedness rule, not a behavior change.
     if (loop.dest != -1 && !loopCtxFinal.breakValues.empty())
     {
         // Generalizes emitBranch's merge-phi to however many break sites
@@ -9738,6 +9986,20 @@ void LlvmIrEmitter::emitLoop(const IrLoop& loop, FunctionContext& fctx)
                       << loopCtxFinal.breakValues[i].second << " ]";
         }
         *fctx.out << "\n";
+    }
+
+    // Re-read every carried slot once more here so code *after* the loop
+    // (which references each carried variable via its body-end Axea
+    // register) sees the correct final value, regardless of which path
+    // reached the exit (natural condition-false, or any break) - the slot is
+    // always current by the time control gets here.
+    for (const auto& [preLoopReg, bodyEndReg, slotReg] : loopCtxFinal.carriedSlots)
+    {
+        const std::string llvmTypeStr = typeOf(preLoopReg, fctx);
+        const int loadReg = allocateRegister(fctx);
+        *fctx.out << "  %" << loadReg << " = load " << llvmTypeStr << ", " << llvmTypeStr << "* %"
+                  << slotReg << "\n";
+        fctx.llvmRegisterOf[bodyEndReg] = loadReg;
     }
 }
 
@@ -10339,7 +10601,80 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             }
             return true;
         }
-        // BorrowRead/BorrowWrite/Move/RegionEnter/RegionExit/Drop: informational
+        // Move semantics (structs/enums only) - Drop is the one exception to the
+        // "informational only" comment just below: lowered to a genuine call to either the
+        // unconditional @axea.drop.<Name> (a plain struct/enum) or the counted
+        // @axea.release.<Name> (a "Shared."-prefixed synthetic wrapper - see
+        // emitStructRefcountHelpers). Anything not a named-struct-pointer-typed register (a
+        // primitive, or a heap type this phase doesn't cover) is silently skipped - IrGenerator
+        // only ever emits this for a struct/enum-typed value, but the check is cheap
+        // defense-in-depth regardless.
+        if (const auto* dropInst = dynamic_cast<const IrDrop*>(inst.get()))
+        {
+            const std::string valueType = typeOf(dropInst->value, fctx);
+            if (isClosureType(valueType))
+            {
+                // Closure drop lifecycle - see registerClosureInstantiation/emitClosureDropHelper.
+                // valueType is the pointer form ("%axea.Closure.<id>*"); strip both the leading
+                // '%' and the trailing '*' to match the helper's own generated name exactly
+                // (emitClosureDropHelper's own closureTypeName parameter never had a trailing '*'
+                // to begin with).
+                const std::string closureTypeName = valueType.substr(1, valueType.size() - 2);
+                *fctx.out << "  call void @axea.drop." << closureTypeName << "(" << valueType << " "
+                          << ref(dropInst->value, fctx) << ")\n";
+            }
+            else if (isNamedStructPointerType(valueType))
+            {
+                const std::string name = structNameFromPointerType(valueType);
+                if (structs_.contains(name))
+                {
+                    const std::string fnName =
+                        name.starts_with("Shared.") ? "axea.release." + name : "axea.drop." + name;
+                    *fctx.out << "  call void @" << fnName << "(" << valueType << " "
+                              << ref(dropInst->value, fctx) << ")\n";
+                }
+            }
+            continue;
+        }
+        // IrRetain: only ever emitted for a Shared<T> value (`.clone()` - see
+        // IrGenerator's own MethodCallExpr case) - a plain struct/enum needs no runtime refcount
+        // at all (move semantics - see emitStructRefcountHelpers's own comment), so this silently
+        // no-ops for anything that isn't a "Shared."-prefixed name (defense-in-depth, matching
+        // IrDrop's own identical check just above - should never actually happen in a
+        // well-formed program).
+        if (const auto* retainInst = dynamic_cast<const IrRetain*>(inst.get()))
+        {
+            const std::string valueType = typeOf(retainInst->value, fctx);
+            if (isNamedStructPointerType(valueType))
+            {
+                const std::string name = structNameFromPointerType(valueType);
+                if (name.starts_with("Shared.") && structs_.contains(name))
+                {
+                    *fctx.out << "  call void @axea.retain." << name << "(" << valueType << " "
+                              << ref(retainInst->value, fctx) << ")\n";
+                }
+            }
+            // `.clone()` deliberately points at the exact same allocation as its receiver -
+            // bumping the refcount above is the only thing that actually changes. But every
+            // existing "this register's value is already tracked for drop, untrack it on reuse"
+            // mechanism (IrGenerator::consumeTrackedRegister, keyed purely by register identity)
+            // would otherwise conflate the clone's own drop obligation with the original's,
+            // silently losing one of the two releases a genuine second owner needs (confirmed via
+            // a real leak: examples/shared.ax's `copy = original.clone()` produced only one
+            // @axea.release call for two live handles until this fix). A zero-offset GEP gives
+            // `dest` a genuinely distinct SSA register carrying the identical pointer value, so
+            // every downstream register-identity-based check sees two independent owners, with no
+            // special-casing needed at any individual consuming-use site.
+            if (retainInst->dest != -1)
+            {
+                const std::string pointeeType = valueType.substr(0, valueType.size() - 1);
+                const int destReg = defineRegister(retainInst->dest, fctx);
+                *fctx.out << "  %" << destReg << " = getelementptr " << pointeeType << ", "
+                          << valueType << " " << ref(retainInst->value, fctx) << ", i32 0\n";
+            }
+            continue;
+        }
+        // BorrowRead/BorrowWrite/Move/RegionEnter/RegionExit: informational
         // only in Axea IR (docs/language/0021-axea-ir.md) - no LLVM instruction.
     }
     return false;
@@ -11521,6 +11856,10 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // so the *timing* doesn't actually matter here, only that it's not
     // forgotten).
     emitStructToStringHelpers(program);
+    // Move semantics (structs/enums only) - `@axea.drop.<Name>` for every struct/enum,
+    // unconditionally and upfront, same timing reasoning as emitStructToStringHelpers just above
+    // (writes into structRefcountRuntimeText_ directly, snapshotted only at the very end).
+    emitStructRefcountHelpers(program);
     std::ostringstream mainOut;
     emitMain(program, mainOut);
 
@@ -11546,6 +11885,10 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     out << resultTypeDeclsText_.str();
     out << closureTypeDeclsText_.str();
     out << "\ndeclare i8* @malloc(i64)\n";
+    // Move semantics (structs/enums only) - @axea.drop.<Name> calls this unconditionally once a
+    // struct/enum instance's own last owning reference goes out of scope (see
+    // emitStructRefcountHelpers).
+    out << "declare void @free(i8*)\n";
     out << "declare i32 @printf(i8*, ...)\n";
     // String<>'s own construction/append need a runtime str length (see
     // docs/language/0042-string.md) - str (i8*) has no length field of its
@@ -11655,6 +11998,7 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // docs/language/Axea_Printing_Formatting.md).
     out << toStrRuntimeText_.str();
     out << printRuntimeText_.str();
+    out << structRefcountRuntimeText_.str();
     out << helpers.str();
     out << mainOut.str();
 

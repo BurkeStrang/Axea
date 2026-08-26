@@ -3,6 +3,7 @@
 #include "ast/Expr.hpp"
 #include "ast/Stmt.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,11 @@ public:
     void check(const Program& program);
 
     const std::unordered_map<std::string, std::vector<Capability>>& effectiveCapabilities() const;
+    // Struct-typed closure parameters (see docs/language/0067-closures.md) - same data as
+    // effectiveCapabilities() above, but keyed by each closure literal's own identity (a closure
+    // has no name of its own to key a std::string map by, unlike a real FunctionDecl).
+    const std::unordered_map<const ClosureExpr*, std::vector<Capability>>&
+    closureEffectiveCapabilities() const;
 
 private:
     void inferExpr(const Expr& expr, const FunctionDecl& function, bool& changed);
@@ -57,7 +63,24 @@ private:
     static std::optional<std::size_t> rootParamIndex(const Expr& expr,
                                                      const FunctionDecl& function);
 
+    // Struct-typed closure parameters (see docs/language/0067-closures.md and that doc's own
+    // guiding rule: "reuse the struct machinery until the representation genuinely can't be a
+    // struct") - mints a synthetic FunctionDecl for `closureExpr` the first time it's seen
+    // (memoized in closureFunctions_/closureOrder_ thereafter, keyed by the literal's own
+    // identity since it has no name), registered into the *same* functions_/inferred_ maps a real
+    // top-level function already uses - letting every other piece of this checker (raise,
+    // effectiveOrInferred, the fixpoint loop's own per-function walk, the final declared-vs-
+    // inferred merge, checkMovesInExpr's own driver loop) work completely unchanged, with zero
+    // closure-specific logic of their own. `closureExpr.body` is walked directly by the caller
+    // (inferExpr's own ClosureExpr case, exactly like `check()`'s own top-level loop walks a real
+    // `function->body`) - the synthetic FunctionDecl's own `body` field is always null, since
+    // nothing ever reads it.
+    const FunctionDecl& registerClosure(const ClosureExpr& closureExpr);
+
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     std::unordered_map<std::string, std::vector<Capability>> inferred_;
     std::unordered_map<std::string, std::vector<Capability>> effective_;
+    std::unordered_map<const ClosureExpr*, std::unique_ptr<FunctionDecl>> closureFunctions_;
+    std::unordered_map<const ClosureExpr*, std::vector<Capability>> closureEffective_;
+    int closureCounter_ = 0;
 };

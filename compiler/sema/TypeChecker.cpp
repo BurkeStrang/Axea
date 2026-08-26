@@ -479,6 +479,7 @@ std::string typeName(const Type& type)
             return "[" + type.elementTypeName + "; " + std::to_string(type.arraySize) + "]";
         case TypeKind::Slice: return "slice<" + type.elementTypeName + ">";
         case TypeKind::Optional: return "Optional<" + type.elementTypeName + ">";
+        case TypeKind::Shared: return "Shared<" + type.elementTypeName + ">";
         case TypeKind::Result:
             return "Result<" + type.elementTypeName + "," + type.valueTypeName + ">";
         case TypeKind::List: return "List<" + type.elementTypeName + ">";
@@ -609,6 +610,60 @@ bool TypeChecker::isUnionMember(const Type& valueType, const Type& targetType) c
     return false;
 }
 
+bool TypeChecker::isFunctionRefAssignableToClosure(const Expr& expr,
+                                                   const Type& targetType,
+                                                   TypeEnv& env) const
+{
+    if (targetType.kind != TypeKind::Closure)
+    {
+        return false;
+    }
+    const auto* name = dynamic_cast<const NameExpr*>(&expr);
+    if (!name || env.contains(name->name))
+    {
+        return false;
+    }
+    const auto it = functions_.find(name->name);
+    if (it == functions_.end())
+    {
+        return false;
+    }
+
+    const auto [paramTypeNames, returnTypeName] = closureParamAndReturnTypes(targetType.structName);
+    if (it->second->params.size() != paramTypeNames.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < paramTypeNames.size(); ++i)
+    {
+        if (typeName(resolveType(it->second->params[i].type)) != paramTypeNames[i])
+        {
+            return false;
+        }
+    }
+    const std::string actualReturn =
+        it->second->returnType ? typeName(resolveType(*it->second->returnType)) : "unit";
+    return actualReturn == returnTypeName;
+}
+
+Type TypeChecker::closureSignatureType(const ClosureExpr& closureExpr) const
+{
+    std::string paramsCsv;
+    for (std::size_t i = 0; i < closureExpr.params.size(); ++i)
+    {
+        if (i > 0)
+        {
+            paramsCsv += ",";
+        }
+        paramsCsv += typeName(resolveType(closureExpr.params[i].type));
+    }
+    const Type returnType = closureExpr.returnType ? resolveType(*closureExpr.returnType) : kUnit;
+    Type result{};
+    result.kind = TypeKind::Closure;
+    result.structName = "fn(" + paramsCsv + ")->" + typeName(returnType);
+    return result;
+}
+
 Type TypeChecker::checkCallArguments(const std::string& calleeDisplayName,
                                      const std::vector<Param>& params,
                                      const std::optional<std::string>& returnType,
@@ -626,9 +681,19 @@ Type TypeChecker::checkCallArguments(const std::string& calleeDisplayName,
 
     for (std::size_t i = 0; i < arguments.size(); ++i)
     {
+        const Type paramType = resolveType(params[i].type);
+
+        // A bare top-level function name, used where a closure type is expected (see
+        // docs/language/0067-closures.md) - checked before the generic checkExpr call just
+        // below, which would otherwise throw "undefined variable" trying to resolve a bare
+        // function name as if it were bound to a value.
+        if (isFunctionRefAssignableToClosure(*arguments[i], paramType, env))
+        {
+            continue;
+        }
+
         const Type argType =
             checkExpr(*arguments[i], env, expectedReturnType, currentLoopBreakTypes);
-        const Type paramType = resolveType(params[i].type);
         // An array of *any* size implicitly converts to a slice of the
         // same element type at a call boundary - the whole point of
         // slice<T> (docs/language/0032-slices.md). An existing slice
@@ -709,6 +774,18 @@ Type TypeChecker::resolveType(const std::string& name) const
         const Type elementType = resolveType(elementName);
 
         return arrayLikeType(TypeKind::Optional, typeName(elementType));
+    }
+
+    // "Shared<elem>" - the canonical form Parser::parseTypeName always produces (see the
+    // move-semantics RFC). No struct/enum restriction enforced here (resolveType is a pure
+    // syntactic resolver, reused everywhere a type string appears) - that check lives in
+    // ShareExpr's own checkExpr case, the one place a Shared<T> value can actually be constructed.
+    if (name.starts_with("Shared<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(7, name.size() - 8);
+        const Type elementType = resolveType(elementName);
+
+        return arrayLikeType(TypeKind::Shared, typeName(elementType));
     }
 
     // "Result<T,E>" - the canonical form Parser::parseTypeName always
@@ -1471,6 +1548,32 @@ void TypeChecker::checkStmt(const Stmt& stmt,
             }
             valueType = declared;
         }
+        // A bare top-level function name, used where a closure type is declared (see
+        // docs/language/0067-closures.md) - checked before the generic checkExpr fallback below,
+        // which would otherwise throw "undefined variable" trying to resolve a bare function
+        // name as if it were bound to a value.
+        else if (assignment->declaredType &&
+                 isFunctionRefAssignableToClosure(
+                     *assignment->value, resolveType(*assignment->declaredType), env))
+        {
+            valueType = resolveType(*assignment->declaredType);
+        }
+        // Self-referential closures (see docs/language/0067-closures.md) - `f`'s own signature
+        // is knowable directly from the closure literal itself (its own param/return type text),
+        // independent of its own body, so it can be pre-bound in `env` *before* checkExpr checks
+        // that body below - letting a self-call like `f(n-1)` inside the body resolve through
+        // the exact same "closure-typed local" call path every other closure call already goes
+        // through, with no new call-resolution logic needed anywhere. Only when `value` is
+        // *directly* a closure literal (not, say, an if-expression that might produce one) -
+        // matches this whole feature's existing "closure-typed local" detection, which is
+        // likewise keyed off a value's static type, not its runtime shape.
+        else if (const auto* closureExpr =
+                     dynamic_cast<const ClosureExpr*>(assignment->value.get()))
+        {
+            env.define(assignment->name, closureSignatureType(*closureExpr));
+            valueType =
+                checkExpr(*assignment->value, env, expectedReturnType, currentLoopBreakTypes);
+        }
         else
         {
             valueType =
@@ -1555,6 +1658,13 @@ void TypeChecker::checkStmt(const Stmt& stmt,
                                          " but function's own Result Err type is " +
                                          expectedReturnType->valueTypeName);
             }
+            valueType = *expectedReturnType;
+        }
+        // A bare top-level function name, used where a closure-typed return is declared (see
+        // docs/language/0067-closures.md) - checked before the generic checkExpr fallback below.
+        else if (returnStmt->value &&
+                 isFunctionRefAssignableToClosure(*returnStmt->value, *expectedReturnType, env))
+        {
             valueType = *expectedReturnType;
         }
         else
@@ -1857,12 +1967,21 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  "' (did you mean 'length'?)");
     }
 
-    if (objectType.kind != TypeKind::Struct)
+    // Shared<T> auto-derefs to T's own fields (see the move-semantics RFC's own "opaque wrapper,
+    // transparent field/method access" design) - re-resolve to the wrapped type and fall through
+    // into the exact same struct-field lookup below unchanged. ShareExpr's own checkExpr case
+    // already guarantees the wrapped type is Struct or Enum; only the Struct case actually has
+    // fields to expose here (an Enum's own fields only make sense behind a `match`, not a bare
+    // `.field`, exactly like a plain (unwrapped) enum value already works).
+    const Type derefedType =
+        objectType.kind == TypeKind::Shared ? resolveType(objectType.elementTypeName) : objectType;
+
+    if (derefedType.kind != TypeKind::Struct)
     {
-        throw std::runtime_error("field access on non-struct type " + typeName(objectType));
+        throw std::runtime_error("field access on non-struct type " + typeName(derefedType));
     }
 
-    const StructDecl& decl = *structs_.at(objectType.structName);
+    const StructDecl& decl = *structs_.at(derefedType.structName);
     for (const auto& declaredField : decl.fields)
     {
         if (declaredField.name == field)
@@ -1870,7 +1989,8 @@ Type TypeChecker::checkFieldType(const Expr& object,
             return resolveType(declaredField.type);
         }
     }
-    throw std::runtime_error("struct '" + objectType.structName + "' has no field '" + field + "'");
+    throw std::runtime_error("struct '" + derefedType.structName + "' has no field '" + field +
+                             "'");
 }
 
 Type TypeChecker::checkExpr(const Expr& expr,
@@ -2261,6 +2381,29 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
         const Type objectType =
             checkExpr(*methodCall->object, env, expectedReturnType, currentLoopBreakTypes);
+
+        // `.clone()` (the move-semantics work's own Shared<T> RFC) - the one method Shared<T>
+        // itself defines. Checked before the per-kind dispatch chain, same reasoning as
+        // `.parse`/`.to_cstr` just below: Shared<T> has no TypeKind-keyed "new" dispatch section
+        // of its own to join (it's only ever constructed via Shared(x), never a `.method()` call).
+        // Bumps the refcount and returns a second, independently-valid handle to the exact same
+        // allocation - the sole way to get more than one Shared<T> handle (plain assignment is a
+        // move, like everywhere else in the language).
+        if (objectType.kind == TypeKind::Shared)
+        {
+            if (methodCall->method != "clone")
+            {
+                throw std::runtime_error("Shared<" + objectType.elementTypeName +
+                                         "> has no method '" + methodCall->method +
+                                         "' (did you mean 'clone'?)");
+            }
+            if (!methodCall->arguments.empty())
+            {
+                throw std::runtime_error("'clone' expects 0 arguments, got " +
+                                         std::to_string(methodCall->arguments.size()));
+            }
+            return objectType;
+        }
 
         // `.parse<T>()` (see docs/language/0046-generic-methods.md) - the
         // first generic method call in this codebase, checked before the
@@ -3340,6 +3483,18 @@ Type TypeChecker::checkExpr(const Expr& expr,
         return arrayLikeType(TypeKind::Optional, typeName(payloadType));
     }
 
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        const Type payloadType =
+            checkExpr(*shareExpr->value, env, expectedReturnType, currentLoopBreakTypes);
+        if (payloadType.kind != TypeKind::Struct && payloadType.kind != TypeKind::Enum)
+        {
+            throw std::runtime_error("Shared<T> requires a struct or enum type, found " +
+                                     typeName(payloadType));
+        }
+        return arrayLikeType(TypeKind::Shared, typeName(payloadType));
+    }
+
     if (dynamic_cast<const NoneExpr*>(&expr))
     {
         // A bare `None` carries no expression to synthesize a payload type
@@ -3533,20 +3688,11 @@ Type TypeChecker::checkExpr(const Expr& expr,
         paramTypeNames.reserve(closureExpr->params.size());
         for (const auto& param : closureExpr->params)
         {
+            // Struct-typed closure params (see docs/language/0067-closures.md) - CapabilityChecker
+            // gives each closure literal a synthetic FunctionDecl of its own, reusing its entire
+            // per-top-level-function read/write/take inference machinery unchanged (see that
+            // doc's own Known Imprecision entry for this).
             const Type paramType = resolveType(param.type);
-            // Struct-typed closure params are out of scope this phase (see
-            // docs/language/0067-closures.md's own Known Imprecision) - CapabilityChecker's own
-            // read/write/take inference is keyed per top-level FunctionDecl name, and a closure
-            // is anonymous; extending that machinery to cover it is deliberately deferred rather
-            // than half-built. A *captured* struct-typed local is unaffected by this restriction
-            // - it's move-tracked the ordinary way, not inference-tracked.
-            if (paramType.kind == TypeKind::Struct)
-            {
-                throw std::runtime_error(
-                    "closure parameter '" + param.name + "' has struct type " +
-                    typeName(paramType) +
-                    " - struct-typed closure parameters aren't supported this phase");
-            }
             closureEnv.define(param.name, paramType);
             paramTypeNames.push_back(typeName(paramType));
         }
@@ -3562,19 +3708,7 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      " on all paths (did you forget 'return'?)");
         }
 
-        std::string paramsCsv;
-        for (std::size_t i = 0; i < paramTypeNames.size(); ++i)
-        {
-            if (i > 0)
-            {
-                paramsCsv += ",";
-            }
-            paramsCsv += paramTypeNames[i];
-        }
-        Type result{};
-        result.kind = TypeKind::Closure;
-        result.structName = "fn(" + paramsCsv + ")->" + typeName(expectedReturn);
-        return result;
+        return closureSignatureType(*closureExpr);
     }
 
     throw std::runtime_error("unsupported expression");

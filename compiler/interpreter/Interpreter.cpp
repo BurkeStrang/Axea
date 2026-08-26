@@ -1047,8 +1047,36 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         // `n = n + 1` needs to actually update the outer `n` the condition
         // checks, not shadow a throwaway per-iteration copy (see
         // docs/language/0028-loops.md).
-        Value value = evaluate(*assignment->value, env);
-        if (assignment->declaredType)
+        // A bare top-level function name, used where a closure type is declared (see
+        // docs/language/0067-closures.md) - checked before evaluate(), which would otherwise
+        // throw "undefined variable" trying to look up a bare function name in the environment.
+        std::optional<Value> functionRef = tryWrapFunctionRef(*assignment->value, env);
+        Value value;
+        if (functionRef)
+        {
+            value = std::move(*functionRef);
+        }
+        else if (dynamic_cast<const ClosureExpr*>(assignment->value.get()))
+        {
+            // Self-referential closures (see docs/language/0067-closures.md) - evaluate() below
+            // is unchanged; this just *also* captures `assignment->name` as a reference to the
+            // very instance just constructed, so a closure literal assigned directly to a name
+            // can always call/return itself by that name. Added *after* construction rather than
+            // taught to evaluate()'s own free-variable scan: that scan structurally can never
+            // discover a self-*call* on its own (`f(x)`'s own `f` is a CallExpr's plain-string
+            // `callee` field, never a NameExpr node the scan would ever see - it only ever finds
+            // a self-*reference used as a value*, e.g. `return f`).
+            value = evaluate(*assignment->value, env);
+            if (const auto* instance = std::get_if<std::shared_ptr<ClosureInstance>>(&value))
+            {
+                (*instance)->captures[assignment->name] = value;
+            }
+        }
+        else
+        {
+            value = evaluate(*assignment->value, env);
+        }
+        if (!functionRef && assignment->declaredType)
         {
             value = wrapForUnion(std::move(value), *assignment->declaredType);
         }
@@ -1065,8 +1093,14 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
 
     if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
     {
-        Value value =
-            returnStmt->value ? evaluate(*returnStmt->value, env) : Value{std::monostate{}};
+        // A bare top-level function name, used where a closure-typed return is declared (see
+        // docs/language/0067-closures.md) - checked before evaluate(), which would otherwise
+        // throw "undefined variable" trying to look up a bare function name in the environment.
+        std::optional<Value> functionRef =
+            returnStmt->value ? tryWrapFunctionRef(*returnStmt->value, env) : std::nullopt;
+        Value value = functionRef         ? std::move(*functionRef)
+                      : returnStmt->value ? evaluate(*returnStmt->value, env)
+                                          : Value{std::monostate{}};
         throw ReturnSignal{std::move(value)};
     }
 
@@ -1408,7 +1442,13 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         args.reserve(call->arguments.size());
         for (std::size_t i = 0; i < call->arguments.size(); ++i)
         {
-            Value argValue = evaluate(*call->arguments[i], env);
+            // A bare top-level function name, used where a closure-typed parameter is declared
+            // (see docs/language/0067-closures.md) - checked before evaluate(), which would
+            // otherwise throw "undefined variable" trying to look up a bare function name in the
+            // environment.
+            std::optional<Value> functionRef = tryWrapFunctionRef(*call->arguments[i], env);
+            Value argValue =
+                functionRef ? std::move(*functionRef) : evaluate(*call->arguments[i], env);
             // Implicit array -> slice conversion at the call boundary - the
             // whole point of slice<T> (docs/language/0032-slices.md). An
             // argument that's already a slice (forwarding to another slice
@@ -1506,6 +1546,16 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         }
 
         auto objectValue = evaluate(*methodCall->object, env);
+
+        // `.clone()` (Shared<T>'s explicit opt-in sharing) - the interpreter's own struct/enum
+        // representation is already std::shared_ptr-backed, so
+        // a second handle to the same instance is exactly what returning the same shared_ptr
+        // gives; no separate refcount-bump logic is needed here the way the compiled backend's
+        // own IrRetain-based .clone() needs.
+        if (methodCall->method == "clone")
+        {
+            return objectValue;
+        }
 
         // `.parse<T>()` (see docs/language/0046-generic-methods.md and
         // docs/language/0052-optional.md) - the first generic method call
@@ -2685,6 +2735,15 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return instance;
     }
 
+    if (const auto* shareExpr = dynamic_cast<const ShareExpr*>(&expr))
+    {
+        // Shared<T>'s explicit opt-in sharing - the interpreter's own struct/enum representation
+        // is already std::shared_ptr-backed (genuinely reference-shared, exactly the semantics
+        // Shared<T> gives the compiled backend), so wrapping is a pure no-op here: evaluating the
+        // inner value already produces the shared handle Shared<T> represents.
+        return evaluate(*shareExpr->value, env);
+    }
+
     throw std::runtime_error("unsupported expression");
 }
 
@@ -2972,8 +3031,33 @@ void Interpreter::collectReferencedNames(const Stmt& stmt, std::unordered_set<st
     // ContinueStmt: nothing to collect.
 }
 
+std::optional<Value> Interpreter::tryWrapFunctionRef(const Expr& valueExpr,
+                                                     const Environment& env) const
+{
+    const auto* name = dynamic_cast<const NameExpr*>(&valueExpr);
+    if (!name || env.contains(name->name))
+    {
+        return std::nullopt;
+    }
+    const auto it = functions_.find(name->name);
+    if (it == functions_.end())
+    {
+        return std::nullopt;
+    }
+    auto instance = std::make_shared<ClosureInstance>();
+    instance->wrappedFunction = it->second;
+    return Value{instance};
+}
+
 Value Interpreter::callClosure(const ClosureInstance& instance, std::vector<Value> args)
 {
+    // A wrapped top-level function reference (see docs/language/0067-closures.md) - no closure
+    // body/captures of its own, just forward straight into the real function.
+    if (instance.wrappedFunction)
+    {
+        return callFunction(*instance.wrappedFunction, std::move(args));
+    }
+
     Environment env; // no parent - captures are explicit (already snapshotted), not looked up
                      // through a live lexical chain
     for (const auto& [name, value] : instance.captures)

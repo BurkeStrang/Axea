@@ -1,0 +1,43 @@
+// Real sharing - more than one live handle to the same allocation - is the one
+// case that genuinely needs a runtime refcount (see ownership.ax for the default,
+// refcount-free case). Shared<T> is the explicit, opt-in way to ask for it:
+// plain structs never get this cost unless a program writes `Shared<T>` itself.
+
+struct Counter
+{
+    count: i32
+}
+
+// A borrowed Shared<Counter> costs nothing extra to read through - only
+// `.clone()` touches the refcount.
+read_count(sc: Shared<Counter>) -> i32
+{
+    return sc.count
+}
+
+run() -> i32
+{
+    // Allocates { refcount: 1, value: Counter { count: 42 } } on the heap.
+    original = Shared(Counter { count: 42 })
+
+    // The only way to get a second handle to the same allocation: bumps the
+    // refcount to 2 and returns a second, independently-valid Shared<Counter>.
+    // Plain assignment would instead be an ordinary move, like everywhere else
+    // in the language - `.clone()` is what makes sharing explicit here.
+    copy = original.clone()
+
+    a = read_count(original)
+    b = read_count(copy)
+    return a + b
+}
+
+total = run()
+print(total)
+
+// `original` and `copy` both go out of scope at the end of run(): the first
+// drop decrements the refcount to 1 and stops there; only the second drop sees
+// it reach 0 and actually frees the Counter. The whole program above emits
+// exactly one @axea.retain call (from .clone()) and exactly one @axea.release
+// call (from the last of the two drops seeing refcount reach zero) - compare
+// that to ownership.ax, which emits none at all for the exact same kind of
+// struct usage, because nothing there is ever aliased in the first place.
