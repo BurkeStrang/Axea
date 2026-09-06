@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
@@ -16,6 +17,7 @@ namespace
         Lexer lexer(source);
         Parser parser(lexer.lex());
         auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
 
         TypeChecker typeChecker;
         typeChecker.check(program);
@@ -640,4 +642,24 @@ TEST("RegionChecker accepts a `take`-declared struct-typed closure parameter bei
                  "  return identity(Point { x: 1, y: 2 }) "
                  "} "
                  "y = run()");
+}
+
+TEST("RegionChecker treats a primitive-typed generic struct field as owned, freely returnable "
+     "from a borrowed parameter - substitution feeds move-tracking exactly like a plain field")
+{
+    checkRegions("struct Box<T> { value: T } "
+                 "get_value(box: Box<i32>) -> i32 { return box.value } "
+                 "b = Box<i32> { value: 5 } "
+                 "n = get_value(b)");
+}
+
+TEST("RegionChecker rejects returning a struct-typed generic field extracted from a borrowed "
+     "parameter, matching a plain struct field's identical borrowed-field rule")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "struct Box<T> { value: T } "
+                               "get_point(box: Box<Point>) -> Point { return box.value } "
+                               "b = Box<Point> { value: Point { x: 1  y: 2 } } "
+                               "p = get_point(b)";
+    EXPECT_THROWS(checkRegions(source));
 }

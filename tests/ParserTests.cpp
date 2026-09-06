@@ -2106,3 +2106,55 @@ TEST("Parser parses a closure literal called immediately - 'fn(x: i32) -> i32 { 
     auto* closureArg = dynamic_cast<ClosureExpr*>(call->arguments.at(0).get());
     EXPECT_TRUE(closureArg != nullptr);
 }
+
+TEST("Parser records a struct's own type parameters")
+{
+    auto program = parseOne("struct Box<T> { value: T }");
+
+    auto* structDecl = dynamic_cast<StructDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(structDecl != nullptr);
+    EXPECT_EQ(structDecl->typeParams.size(), std::size_t(1));
+    EXPECT_EQ(structDecl->typeParams.at(0), "T");
+    EXPECT_EQ(structDecl->fields.at(0).type, "T");
+}
+
+TEST("Parser builds a generic struct literal's canonical, comma-separated type name")
+{
+    auto program = parseOne("struct Box<T> { value: T } "
+                            "struct Pair<A, B> { first: A  second: B } "
+                            "b = Box<i32> { value: 5 } "
+                            "p = Pair<i32, str> { first: 1  second: \"one\" }");
+
+    auto* boxAssign = dynamic_cast<AssignmentStmt*>(program.items.at(2).get());
+    auto* boxLiteral = dynamic_cast<StructLiteralExpr*>(boxAssign->value.get());
+    EXPECT_TRUE(boxLiteral != nullptr);
+    EXPECT_EQ(boxLiteral->typeName, "Box<i32>");
+
+    auto* pairAssign = dynamic_cast<AssignmentStmt*>(program.items.at(3).get());
+    auto* pairLiteral = dynamic_cast<StructLiteralExpr*>(pairAssign->value.get());
+    EXPECT_TRUE(pairLiteral != nullptr);
+    EXPECT_EQ(pairLiteral->typeName, "Pair<i32,str>");
+}
+
+TEST("Parser still parses 'x < y' as a less-than comparison, not a misfired generic struct "
+     "literal")
+{
+    auto program = parseOne("f(x: i32, y: i32) -> bool { x < y }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* binary = dynamic_cast<BinaryExpr*>(body->result.get());
+    EXPECT_TRUE(binary != nullptr);
+    EXPECT_TRUE(binary->op == TokenKind::Less);
+}
+
+TEST("Parser parses a nested generic struct literal type argument")
+{
+    auto program = parseOne("struct Box<T> { value: T } "
+                            "b = Box<List<i32>> { value: List<i32>() }");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* literal = dynamic_cast<StructLiteralExpr*>(assignment->value.get());
+    EXPECT_TRUE(literal != nullptr);
+    EXPECT_EQ(literal->typeName, "Box<List<i32>>");
+}

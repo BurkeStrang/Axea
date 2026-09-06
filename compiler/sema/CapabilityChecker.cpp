@@ -993,6 +993,20 @@ void CapabilityChecker::check(const Program& program)
         }
         for (const FunctionDecl* function : snapshot)
         {
+            // Skip a synthetic closure entry here (its own `body` is always null - see
+            // registerClosure) - its own capability inference already happens via inferExpr's own
+            // ClosureExpr case (registerClosure + the immediately following inferExpr call on the
+            // closure literal's *real* body), reached while walking whatever real function's body
+            // the closure literal actually lives inside of, which this same snapshot loop already
+            // re-walks every iteration. Without this guard, a closure literal that survives past
+            // the outer loop's first iteration (i.e. any program needing more than one fixpoint
+            // pass) gets snapshotted here by its synthetic FunctionDecl and crashes dereferencing
+            // its null body - the identical reasoning the move-check loop just below already
+            // applies via its own, symmetric guard.
+            if (!function->body)
+            {
+                continue;
+            }
             inferExpr(*function->body, *function, changed);
         }
         ++iterations;

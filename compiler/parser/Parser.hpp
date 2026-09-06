@@ -34,6 +34,13 @@ private:
     // Identifier ':'`, never anything an argument expression could also
     // start with) to decide without backtracking.
     bool looksLikeFunctionDecl() const;
+    // `Box<i32> { ... }` (a generic struct literal, see docs/language/0006-generics.md) vs.
+    // `x < y` / `x < y > z` (comparison chains) at expression position - disambiguated by a
+    // bounded, non-consuming forward scan (mirrors looksLikeFunctionDecl's own "peek ahead,
+    // decide, then re-enter the real grammar" idiom; never backtracking - this parser has no
+    // snapshot/restore mechanism anywhere and doesn't need one here). Only called with
+    // current() == Identifier and peek() == Less already confirmed.
+    bool looksLikeGenericStructLiteral() const;
     std::unique_ptr<Stmt> parseFunctionDecl();
     // `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure literal,
     // same (params, optional return type, body) shape as parseFunctionDecl, as an expression.

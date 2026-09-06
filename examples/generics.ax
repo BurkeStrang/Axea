@@ -1,0 +1,19 @@
+struct Point
+{
+    x: i32
+    y: i32
+}
+
+struct Box<T>
+{
+    value: T
+}
+
+b = Box<i32> { value: 5 }
+n = b.value
+
+boxedPoint = Box<Point> { value: Point { x: 1  y: 2 } }
+sum = boxedPoint.value.x + boxedPoint.value.y
+
+print("n = {n}")
+print("sum = {sum}")

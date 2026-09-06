@@ -13,3 +13,10 @@ viaFn = extractYear(date)
 
 name = String("Axea Language")
 firstFour = name[0..4]
+
+print("year = {year}")
+print("month = {month}")
+print("day = {day}")
+print("whole = {whole}")
+print("viaFn = {viaFn}")
+print("firstFour = {firstFour}")

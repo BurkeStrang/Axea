@@ -1114,15 +1114,6 @@ int main(int argc, char** argv)
 
             Interpreter interpreter;
             interpreter.run(program);
-
-            for (const auto& item : program.items)
-            {
-                if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
-                {
-                    std::cout << assignment->name << " = "
-                              << toString(interpreter.variables().at(assignment->name)) << '\n';
-                }
-            }
             return 0;
         }
 

@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
 #include "llvmir/LlvmIrEmitter.hpp"
@@ -18,6 +19,7 @@ namespace
         Lexer lexer(source);
         Parser parser(lexer.lex());
         auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
 
         TypeChecker typeChecker;
         typeChecker.check(program);
@@ -2549,4 +2551,26 @@ TEST("LlvmIrEmitter compiles a self-referential (recursive) closure's own self-c
     EXPECT_TRUE(ir.find("define i32 @closure$0(%closure.captures.0* %0, i32 %1)") !=
                 std::string::npos);
     EXPECT_TRUE(ir.find("call i32 @closure$0(%closure.captures.0* %0,") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a valid struct type declaration for a generic struct instantiation, "
+     "mangled with '$' rather than the illegal '<'/'>'/',' bracket syntax")
+{
+    auto ir = emitLlvmIr("struct Box<T> { value: T } "
+                         "b = Box<i32> { value: 5 }");
+    EXPECT_TRUE(ir.find("%Box$i32 = type { i32 }") != std::string::npos);
+    EXPECT_TRUE(ir.find('<') == std::string::npos);
+    EXPECT_TRUE(ir.find('>') == std::string::npos);
+}
+
+TEST("LlvmIrEmitter registers one struct type per distinct generic instantiation, reused across "
+     "repeated literals of the same concrete type")
+{
+    auto ir = emitLlvmIr("struct Box<T> { value: T } "
+                         "a = Box<i32> { value: 1 } "
+                         "b = Box<i32> { value: 2 }");
+    const auto first = ir.find("%Box$i32 = type { i32 }");
+    EXPECT_TRUE(first != std::string::npos);
+    const auto second = ir.find("%Box$i32 = type { i32 }", first + 1);
+    EXPECT_TRUE(second == std::string::npos);
 }

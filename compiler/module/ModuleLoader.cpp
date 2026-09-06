@@ -1,5 +1,6 @@
 #include "module/ModuleLoader.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 
@@ -212,6 +213,12 @@ Program loadProgram(const std::string& rootPathText)
                                      searchedText + ")");
         }
     }
+
+    // Generic struct instantiations (see docs/language/0006-generics.md) - runs once, here,
+    // after every module is merged into one flat Program and before any later pass ever sees
+    // it, so TypeChecker/CapabilityChecker/RegionChecker/Interpreter/IrGenerator's own
+    // structs_-registration loops pick up every synthesized concrete instantiation for free.
+    monomorphizeGenerics(merged);
 
     return merged;
 }

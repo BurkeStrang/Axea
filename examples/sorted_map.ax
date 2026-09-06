@@ -31,3 +31,9 @@ called = updateOne(scores)
 valueAfterUpdate = scores.get(87)
 total = drainSmallest(scores)
 lengthAfterDrain = scores.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("hasEighty = {hasEighty}")
+print("valueAfterUpdate = {valueAfterUpdate}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

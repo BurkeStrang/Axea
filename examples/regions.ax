@@ -17,3 +17,7 @@ copy_point(p: Point) -> Point
 p = make(3, 4)
 q = copy_point(p)
 sum = q.x + q.y
+
+print("p = {p}")
+print("q = {q}")
+print("sum = {sum}")

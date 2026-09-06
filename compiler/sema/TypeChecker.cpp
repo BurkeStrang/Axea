@@ -1149,7 +1149,15 @@ void TypeChecker::registerSignatures(const Program& program)
         }
         else if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
-            structs_[structDecl->name] = structDecl;
+            // A generic struct template (see docs/language/0006-generics.md) is never itself
+            // registered - only GenericMonomorphizer's own synthesized, fully concrete
+            // instantiations are. Registering the raw template would make its own fields (an
+            // unsubstituted type-parameter placeholder like "T") fail every later
+            // resolveType(field.type) call unconditionally.
+            if (structDecl->typeParams.empty())
+            {
+                structs_[structDecl->name] = structDecl;
+            }
         }
         else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
         {

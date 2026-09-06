@@ -19,3 +19,8 @@ total = sum(numbers)
 bumped = bumpFirst(numbers)
 firstNow = numbers[0]
 count = numbers.length
+
+print("total = {total}")
+print("bumped = {bumped}")
+print("firstNow = {firstNow}")
+print("count = {count}")

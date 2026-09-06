@@ -28,3 +28,8 @@ called = appendOne(numbers)
 totalAfterAppend = sum(numbers)
 last = numbers.pop()
 count = numbers.length
+
+print("total = {total}")
+print("totalAfterAppend = {totalAfterAppend}")
+print("last = {last}")
+print("count = {count}")

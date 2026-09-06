@@ -4,3 +4,5 @@ square(x: i32) -> i32
 }
 
 y = square(6)
+
+print("y = {y}")

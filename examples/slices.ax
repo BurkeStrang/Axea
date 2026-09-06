@@ -21,3 +21,7 @@ largeSum = sum(large)
 
 cleared = zeroFirst(small)
 firstAfterClear = small[0]
+
+print("smallSum = {smallSum}")
+print("largeSum = {largeSum}")
+print("firstAfterClear = {firstAfterClear}")

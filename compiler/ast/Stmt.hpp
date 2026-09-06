@@ -314,14 +314,25 @@ struct ExternDecl final : Stmt
 
 struct StructDecl final : Stmt
 {
-    StructDecl(std::string name, std::vector<Field> fields)
+    StructDecl(std::string name, std::vector<Field> fields,
+               std::vector<std::string> typeParams = {})
         : name(std::move(name)),
-          fields(std::move(fields))
+          fields(std::move(fields)),
+          typeParams(std::move(typeParams))
     {
     }
 
     std::string name;
     std::vector<Field> fields;
+    // `struct Box<T>` (see docs/language/0006-generics.md) - empty for every ordinary,
+    // non-generic struct (unchanged shape/behavior otherwise). A struct with a non-empty
+    // typeParams is a template only: GenericMonomorphizer substitutes concrete type arguments
+    // into its fields to synthesize a real, concrete StructDecl (name mangled with '$', e.g.
+    // "Box$i32") for every instantiation actually used, and every later pass's own
+    // structs_-registration loop skips registering the template itself (see each such loop's
+    // own "typeParams.empty()" guard) - the template stays in Program::items but is otherwise
+    // inert, never itself type-checked or registered anywhere.
+    std::vector<std::string> typeParams;
 };
 
 // `enum Name { Variant(T1, T2)  Other  ... }` (see docs/language/0064-enums.md) - a genuine

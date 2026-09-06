@@ -26,3 +26,12 @@ results = [good, bad]
 
 struct Wrapper { r: Result<i32, i32> }
 w = Wrapper { r: good }
+
+print("good = {good}")
+print("bad = {bad}")
+print("goodVal = {goodVal}")
+print("badVal = {badVal}")
+print("goodIsOk = {goodIsOk}")
+print("badIsErr = {badIsErr}")
+print("results = {results}")
+print("w = {w}")

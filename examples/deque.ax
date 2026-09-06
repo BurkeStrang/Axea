@@ -43,3 +43,13 @@ afterSetFirst = numbers[0]
 forSum = sumWithForIn(numbers)
 total = drain(numbers)
 lengthAfterDrain = numbers.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("middle = {middle}")
+print("front = {front}")
+print("back = {back}")
+print("lengthAfterPops = {lengthAfterPops}")
+print("afterSetFirst = {afterSetFirst}")
+print("forSum = {forSum}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

@@ -31,3 +31,9 @@ called = addOne(ids)
 lengthAfterDuplicateAdd = ids.length
 total = drain(ids)
 lengthAfterDrain = ids.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("hasEighty = {hasEighty}")
+print("lengthAfterDuplicateAdd = {lengthAfterDuplicateAdd}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

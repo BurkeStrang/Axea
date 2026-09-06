@@ -29,3 +29,9 @@ afterPush = numbers.length
 topAfterPush = numbers.peek()
 total = drain(numbers)
 countAfterDrain = numbers.length
+
+print("top = {top}")
+print("afterPush = {afterPush}")
+print("topAfterPush = {topAfterPush}")
+print("total = {total}")
+print("countAfterDrain = {countAfterDrain}")

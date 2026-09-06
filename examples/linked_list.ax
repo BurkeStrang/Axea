@@ -32,3 +32,11 @@ called = pushBoth(numbers)
 lengthAfterPushBoth = numbers.length
 total = drain(numbers)
 lengthAfterDrain = numbers.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("front = {front}")
+print("back = {back}")
+print("lengthAfterPops = {lengthAfterPops}")
+print("lengthAfterPushBoth = {lengthAfterPushBoth}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

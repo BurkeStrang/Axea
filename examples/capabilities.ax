@@ -28,4 +28,8 @@ archive(take user: User) -> str
 u = User { name: "Burke"  age: 35 }
 shown = display(u)
 newAge = celebrate(u)
+print("shown = {shown}")
+print("newAge = {newAge}")
+print("u.age = {u.age}")
 archived = archive(u)
+print("archived = {archived}")

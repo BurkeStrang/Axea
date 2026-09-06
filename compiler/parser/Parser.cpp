@@ -195,6 +195,24 @@ std::string Parser::parseTypeNameAtom()
         return "SortedMap<" + keyType + "," + valueType + ">";
     }
 
+    // A user-defined generic struct instantiation (see docs/language/0006-generics.md) - the
+    // generic fallback none of the hardcoded, fixed-arity shapes above claimed. Arbitrary arity
+    // and arbitrary nesting (a full parseTypeName() call per argument, exactly like every branch
+    // above), producing "Name<Arg1,Arg2,...>" - this function's own no-spaces, comma-separated
+    // canonical form (mirrors the Map<key,value> branch above). GenericMonomorphizer resolves
+    // this to a real, mangled struct name later; this function only ever produces the canonical
+    // bracket-syntax text.
+    if (match(TokenKind::Less))
+    {
+        std::string result = name.text + "<" + parseTypeName();
+        while (match(TokenKind::Comma))
+        {
+            result += "," + parseTypeName();
+        }
+        expect(TokenKind::Greater, "expected '>' after generic struct type arguments");
+        return result + ">";
+    }
+
     return name.text;
 }
 
@@ -305,6 +323,32 @@ bool Parser::looksLikeFunctionDecl() const
     // argument that happens to be a bare name (`foo(x)`) is never
     // followed by ':', so this stays unambiguous.
     return peek(2).kind == TokenKind::Identifier && peek(3).kind == TokenKind::Colon;
+}
+
+bool Parser::looksLikeGenericStructLiteral() const
+{
+    // Depth-counting scan starting just past the '<' at peek(1) - tracks nested angle brackets
+    // (e.g. "Box<List<i32>>") exactly like type-position parsing already does; there is no
+    // combined '>>' token, so a nested close is just two adjacent Greater tokens, same as today.
+    // Succeeds only if, once the brackets balance back to zero, the very next token is '{' -
+    // anything else (including running off the end of the file, since peek() clamps to a
+    // trailing EndOfFile sentinel forever) means "not a generic struct literal", and nothing here
+    // consumes a single token either way.
+    std::size_t offset = 2;
+    int depth = 1;
+    while (depth > 0)
+    {
+        switch (peek(offset).kind)
+        {
+            case TokenKind::Less: ++depth; break;
+            case TokenKind::Greater: --depth; break;
+            case TokenKind::Identifier:
+            case TokenKind::Comma: break;
+            default: return false;
+        }
+        ++offset;
+    }
+    return peek(offset).kind == TokenKind::LeftBrace;
 }
 
 Param Parser::parseParam()
@@ -606,6 +650,20 @@ std::unique_ptr<Stmt> Parser::parseStructDecl()
 {
     expect(TokenKind::Struct, "expected 'struct'");
     const auto& name = expect(TokenKind::Identifier, "expected struct name");
+
+    // `struct Box<T, U, ...>` (see docs/language/0006-generics.md) - no ambiguity risk: a struct
+    // name is never followed by '<' for any other reason today.
+    std::vector<std::string> typeParams;
+    if (match(TokenKind::Less))
+    {
+        typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        while (match(TokenKind::Comma))
+        {
+            typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        }
+        expect(TokenKind::Greater, "expected '>' after struct type parameters");
+    }
+
     expect(TokenKind::LeftBrace, "expected '{' after struct name");
 
     std::vector<Field> fields;
@@ -617,7 +675,7 @@ std::unique_ptr<Stmt> Parser::parseStructDecl()
     }
     expect(TokenKind::RightBrace, "expected '}' after struct fields");
 
-    return std::make_unique<StructDecl>(name.text, std::move(fields));
+    return std::make_unique<StructDecl>(name.text, std::move(fields), std::move(typeParams));
 }
 
 std::unique_ptr<Stmt> Parser::parseEnumDecl()
@@ -1948,14 +2006,33 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<CallExpr>(name.text, std::move(args));
         }
 
-        if (allowStructLiteral && peek().kind == TokenKind::LeftBrace)
+        if (allowStructLiteral &&
+            (peek().kind == TokenKind::LeftBrace ||
+             (peek().kind == TokenKind::Less && looksLikeGenericStructLiteral())))
         {
             const auto& name = advance();
+
+            // "Box<i32> { ... }" (see docs/language/0006-generics.md) - explicit type arguments
+            // at a struct-literal site, resolved to a real, mangled struct name later by
+            // GenericMonomorphizer. looksLikeGenericStructLiteral() already confirmed this
+            // matches, non-consumingly, so nothing here can fail once committed.
+            std::string typeName = name.text;
+            if (match(TokenKind::Less))
+            {
+                typeName += "<" + parseTypeName();
+                while (match(TokenKind::Comma))
+                {
+                    typeName += "," + parseTypeName();
+                }
+                expect(TokenKind::Greater, "expected '>' after generic struct literal type arguments");
+                typeName += ">";
+            }
+
             expect(TokenKind::LeftBrace, "expected '{' after struct type name");
             auto fields = parseStructLiteralFields();
             expect(TokenKind::RightBrace, "expected '}' after struct literal fields");
 
-            return std::make_unique<StructLiteralExpr>(name.text, std::move(fields));
+            return std::make_unique<StructLiteralExpr>(std::move(typeName), std::move(fields));
         }
 
         return std::make_unique<NameExpr>(advance().text);

@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "interpreter/Interpreter.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
@@ -12,7 +13,9 @@ namespace
     {
         Lexer lexer(source);
         Parser parser(lexer.lex());
-        return parser.parseProgram();
+        auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
+        return program;
     }
 
     std::unordered_map<std::string, Value> runProgram(const std::string& source)
@@ -2419,6 +2422,7 @@ TEST("Interpreter dispatches to Display for a struct's top-level auto-printed bi
     Lexer lexer(source);
     Parser parser(lexer.lex());
     auto program = parser.parseProgram();
+    monomorphizeGenerics(program);
     Interpreter interpreter;
     interpreter.run(program);
     EXPECT_EQ(toString(interpreter.variables().at("p")), "(7, 8)");
@@ -2593,4 +2597,21 @@ TEST("Interpreter calls a closure with a real struct-typed *parameter* (as oppos
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 7);
     EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 30);
+}
+
+TEST("Interpreter constructs and reads fields of an explicitly-instantiated generic struct")
+{
+    const std::string source = "struct Box<T> { value: T } "
+                               "b = Box<i32> { value: 5 } "
+                               "x = b.value";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 5);
+}
+
+TEST("Interpreter supports a struct type argument in a generic struct instantiation")
+{
+    const std::string source = "struct Point { x: i32  y: i32 } "
+                               "struct Box<T> { value: T } "
+                               "b = Box<Point> { value: Point { x: 1  y: 2 } } "
+                               "x = b.value.x + b.value.y";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }

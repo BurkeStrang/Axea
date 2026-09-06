@@ -26,3 +26,10 @@ cleared = notes.clear()
 lengthAfterClear = notes.length
 reused = notes.append("reused")
 lengthAfterReuse = notes.length
+
+print("report = {report}")
+print("reportLength = {reportLength}")
+print("notesLength = {notesLength}")
+print("notesCapacity = {notesCapacity}")
+print("lengthAfterClear = {lengthAfterClear}")
+print("lengthAfterReuse = {lengthAfterReuse}")

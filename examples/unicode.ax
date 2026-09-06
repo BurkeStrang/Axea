@@ -26,3 +26,16 @@ appended = buf.append("héllo")
 bufLength = buf.length
 bufBytes = buf.bytes
 bufCapacity = buf.capacity
+
+print("asciiLength = {asciiLength}")
+print("asciiBytes = {asciiBytes}")
+print("accentedLength = {accentedLength}")
+print("accentedBytes = {accentedBytes}")
+print("rocketsLength = {rocketsLength}")
+print("rocketsBytes = {rocketsBytes}")
+print("viaFn = {viaFn}")
+print("ownedLength = {ownedLength}")
+print("ownedBytes = {ownedBytes}")
+print("bufLength = {bufLength}")
+print("bufBytes = {bufBytes}")
+print("bufCapacity = {bufCapacity}")

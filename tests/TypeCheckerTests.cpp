@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 #include "sema/TypeChecker.hpp"
@@ -11,6 +12,7 @@ namespace
         Lexer lexer(source);
         Parser parser(lexer.lex());
         auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
 
         TypeChecker checker;
         checker.check(program);
@@ -2146,4 +2148,39 @@ TEST("TypeChecker accepts capturing a struct-typed local into exactly one closur
           "  return sum() "
           "} "
           "y = run()");
+}
+
+TEST("TypeChecker accepts a generic struct instantiated with an explicit primitive type "
+     "argument")
+{
+    check("struct Box<T> { value: T } "
+          "b = Box<i32> { value: 5 } "
+          "n = b.value");
+}
+
+TEST("TypeChecker accepts a generic struct instantiated with another struct as its type "
+     "argument")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "struct Box<T> { value: T } "
+          "b = Box<Point> { value: Point { x: 1, y: 2 } } "
+          "n = b.value.x");
+}
+
+TEST("TypeChecker rejects a generic struct literal missing its explicit type arguments")
+{
+    EXPECT_THROWS(check("struct Box<T> { value: T }  b = Box { value: 5 }"));
+}
+
+TEST("TypeChecker rejects a generic struct instantiation with the wrong type-argument count")
+{
+    EXPECT_THROWS(
+        check("struct Pair<A, B> { first: A  second: B }  p = Pair<i32> { first: 1 }"));
+}
+
+TEST("TypeChecker treats two different instantiations of the same generic struct as distinct, "
+     "incompatible types")
+{
+    EXPECT_THROWS(check("struct Box<T> { value: T } "
+                        "b: Box<i32> = Box<str> { value: \"hi\" }"));
 }

@@ -353,7 +353,13 @@ void IrGenerator::registerStructs(const Program& program)
     {
         if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
-            structs_[structDecl->name] = structDecl;
+            // A generic struct template (see docs/language/0006-generics.md) is never itself
+            // registered - only GenericMonomorphizer's own synthesized, concrete instantiations
+            // are (see TypeChecker's identical guard for the full reasoning).
+            if (structDecl->typeParams.empty())
+            {
+                structs_[structDecl->name] = structDecl;
+            }
         }
         else if (const auto* enumDecl = dynamic_cast<const EnumDecl*>(item.get()))
         {

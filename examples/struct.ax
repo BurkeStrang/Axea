@@ -11,3 +11,6 @@ p = Point
 }
 
 sum = p.x + p.y
+
+print("p = {p}")
+print("sum = {sum}")

@@ -30,3 +30,10 @@ lengthAfterPush = jobs.length
 smallestAfterPush = jobs.peek()
 total = drain(jobs)
 lengthAfterDrain = jobs.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("smallest = {smallest}")
+print("lengthAfterPush = {lengthAfterPush}")
+print("smallestAfterPush = {smallestAfterPush}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

@@ -17,6 +17,7 @@ add_library(axea_compiler
     compiler/ir/IrGenerator.cpp
     compiler/llvmir/LlvmIrEmitter.cpp
     compiler/module/ModuleLoader.cpp
+    compiler/generics/GenericMonomorphizer.cpp
 )
 
 target_include_directories(axea_compiler PUBLIC compiler)
@@ -41,6 +42,7 @@ add_executable(axea_tests
     tests/IrGeneratorTests.cpp
     tests/LlvmIrEmitterTests.cpp
     tests/ModuleLoaderTests.cpp
+    tests/GenericMonomorphizerTests.cpp
 )
 target_include_directories(axea_tests PRIVATE tests)
 target_link_libraries(axea_tests PRIVATE axea_compiler)

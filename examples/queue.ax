@@ -30,3 +30,10 @@ called = enqueueOne(jobs)
 lengthAfterEnqueue = jobs.length
 total = drain(jobs)
 lengthAfterDrain = jobs.length
+
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("first = {first}")
+print("lengthAfterDequeue = {lengthAfterDequeue}")
+print("lengthAfterEnqueue = {lengthAfterEnqueue}")
+print("total = {total}")
+print("lengthAfterDrain = {lengthAfterDrain}")

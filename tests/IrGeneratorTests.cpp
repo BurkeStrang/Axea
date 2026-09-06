@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
@@ -19,6 +20,7 @@ namespace
         Lexer lexer(source);
         Parser parser(lexer.lex());
         auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
 
         TypeChecker typeChecker;
         typeChecker.check(program);
@@ -651,4 +653,17 @@ TEST("IrGenerator lowers a self-referential (recursive) closure's own self-call 
     // The forwarded captures register, plus (n - 1).
     EXPECT_EQ(recursiveCall->args.size(), static_cast<std::size_t>(2));
     EXPECT_EQ(closureCallCount, 0);
+}
+
+TEST("IrGenerator registers a monomorphized generic struct instantiation under its mangled name, "
+     "with correctly substituted field types")
+{
+    auto program = generateIr("struct Box<T> { value: T } "
+                              "b = Box<i32> { value: 5 }");
+
+    const auto it = program.structs.find("Box$i32");
+    EXPECT_TRUE(it != program.structs.end());
+    EXPECT_EQ(it->second.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(it->second[0].first, "value");
+    EXPECT_EQ(it->second[0].second, "i32");
 }

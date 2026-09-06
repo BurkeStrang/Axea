@@ -1,5 +1,6 @@
 #include "TestFramework.hpp"
 
+#include "generics/GenericMonomorphizer.hpp"
 #include "lexer/Lexer.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
@@ -16,6 +17,7 @@ namespace
         Lexer lexer(source);
         Parser parser(lexer.lex());
         auto program = parser.parseProgram();
+        monomorphizeGenerics(program);
 
         TypeChecker typeChecker;
         typeChecker.check(program);

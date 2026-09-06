@@ -13,3 +13,7 @@ message = String("owned strings work too")
 called2 = puts(message.to_cstr())
 
 magnitude = abs(0 - 42)
+
+print("called = {called}")
+print("message = {message}")
+print("magnitude = {magnitude}")

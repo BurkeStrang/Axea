@@ -22,3 +22,10 @@ lengthAfterAppend = name.length
 viaStr = useStr(name)
 other = String(name)
 otherLength = other.length
+
+print("name = {name}")
+print("lengthAfterBuild = {lengthAfterBuild}")
+print("lengthAfterAppend = {lengthAfterAppend}")
+print("viaStr = {viaStr}")
+print("other = {other}")
+print("otherLength = {otherLength}")

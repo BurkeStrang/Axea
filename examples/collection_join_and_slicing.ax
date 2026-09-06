@@ -17,3 +17,7 @@ separator = ", "
 allNames = names.join(separator)
 ampersand = " & "
 tailNames = names[1..].join(ampersand)
+
+print("report = {report}")
+print("allNames = {allNames}")
+print("tailNames = {tailNames}")
