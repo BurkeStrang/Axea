@@ -2,13 +2,17 @@
 
 #include "ast/Stmt.hpp"
 
-// Milestone 1 of user-defined generics (docs/language/0006-generics.md) - generic STRUCTS only,
-// explicit type arguments only (no inference, no generic functions/methods yet).
+// User-defined generics (docs/language/0006-generics.md) - generic structs and generic inherent
+// impl/methods (`impl<T> Box<T> { ... }`, see docs/language/0006-generics.md's own
+// generic-methods follow-up), explicit type arguments only (no inference; no generic top-level
+// functions yet - only struct/impl-level type parameters).
 //
 // Mutates `program` in place: for every distinct concrete `Name<Arg1,...,ArgN>` instantiation
 // textually referenced anywhere in the program, synthesizes a fully field-type-substituted,
 // ordinary `StructDecl` (name mangled with '$' - "Box<i32>" -> "Box$i32", per
-// docs/language/0006-generics.md's own Name Mangling section) and appends it to `program.items`;
+// docs/language/0006-generics.md's own Name Mangling section) and appends it to `program.items`,
+// then does the same for any matching `impl<T> Box<T> { ... }` block's own methods (deep-cloned,
+// substituted, mangled to e.g. "Box$i32.get", appended as plain top-level FunctionDecl items);
 // rewrites every occurrence of the bracket-syntax reference to that struct's own final mangled
 // name in place. Runs to a fixed point (`Box<Box<i32>>` resolves over two iterations).
 //

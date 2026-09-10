@@ -106,6 +106,28 @@ Every phase so far caught something during implementation rather than after. Thi
 
 The fix: `IrScope` gained an `isBarrier` flag. An `if`/`else` branch's own scope is a barrier — `assign()` still updates the binding locally (so later code within that *same* branch sees the mutation, verified by a dedicated test), but refuses to walk past itself into the shared parent. This is not full dataflow merging (no phi nodes, per the "Structured, Not a Flattened CFG" section above) — it's the minimum needed for two sibling branches, and the code after them, to never see each other's hypothetical mutations. `tests/IrGeneratorTests.cpp` pins down both the "does not leak out" and "does persist within the same branch" halves of this permanently, and `./build/ax ir` on a small repro shows it directly: a name incremented inside one branch and referenced right after the `if` correctly still resolves to the original parameter register, exactly because nothing merges the two possible outcomes.
 
+**2026 Update: Bug 2's own "no merge" conclusion was correct when written, and wrong later.**
+At the time this was written, "nothing executes this IR" (see "Known Imprecision" below) — `IrGenerator`'s
+output was only ever printed by `ax ir`, never fed to real codegen, so a name's mutation not
+surviving past an `if`/`else` was genuinely harmless: nothing downstream could ever observe the
+difference. Once `LlvmIrEmitter` started consuming this same IR to drive real LLVM compilation,
+that stopped being true — `x = 1  if x == 1 { x = 5 }  return x` silently compiled to `return 1`
+in every configuration, a real, previously-undiscovered correctness bug (found this session while
+porting `PriorityQueue<T>`'s own sift-loop, which conditionally reassigns a loop index inside a
+nested `if`). Fixed properly rather than worked around: `IrBranch` gained `carriedMerges` —
+`(thenReg, elseReg, destReg)` triples, one per outer-scope name either branch's own barrier scope
+rebound to a different register, computed by a new `IrGenerator::mergeBranchScopes` (diffing the
+enclosing scope's snapshot against each branch's own barrier-scoped snapshot, mirroring
+`lowerLoop`'s own pre/post-snapshot diffing for loop-carried variables) and reconciled by
+`LlvmIrEmitter::emitBranch` into a real `phi`, exactly mirroring the mechanism `thenValue`/
+`elseValue`/`dest` already used for the `if`-*expression's own result* — just generalized to
+every other name either branch's own statements reassigned as a side effect. `IrScope`'s own
+barrier semantics (Bug 1 and Bug 2's own original fix) are unchanged and still correct — a
+branch's own mutation still never leaks into its untaken sibling — only the "and nothing
+reconciles the two possible outcomes afterward" half is now fixed. `tests/IrGeneratorTests.cpp`'s
+own former "does not let a name mutated inside an if-branch escape past the branch" test (which
+pinned down the *old*, now-corrected behavior) was rewritten to assert the merge instead.
+
 ---
 
 # Known Imprecision (By Design, Not Oversight)

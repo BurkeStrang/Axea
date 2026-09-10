@@ -217,48 +217,6 @@ std::optional<bool> IrScope::findIsSet(const std::string& name) const
     return parent_ ? parent_->findIsSet(name) : std::nullopt;
 }
 
-void IrScope::defineIsStack(const std::string& name, bool isStack)
-{
-    isStackKinds_[name] = isStack;
-}
-
-std::optional<bool> IrScope::findIsStack(const std::string& name) const
-{
-    if (const auto it = isStackKinds_.find(name); it != isStackKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsStack(name) : std::nullopt;
-}
-
-void IrScope::defineIsDeque(const std::string& name, bool isDeque)
-{
-    isDequeKinds_[name] = isDeque;
-}
-
-std::optional<bool> IrScope::findIsDeque(const std::string& name) const
-{
-    if (const auto it = isDequeKinds_.find(name); it != isDequeKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsDeque(name) : std::nullopt;
-}
-
-void IrScope::defineIsPriorityQueue(const std::string& name, bool isPriorityQueue)
-{
-    isPriorityQueueKinds_[name] = isPriorityQueue;
-}
-
-std::optional<bool> IrScope::findIsPriorityQueue(const std::string& name) const
-{
-    if (const auto it = isPriorityQueueKinds_.find(name); it != isPriorityQueueKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsPriorityQueue(name) : std::nullopt;
-}
-
 void IrScope::defineIsSortedMap(const std::string& name, bool isSortedMap)
 {
     isSortedMapKinds_[name] = isSortedMap;
@@ -370,15 +328,30 @@ void IrGenerator::registerStructs(const Program& program)
         // rather than becoming its own pass.
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            functions_[function->name] = function;
+            // A generic top-level function template is never registered here (mirrors ImplDecl's
+            // identical guard just below) - GenericMonomorphizer's synthesized, concrete clones
+            // (plain FunctionDecl items with an empty typeParams) are picked up by this same
+            // branch, on their own.
+            if (function->typeParams.empty())
+            {
+                functions_[function->name] = function;
+            }
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {
-            // See docs/language/0062-display-trait.md - each impl method
-            // is registered exactly like a top-level FunctionDecl.
-            for (const auto& method : implDecl->methods)
+            // A generic impl template's own methods are never registered here (mirrors
+            // TypeChecker::registerSignatures's identical typeParams.empty() guard) - their
+            // unsubstituted "self: Box<T>"/"-> T" text isn't a real callable signature, and
+            // GenericMonomorphizer's own synthesized, concrete clones already arrive as plain
+            // top-level FunctionDecl items, picked up by the branch just above.
+            if (implDecl->typeParams.empty())
             {
-                functions_[method->name] = method.get();
+                // See docs/language/0062-display-trait.md - each impl method
+                // is registered exactly like a top-level FunctionDecl.
+                for (const auto& method : implDecl->methods)
+                {
+                    functions_[method->name] = method.get();
+                }
             }
         }
         else if (const auto* externDecl = dynamic_cast<const ExternDecl*>(item.get()))
@@ -578,166 +551,10 @@ IrGenerator::isSetExpr(const Expr& expr, const FunctionDecl* function, const IrS
     return std::nullopt;
 }
 
-std::optional<bool>
-IrGenerator::isStackExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
-{
-    if (dynamic_cast<const StackNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("Stack<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("List<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsStack(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("Stack<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("List<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<bool>
-IrGenerator::isDequeExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
-{
-    if (dynamic_cast<const DequeNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("Deque<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("LinkedList<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsDeque(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("Deque<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("LinkedList<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<bool> IrGenerator::isPriorityQueueExpr(const Expr& expr,
-                                                     const FunctionDecl* function,
-                                                     const IrScope& scope) const
-{
-    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const StackNewExpr*>(&expr) || dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("PriorityQueue<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("Stack<") || param.type.starts_with("List<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsPriorityQueue(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("PriorityQueue<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("Stack<") ||
-                it->second->returnType->starts_with("List<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
+// `List<T>`/`Stack<T>`/`PriorityQueue<T>` are all real, user-declared generic structs now (see
+// docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port follow-up), reached
+// via the general struct method dispatch this session already built - there is no
+// isStackExpr/isPriorityQueueExpr left here at all anymore.
 
 std::optional<bool> IrGenerator::isSortedMapExpr(const Expr& expr,
                                                  const FunctionDecl* function,
@@ -1081,6 +898,33 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             return *it->second->returnType;
         }
     }
+    // `module.newX<T>()` (see docs/language/0066-modules.md) - a generic collection constructor
+    // reached via module-qualified call syntax parses as a MethodCallExpr, not a CallExpr (see
+    // the identical `moduleNames_.contains` recognition in lowerExpr's own MethodCallExpr case) -
+    // a real, previously-undiscovered bug found while verifying PriorityQueue<T>'s own port: a
+    // bare local built this way with no declared type (`q = collections.newStack<i32>()`) never
+    // got its own simpleType recorded at all (this function had no case for it), so a later
+    // `q.push(...)`/`q.pop()` couldn't resolve through resolveStructOrEnumType's general struct
+    // method dispatch and silently fell through to a stale Map/Set/SortedMap/SortedSet fallback
+    // instead - a crash for a 0-arg call reaching a fallback that assumes an argument exists
+    // (`.arguments.front()`), or silently the *wrong* method for a call whose argument count
+    // happened to match a fallback's own shape. Affected every composed collection this session
+    // ported (List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>) identically, not just this
+    // one - every existing example worked around it by always declaring the type explicitly.
+    // Mirrors the plain CallExpr case just above exactly, resolving the callee through the
+    // qualified "module.method" key `functions_` actually uses instead.
+    if (const auto* moduleCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        if (const auto* moduleName = dynamic_cast<const NameExpr*>(moduleCall->object.get());
+            moduleName && moduleNames_.contains(moduleName->name))
+        {
+            const auto it = functions_.find(moduleName->name + "." + moduleCall->method);
+            if (it != functions_.end() && it->second->returnType)
+            {
+                return *it->second->returnType;
+            }
+        }
+    }
     // `.clone()` (Shared<T>) - a real bug found while testing: `other = sp.clone(); other.x`
     // crashed with an opaque unordered_map::at, the exact same failure mode the closure-literal
     // comment just below already documents for a different cause - `other`'s own type was never
@@ -1117,6 +961,32 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             paramsCsv += closureExpr->params[i].type;
         }
         return "fn(" + paramsCsv + ")->" + closureExpr->returnType.value_or("unit");
+    }
+    // `object.field`'s own declared type (see docs/language/0006-generics.md's own List<T>/
+    // Stack<T> port follow-up) - needed for the general struct method dispatch to resolve a
+    // receiver like `self.items` (a struct field, not a bare local/param) to a real struct name;
+    // found the hard way porting Stack<T>, whose own `push`/`pop`/`peek` call `self.items.push`/
+    // `.pop`/`.get` - the very first case in this codebase where an impl method calls another
+    // method on one of `self`'s own fields rather than on `self` or a raw pointer directly.
+    // Resolves the object's own type first (recursing through nested field chains for free),
+    // then looks up that struct's own declared field type - already-substituted/mangled text by
+    // the time this runs, since GenericMonomorphizer rewrites every StructDecl's own field types
+    // before TypeChecker/IrGenerator ever see them.
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        if (const auto objectType = resolveStructOrEnumType(*field->object, function, scope))
+        {
+            if (const auto it = structs_.find(*objectType); it != structs_.end())
+            {
+                for (const auto& structField : it->second->fields)
+                {
+                    if (structField.name == field->field)
+                    {
+                        return structField.type;
+                    }
+                }
+            }
+        }
     }
     return std::nullopt;
 }
@@ -1291,6 +1161,16 @@ void IrGenerator::collectReferencedNames(const Expr& expr, std::unordered_set<st
         collectReferencedNames(*loopExpr->body, names);
         return;
     }
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        collectReferencedNames(*unsafeBlock->body, names);
+        return;
+    }
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        collectReferencedNames(*deref->operand, names);
+        return;
+    }
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
         for (const auto& statement : block->statements)
@@ -1368,6 +1248,12 @@ void IrGenerator::collectReferencedNames(const Stmt& stmt, std::unordered_set<st
         collectReferencedNames(*indexAssign->value, names);
         return;
     }
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*derefAssign->pointer, names);
+        collectReferencedNames(*derefAssign->value, names);
+        return;
+    }
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         collectReferencedNames(*incDec->target, names);
@@ -1388,6 +1274,267 @@ void IrGenerator::collectReferencedNames(const Stmt& stmt, std::unordered_set<st
         return;
     }
     // ContinueStmt: nothing to collect.
+}
+
+void IrGenerator::collectAddressTakenNames(const Expr& expr, std::unordered_set<std::string>& names)
+{
+    if (const auto* addressOf = dynamic_cast<const AddressOfExpr*>(&expr))
+    {
+        // TypeChecker already guarantees the operand is a NameExpr by the time this runs.
+        names.insert(static_cast<const NameExpr*>(addressOf->operand.get())->name);
+        return; // NameExpr itself has no further sub-expressions to recurse into.
+    }
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
+    {
+        collectAddressTakenNames(*binary->left, names);
+        collectAddressTakenNames(*binary->right, names);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        collectAddressTakenNames(*cast->operand, names);
+        return;
+    }
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        collectAddressTakenNames(*someExpr->value, names);
+        return;
+    }
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        collectAddressTakenNames(*okExpr->value, names);
+        return;
+    }
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        collectAddressTakenNames(*errExpr->value, names);
+        return;
+    }
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        collectAddressTakenNames(*tryExpr->operand, names);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        collectAddressTakenNames(*field->object, names);
+        return;
+    }
+    if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        for (const auto& [fieldName, valueExpr] : literal->fields)
+        {
+            collectAddressTakenNames(*valueExpr, names);
+        }
+        return;
+    }
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            collectAddressTakenNames(*element, names);
+        }
+        return;
+    }
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        collectAddressTakenNames(*index->object, names);
+        collectAddressTakenNames(*index->index, names);
+        return;
+    }
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                collectAddressTakenNames(*piece.expr, names);
+            }
+        }
+        return;
+    }
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        collectAddressTakenNames(*strSlice->object, names);
+        if (strSlice->start)
+        {
+            collectAddressTakenNames(*strSlice->start, names);
+        }
+        if (strSlice->end)
+        {
+            collectAddressTakenNames(*strSlice->end, names);
+        }
+        return;
+    }
+    if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
+    {
+        collectAddressTakenNames(*ifExpr->condition, names);
+        collectAddressTakenNames(*ifExpr->thenBranch, names);
+        collectAddressTakenNames(*ifExpr->elseBranch, names);
+        return;
+    }
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        collectAddressTakenNames(*matchExpr->scrutinee, names);
+        for (const auto& arm : matchExpr->arms)
+        {
+            collectAddressTakenNames(*arm.body, names);
+        }
+        return;
+    }
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        collectAddressTakenNames(*loopExpr->body, names);
+        return;
+    }
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        collectAddressTakenNames(*unsafeBlock->body, names);
+        return;
+    }
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        collectAddressTakenNames(*deref->operand, names);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+    {
+        for (const auto& statement : block->statements)
+        {
+            collectAddressTakenNames(*statement, names);
+        }
+        if (block->result)
+        {
+            collectAddressTakenNames(*block->result, names);
+        }
+        return;
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        for (const auto& argument : call->arguments)
+        {
+            collectAddressTakenNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        collectAddressTakenNames(*methodCall->object, names);
+        for (const auto& argument : methodCall->arguments)
+        {
+            collectAddressTakenNames(*argument, names);
+        }
+        return;
+    }
+    // ClosureExpr: deliberately not recursed into - '&' is rejected inside a closure body by
+    // TypeChecker's own insideClosureBody_ guard, so there is nothing to find in there.
+
+    // NameExpr (bare, not '&'-wrapped), IntegerExpr, Int64Expr, FloatExpr, BoolExpr, StringExpr,
+    // CharExpr: no address-of to collect.
+}
+
+void IrGenerator::collectAddressTakenNames(const Stmt& stmt, std::unordered_set<std::string>& names)
+{
+    if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*assignment->value, names);
+        return;
+    }
+    if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
+    {
+        if (returnStmt->value)
+        {
+            collectAddressTakenNames(*returnStmt->value, names);
+        }
+        return;
+    }
+    if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*exprStmt->expr, names);
+        return;
+    }
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*fieldAssign->object, names);
+        collectAddressTakenNames(*fieldAssign->value, names);
+        return;
+    }
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*indexAssign->object, names);
+        collectAddressTakenNames(*indexAssign->index, names);
+        collectAddressTakenNames(*indexAssign->value, names);
+        return;
+    }
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*derefAssign->pointer, names);
+        collectAddressTakenNames(*derefAssign->value, names);
+        return;
+    }
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*incDec->target, names);
+        return;
+    }
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*whileStmt->condition, names);
+        collectAddressTakenNames(*whileStmt->body, names);
+        return;
+    }
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            collectAddressTakenNames(*breakStmt->value, names);
+        }
+        return;
+    }
+    // ContinueStmt: nothing to collect.
+}
+
+int IrGenerator::readLocal(const std::string& name, IrScope& scope, Context& ctx)
+{
+    const int reg = scope.find(name);
+    if (ctx.addressTakenNames && ctx.addressTakenNames->contains(name))
+    {
+        auto inst = std::make_unique<IrDeref>();
+        inst->pointer = reg;
+        return emit(ctx, std::move(inst));
+    }
+    return reg;
+}
+
+void IrGenerator::defineOrAssignLocal(const std::string& name, int value, bool forceDefine,
+                                      IrScope& scope, Context& ctx)
+{
+    const bool isReassignment = !forceDefine && scope.contains(name);
+    if (ctx.addressTakenNames && ctx.addressTakenNames->contains(name))
+    {
+        if (isReassignment)
+        {
+            auto inst = std::make_unique<IrDerefAssign>();
+            inst->pointer = scope.find(name); // the slot register - stable for the name's whole life
+            inst->value = value;
+            emitVoid(ctx, std::move(inst));
+        }
+        else
+        {
+            auto inst = std::make_unique<IrAlloca>();
+            inst->initialValue = value;
+            scope.define(name, emit(ctx, std::move(inst))); // binds the *slot*, not the value
+        }
+        return;
+    }
+    if (isReassignment)
+    {
+        scope.assign(name, value);
+    }
+    else
+    {
+        scope.define(name, value);
+    }
 }
 
 int IrGenerator::wrapForUnion(int valueReg,
@@ -1583,6 +1730,7 @@ int IrGenerator::lowerMatchArm(int scrutineeReg,
     branch->elseValue =
         lowerMatchArm(scrutineeReg, tagReg, enumDecl, arms, armIndex + 1, elseScope, elseCtx);
 
+    mergeBranchScopes(scope, thenScope, elseScope, *branch, ctx);
     return emit(ctx, std::move(branch));
 }
 
@@ -1692,7 +1840,7 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
-        return scope.find(name->name);
+        return readLocal(name->name, scope, ctx);
     }
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
@@ -1712,6 +1860,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         auto inst = std::make_unique<IrCast>();
         inst->operand = operand;
         inst->targetType = cast->targetType;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* sizeOf = dynamic_cast<const SizeOfExpr*>(&expr))
+    {
+        auto inst = std::make_unique<IrSizeOf>();
+        inst->typeName = sizeOf->typeName;
         return emit(ctx, std::move(inst));
     }
 
@@ -1839,6 +1994,7 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         emitVoid(elseCtx, std::move(returnInst));
         branch->elseValue = -1; // elseBlock always terminates via `return` above
 
+        mergeBranchScopes(scope, thenScope, elseScope, *branch, ctx);
         return emit(ctx, std::move(branch));
     }
 
@@ -2060,22 +2216,18 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         }
 
         // Resolved from the AST, before lowering `object` below, since
-        // isSetExpr/isStackExpr/isDequeExpr/isPriorityQueueExpr/
-        // isSortedMapExpr all inspect the expression shape itself (see their
+        // isSetExpr/isSortedMapExpr all inspect the expression shape itself (see their
         // own doc comments) - needed only to disambiguate "contains"/
         // "remove" between Map, Set, and SortedMap and "set"/"get" between
         // Map and SortedMap (docs/language/0034-maps-and-sets.md,
-        // docs/language/0040-sorted-maps.md), "push"/"pop"/"peek" between
-        // List, Stack, and PriorityQueue (docs/language/0035-stacks.md,
-        // docs/language/0039-priority-queues.md), and push_front/push_back/
-        // pop_front/pop_back between LinkedList and Deque (see
-        // docs/language/0037-deques.md); every other method name here is
-        // unambiguous by itself.
+        // docs/language/0040-sorted-maps.md); every other method
+        // name here is unambiguous by itself - push_front/push_back/pop_front/pop_back no longer
+        // need a resolver either, now that Deque<T> is a real struct too (see that same port
+        // follow-up), leaving LinkedList<T> as the sole remaining user of those names, and
+        // push/pop/peek need no resolver anymore either, now that PriorityQueue<T> is the
+        // sole remaining user of those three names, reached via the general struct method
+        // dispatch below (see docs/language/0006-generics.md's own port follow-up).
         const std::optional<bool> setKind = isSetExpr(*methodCall->object, ctx.function, scope);
-        const std::optional<bool> stackKind = isStackExpr(*methodCall->object, ctx.function, scope);
-        const std::optional<bool> dequeKind = isDequeExpr(*methodCall->object, ctx.function, scope);
-        const std::optional<bool> priorityQueueKind =
-            isPriorityQueueExpr(*methodCall->object, ctx.function, scope);
         const std::optional<bool> sortedMapKind =
             isSortedMapExpr(*methodCall->object, ctx.function, scope);
         const std::optional<bool> sortedSetKind =
@@ -2083,6 +2235,65 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         const std::optional<bool> bufferKind =
             isBufferExpr(*methodCall->object, ctx.function, scope);
         const int object = lowerExpr(*methodCall->object, scope, ctx);
+
+        // General method-call dispatch for struct types (see docs/language/0006-generics.md's
+        // own generic-methods follow-up) - checked before every name-based builtin-collection
+        // branch below, since a user-defined method name is never one of those reserved names
+        // once the receiver is a real struct (TypeChecker's own MethodCallExpr fallback already
+        // guarantees this compiles only when `TypeName.method` genuinely exists). Lowers to an
+        // ordinary IrCall to the mangled name, `object` prepended as `self` - structurally
+        // identical to CallExpr's own argument-lowering loop just above (union-wrap + Region::
+        // Owned retain), just reusing `object` (already lowered) as argument 0 instead of
+        // lowering it again.
+        if (const auto structName = resolveStructOrEnumType(*methodCall->object, ctx.function, scope);
+            structName && structs_.contains(*structName))
+        {
+            const std::string calleeName = *structName + "." + methodCall->method;
+            if (const auto calleeIt = functions_.find(calleeName);
+                calleeIt != functions_.end() && !calleeIt->second->params.empty())
+            {
+                std::vector<int> args;
+                args.reserve(methodCall->arguments.size() + 1);
+                args.push_back(object);
+                if (const auto regionsIt = allFunctionRegions_.find(calleeName);
+                    regionsIt != allFunctionRegions_.end() && !regionsIt->second.empty() &&
+                    regionsIt->second[0] == Region::Owned)
+                {
+                    retainFieldValueIfNeeded(object, *methodCall->object,
+                                             calleeIt->second->params[0].type, ctx);
+                }
+                for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
+                {
+                    const std::optional<int> functionRef =
+                        tryLowerFunctionRef(*methodCall->arguments[i], scope, ctx);
+                    int argReg = functionRef ? *functionRef
+                                              : lowerExpr(*methodCall->arguments[i], scope, ctx);
+                    if (!functionRef && i + 1 < calleeIt->second->params.size())
+                    {
+                        argReg = wrapForUnion(argReg,
+                                              *methodCall->arguments[i],
+                                              calleeIt->second->params[i + 1].type,
+                                              scope,
+                                              ctx);
+                        if (const auto regionsIt = allFunctionRegions_.find(calleeName);
+                            regionsIt != allFunctionRegions_.end() &&
+                            i + 1 < regionsIt->second.size() &&
+                            regionsIt->second[i + 1] == Region::Owned)
+                        {
+                            retainFieldValueIfNeeded(argReg,
+                                                     *methodCall->arguments[i],
+                                                     calleeIt->second->params[i + 1].type,
+                                                     ctx);
+                        }
+                    }
+                    args.push_back(argReg);
+                }
+                auto callInst = std::make_unique<IrCall>();
+                callInst->callee = calleeName;
+                callInst->args = std::move(args);
+                return emit(ctx, std::move(callInst));
+            }
+        }
 
         // `.clone()` (Shared<T> - the move-semantics work's own explicit refcounting escape
         // hatch) - checked before every other method name below; unambiguous by name alone
@@ -2177,100 +2388,22 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             elseCtx.structLocals = &elseStructLocals;
             branch->elseValue = lowerExpr(*methodCall->arguments.front(), elseScope, elseCtx);
 
+            mergeBranchScopes(scope, thenScope, elseScope, *branch, ctx);
             return emit(ctx, std::move(branch));
         }
 
-        if (methodCall->method == "push")
-        {
-            // "push" is unit-typed (see docs/language/0033-lists.md), but
-            // still gets a real dest register via emit() rather than -1 -
-            // `x = numbers.push(4)` is legal (mirrors the established
-            // `called = f()` idiom for any unit-returning call), and that
-            // requires a real register to bind `x` to. Matches exactly how
-            // a unit-returning IrCall already works: LlvmIrEmitter types this
-            // register "void" and never calls ref() on it, only typeOf().
-            // priorityQueueKind is checked before stackKind - the first
-            // three-way method-name collision in this codebase (see
-            // docs/language/0039-priority-queues.md).
-            if (priorityQueueKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrPriorityQueuePush>();
-                inst->priorityQueue = object;
-                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
-            if (stackKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrStackPush>();
-                inst->stack = object;
-                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrListPush>();
-            inst->list = object;
-            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            // Move semantics: an inserted struct/enum-typed value is consumed by the collection -
-            // this is the fix for the collection-insert UAF found this session (previously
-            // patched with a runtime retain at the sema level only; the source's own scope-exit
-            // drop must also be suppressed here, or the collection would end up holding a
-            // dangling pointer once that scope ends). A harmless no-op for a primitive/fresh
-            // value (never tracked). Collections themselves still leak by policy, unchanged - so
-            // a consumed struct/enum element becomes part of that same accepted leak, not a UAF.
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
+        // push/pop/peek: List<T>/Stack<T>/PriorityQueue<T> are all real, user-declared generic
+        // structs now (see docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T>
+        // port follow-up), reached via the general struct method dispatch earlier in this same
+        // function - there is no remaining builtin-collection user of these three names at all.
 
-        if (methodCall->method == "pop")
-        {
-            if (priorityQueueKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrPriorityQueuePop>();
-                inst->priorityQueue = object;
-                return emit(ctx, std::move(inst));
-            }
-            if (stackKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrStackPop>();
-                inst->stack = object;
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrListPop>();
-            inst->list = object;
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "peek")
-        {
-            // No longer unambiguous now that PriorityQueue<T> also has
-            // peek() (see docs/language/0039-priority-queues.md) -
-            // priorityQueueKind disambiguates, mirroring push/pop above.
-            if (priorityQueueKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrPriorityQueuePeek>();
-                inst->priorityQueue = object;
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrStackPeek>();
-            inst->stack = object;
-            return emit(ctx, std::move(inst));
-        }
-
-        // push_front/push_back/pop_front/pop_back are shared between
-        // LinkedList<T> (docs/language/0036-linked-lists.md) and Deque<T>
-        // (docs/language/0037-deques.md) - dequeKind (computed above)
-        // disambiguates, mirroring stackKind's own List-vs-Stack dispatch.
+        // push_front/push_back/pop_front/pop_back: Deque<T> is a real, user-declared generic
+        // struct now (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port
+        // follow-up), reached via the general struct method dispatch earlier in this same
+        // function - LinkedList<T> (docs/language/0036-linked-lists.md) is the sole remaining
+        // collection using these method names, so no disambiguation is needed at all anymore.
         if (methodCall->method == "push_front")
         {
-            if (dequeKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrDequePushFront>();
-                inst->deque = object;
-                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
             auto inst = std::make_unique<IrLinkedListPushFront>();
             inst->list = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
@@ -2280,14 +2413,6 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "push_back")
         {
-            if (dequeKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrDequePushBack>();
-                inst->deque = object;
-                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
             auto inst = std::make_unique<IrLinkedListPushBack>();
             inst->list = object;
             inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
@@ -2297,12 +2422,6 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "pop_front")
         {
-            if (dequeKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrDequePopFront>();
-                inst->deque = object;
-                return emit(ctx, std::move(inst));
-            }
             auto inst = std::make_unique<IrLinkedListPopFront>();
             inst->list = object;
             return emit(ctx, std::move(inst));
@@ -2310,42 +2429,22 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "pop_back")
         {
-            if (dequeKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrDequePopBack>();
-                inst->deque = object;
-                return emit(ctx, std::move(inst));
-            }
             auto inst = std::make_unique<IrLinkedListPopBack>();
             inst->list = object;
             return emit(ctx, std::move(inst));
         }
 
-        // "enqueue"/"dequeue" (see docs/language/0038-queues.md) are
-        // brand-new method names nothing else in the language uses - unlike
-        // "push_front"/"push_back"/"pop_front"/"pop_back" above, no
-        // disambiguation resolver is needed at all.
-        if (methodCall->method == "enqueue")
-        {
-            auto inst = std::make_unique<IrQueueEnqueue>();
-            inst->queue = object;
-            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "dequeue")
-        {
-            auto inst = std::make_unique<IrQueueDequeue>();
-            inst->queue = object;
-            return emit(ctx, std::move(inst));
-        }
+        // Queue<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port
+        // follow-up), reached via the general struct method dispatch earlier in this same
+        // function - "enqueue"/"dequeue" were its own unique method names (needing no
+        // disambiguation resolver even before this port), so there is nothing left here at all.
 
         // "append" is shared between String (docs/language/0042-string.md)
         // and Buffer (docs/language/0043-buffer.md) - bufferKind
         // disambiguates. "append_line"/"clear"/"reserve"/"finish" are all
         // brand-new method names nothing else in the language uses - like
-        // "enqueue"/"dequeue" before them, no disambiguation resolver is
+        // "enqueue"/"dequeue" used to before them, no disambiguation resolver is
         // needed for those.
         if (methodCall->method == "append")
         {
@@ -2466,10 +2565,7 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
         if (methodCall->method == "contains")
         {
-            // Four-way now - sortedSetKind is checked before sortedMapKind
-            // and setKind, mirroring push/pop/peek's own priorityQueueKind-
-            // before-stackKind ordering (see
-            // docs/language/0039-priority-queues.md's identical framing).
+            // sortedSetKind is checked before sortedMapKind and setKind.
             const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
             if (sortedSetKind.value_or(false))
             {
@@ -2604,45 +2700,10 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
-    if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrListNew>();
-        inst->elementTypeName = listNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrStackNew>();
-        inst->elementTypeName = stackNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
     if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
     {
         auto inst = std::make_unique<IrLinkedListNew>();
         inst->elementTypeName = linkedListNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrDequeNew>();
-        inst->elementTypeName = dequeNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrQueueNew>();
-        inst->elementTypeName = queueNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* priorityQueueNew = dynamic_cast<const PriorityQueueNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrPriorityQueueNew>();
-        inst->elementTypeName = priorityQueueNew->elementType;
         return emit(ctx, std::move(inst));
     }
 
@@ -2765,12 +2826,37 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         branch->elseValue = lowerExpr(*ifExpr->elseBranch, elseScope, elseCtx);
         emitVoid(elseCtx, std::make_unique<IrRegionExit>());
 
+        mergeBranchScopes(scope, thenScope, elseScope, *branch, ctx);
         return emit(ctx, std::move(branch));
     }
 
     if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
     {
         return lowerLoop(nullptr, *loopExpr->body, scope, ctx);
+    }
+
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        // `unsafe` is purely a TypeChecker-time gate (see docs/language/0019-unsafe.md) - lowers
+        // identically to a bare block, one level down (which itself already handles region
+        // tracking, etc. via the BlockExpr case just below).
+        return lowerExpr(*unsafeBlock->body, scope, ctx);
+    }
+
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        const int pointer = lowerExpr(*deref->operand, scope, ctx);
+        auto inst = std::make_unique<IrDeref>();
+        inst->pointer = pointer;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* addressOf = dynamic_cast<const AddressOfExpr*>(&expr))
+    {
+        // The name is guaranteed already alloca-backed (this expression is what put it in
+        // addressTakenNames), so scope.find returns the slot's own pointer register directly -
+        // no instruction of its own needed here at all.
+        return scope.find(static_cast<const NameExpr&>(*addressOf->operand).name);
     }
 
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
@@ -2976,14 +3062,7 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         // `n = n + 1` needs to actually update the outer `n`, not shadow a
         // throwaway per-traversal copy (mirrors the same fix in
         // Interpreter::execute; see docs/language/0028-loops.md).
-        if (!assignment->forceDefine && scope.contains(assignment->name))
-        {
-            scope.assign(assignment->name, value);
-        }
-        else
-        {
-            scope.define(assignment->name, value);
-        }
+        defineOrAssignLocal(assignment->name, value, assignment->forceDefine, scope, ctx);
         // Real memory reclamation (structs/enums only) - every struct/enum-typed local, not just
         // isObviouslyStructTyped's own narrow (struct-literal-or-struct-param-only) heuristic:
         // resolves `assignment`'s own type the identical way scope.defineSimpleType a few lines
@@ -3041,25 +3120,6 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         if (const auto isSet = isSetExpr(*assignment->value, ctx.function, scope))
         {
             scope.defineIsSet(assignment->name, *isSet);
-        }
-        // Same reasoning, for List-vs-Stack (see isStackExpr and
-        // docs/language/0035-stacks.md).
-        if (const auto isStack = isStackExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsStack(assignment->name, *isStack);
-        }
-        // Same reasoning again, for LinkedList-vs-Deque (see isDequeExpr and
-        // docs/language/0037-deques.md).
-        if (const auto isDeque = isDequeExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsDeque(assignment->name, *isDeque);
-        }
-        // Same reasoning again, for List/Stack-vs-PriorityQueue (see
-        // isPriorityQueueExpr and docs/language/0039-priority-queues.md).
-        if (const auto isPriorityQueue =
-                isPriorityQueueExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsPriorityQueue(assignment->name, *isPriorityQueue);
         }
         // Same reasoning again, for Map/Set-vs-SortedMap (see
         // isSortedMapExpr and docs/language/0040-sorted-maps.md).
@@ -3245,13 +3305,24 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         return;
     }
 
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        const int pointer = lowerExpr(*derefAssign->pointer, scope, ctx);
+        const int value = lowerExpr(*derefAssign->value, scope, ctx);
+        auto inst = std::make_unique<IrDerefAssign>();
+        inst->pointer = pointer;
+        inst->value = value;
+        emitVoid(ctx, std::move(inst));
+        return;
+    }
+
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         const std::int64_t delta = incDec->increment ? 1 : -1;
 
         if (const auto* name = dynamic_cast<const NameExpr*>(incDec->target.get()))
         {
-            const int current = scope.find(name->name);
+            const int current = readLocal(name->name, scope, ctx);
 
             auto constInst = std::make_unique<IrConstInt>();
             constInst->value = delta;
@@ -3263,7 +3334,7 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             binInst->rhs = deltaRegister;
             const int newRegister = emit(ctx, std::move(binInst));
 
-            scope.assign(name->name, newRegister);
+            defineOrAssignLocal(name->name, newRegister, /*forceDefine=*/false, scope, ctx);
             return;
         }
 
@@ -3349,6 +3420,13 @@ std::vector<std::pair<int, int>> IrGenerator::currentLoopCarriedDiff(IrScope& sc
 
 int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& scope, Context& ctx)
 {
+    // `&name` (see docs/language/0019-unsafe.md) - no special-casing needed here for a name
+    // whose address is taken: once defineOrAssignLocal (used by every AssignmentStmt/IncDecStmt)
+    // routes such a name's reassignment through IrDerefAssign instead of scope.assign, its
+    // IrScope binding (the alloca's own slot register) never changes - so the before/after
+    // snapshot diff below, which only ever detects a *changed register binding*, simply never
+    // flags it as carried. The alloca'd slot already makes every iteration see the latest value
+    // via ordinary load/store, with no register-identity trick needed at all.
     auto loopInst = std::make_unique<IrLoop>();
 
     if (condition)
@@ -3383,6 +3461,27 @@ int IrGenerator::lowerLoop(const Expr* condition, const Expr& body, IrScope& sco
     }
 
     return emit(ctx, std::move(loopInst));
+}
+
+void IrGenerator::mergeBranchScopes(IrScope& scope, const IrScope& thenScope,
+                                    const IrScope& elseScope, IrBranch& branch, Context& ctx)
+{
+    const auto preSnapshot = scope.snapshot();
+    const auto thenSnapshot = thenScope.snapshot();
+    const auto elseSnapshot = elseScope.snapshot();
+
+    for (const auto& [name, preReg] : preSnapshot)
+    {
+        const int thenReg = thenSnapshot.at(name);
+        const int elseReg = elseSnapshot.at(name);
+        if (thenReg == preReg && elseReg == preReg)
+        {
+            continue;
+        }
+        const int destReg = freshRegister(ctx);
+        branch.carriedMerges.emplace_back(thenReg, elseReg, destReg);
+        scope.assign(name, destReg);
+    }
 }
 
 void IrGenerator::emitReturn(Context& ctx, int valueRegOrNegOne)
@@ -3436,6 +3535,14 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     int registerCount = 0;
     Context ctx{&irFunction.body, &registerCount, &function, nullptr};
 
+    // `&name` (see docs/language/0019-unsafe.md) - every local/param whose address is taken
+    // anywhere in this function's own body gets a real IrAlloca-backed stack slot instead of the
+    // ordinary pure-SSA register-rebinding every other local uses (see readLocal/
+    // defineOrAssignLocal, and the per-param loop just below).
+    std::unordered_set<std::string> addressTakenNames;
+    collectAddressTakenNames(*function.body, addressTakenNames);
+    ctx.addressTakenNames = &addressTakenNames;
+
     // Real memory reclamation (structs/enums only) - the base (outermost) live-scope frame for
     // this function, holding every Owned struct-typed param's own register (narrow, matching
     // this codebase's own pre-existing struct-only Drop coverage for now - broadened once every
@@ -3453,7 +3560,16 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
     for (std::size_t i = 0; i < function.params.size(); ++i)
     {
         const int paramRegister = freshRegister(ctx);
-        scope.define(function.params[i].name, paramRegister);
+        if (addressTakenNames.contains(function.params[i].name))
+        {
+            auto allocaInst = std::make_unique<IrAlloca>();
+            allocaInst->initialValue = paramRegister;
+            scope.define(function.params[i].name, emit(ctx, std::move(allocaInst)));
+        }
+        else
+        {
+            scope.define(function.params[i].name, paramRegister);
+        }
         paramRegisters.push_back(paramRegister);
 
         if (regions[i] == Region::Owned)
@@ -3754,15 +3870,46 @@ IrProgram IrGenerator::generate(
     int topRegisterCount = 0;
     Context topCtx{&irProgram.topLevel, &topRegisterCount, nullptr, nullptr};
 
+    // `&name` (see docs/language/0019-unsafe.md) - a top-level `p = &x` needs this exact same
+    // treatment as a function-body local (see generateFunction's own identical scan); top-level
+    // script statements are lowered through this separate topCtx, not through generateFunction at
+    // all, so this scan must run here too.
+    std::unordered_set<std::string> topAddressTakenNames;
+    for (const auto& item : program.items)
+    {
+        if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
+        {
+            collectAddressTakenNames(*assignment, topAddressTakenNames);
+        }
+        else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
+        {
+            collectAddressTakenNames(*exprStmt, topAddressTakenNames);
+        }
+    }
+    topCtx.addressTakenNames = &topAddressTakenNames;
+
     for (const auto& item : program.items)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            irProgram.functions.push_back(generateFunction(
-                *function, capabilities.at(function->name), regions.at(function->name)));
+            // A generic top-level function template is never compiled here (mirrors ImplDecl's
+            // identical guard just below) - capabilities/regions were never computed for its own
+            // unsubstituted name, only for each concrete monomorphized clone.
+            if (function->typeParams.empty())
+            {
+                irProgram.functions.push_back(generateFunction(
+                    *function, capabilities.at(function->name), regions.at(function->name)));
+            }
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {
+            // A generic impl template's own methods are never compiled here (mirrors the
+            // identical typeParams.empty() guard just above, and TypeChecker's own) -
+            // capabilities/regions were never computed for "Box.get" (only for each concrete
+            // monomorphized clone, e.g. "Box$i32.get", which arrives as a plain top-level
+            // FunctionDecl and is already compiled by the branch above) - capabilities.at/
+            // regions.at on the template's own unsubstituted name would throw.
+            //
             // Each method compiles exactly like a top-level FunctionDecl
             // (see docs/language/0062-display-trait.md). "Display"'s own
             // "format" method additionally gets registered into
@@ -3772,14 +3919,17 @@ IrProgram IrGenerator::generate(
             // callable-in-principle function but drives no runtime
             // dispatch yet, since nothing else consumes any other trait
             // name this phase.
-            for (const auto& method : implDecl->methods)
+            if (implDecl->typeParams.empty())
             {
-                irProgram.functions.push_back(generateFunction(
-                    *method, capabilities.at(method->name), regions.at(method->name)));
-                if (implDecl->traitName == "Display" &&
-                    method->name == implDecl->typeName + ".format")
+                for (const auto& method : implDecl->methods)
                 {
-                    irProgram.displayImpls[implDecl->typeName] = method->name;
+                    irProgram.functions.push_back(generateFunction(
+                        *method, capabilities.at(method->name), regions.at(method->name)));
+                    if (implDecl->traitName == "Display" &&
+                        method->name == implDecl->typeName + ".format")
+                    {
+                        irProgram.displayImpls[implDecl->typeName] = method->name;
+                    }
                 }
             }
         }
@@ -3809,8 +3959,14 @@ IrProgram IrGenerator::generate(
             // separately honor a move it can't see for itself.
             if (!movedTopLevelBindings.contains(assignment->name))
             {
-                irProgram.topLevelBindings.emplace_back(assignment->name,
-                                                        topScope.find(assignment->name));
+                // `&name` (see docs/language/0019-unsafe.md) - readLocal, not a bare
+                // topScope.find: an address-taken name's own IrScope binding is its alloca's
+                // pointer register, not its logical value, so this must dereference through it
+                // (an extra IrDeref, harmless for every ordinary non-address-taken name, which
+                // readLocal already passes straight through unchanged) to auto-print the actual
+                // current value rather than the slot's own address.
+                irProgram.topLevelBindings.emplace_back(
+                    assignment->name, readLocal(assignment->name, topScope, topCtx));
             }
         }
         else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))

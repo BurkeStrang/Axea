@@ -1,0 +1,32 @@
+extern c malloc(size: i64) -> *i32
+extern c free(ptr: *i32)
+
+sumFirstFour(ptr: *i32) -> i32
+{
+    total = 0
+    unsafe
+    {
+        total = total + *ptr
+        total = total + *(ptr + 1)
+        total = total + *(ptr + 2)
+        total = total + *(ptr + 3)
+    }
+    return total
+}
+
+buf = malloc(16i64)
+unsafe
+{
+    *buf = 10
+    *(buf + 1) = 20
+    *(buf + 2) = 30
+    *(buf + 3) = 40
+}
+total = sumFirstFour(buf)
+print("total = {total}")
+free(buf)
+
+x = 5
+p = &x
+unsafe { *p = 9 }
+print("x via pointer = {unsafe { *p }}, x directly = {x}")

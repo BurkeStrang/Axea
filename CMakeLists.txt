@@ -17,6 +17,7 @@ add_library(axea_compiler
     compiler/ir/IrGenerator.cpp
     compiler/llvmir/LlvmIrEmitter.cpp
     compiler/module/ModuleLoader.cpp
+    compiler/module/UnqualifiedCallResolver.cpp
     compiler/generics/GenericMonomorphizer.cpp
 )
 

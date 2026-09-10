@@ -3,11 +3,15 @@
 #include "generics/GenericMonomorphizer.hpp"
 #include "ir/IrGenerator.hpp"
 #include "lexer/Lexer.hpp"
+#include "module/ModuleLoader.hpp"
 #include "parser/Parser.hpp"
 #include "sema/CapabilityChecker.hpp"
 #include "sema/RegionChecker.hpp"
 #include "sema/TypeChecker.hpp"
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 
 namespace
@@ -51,6 +55,75 @@ namespace
             }
         }
         throw std::runtime_error("no such IR function: " + name);
+    }
+
+    // A fresh, uniquely-named scratch directory per test, mirroring ModuleLoaderTests.cpp's own
+    // TempDir - loadProgram discovers a used module by scanning the entry file's own directory,
+    // so a real on-disk module file is needed to exercise module-qualified call syntax
+    // (`module.name<T>(...)`, parsed as a MethodCallExpr rather than a CallExpr) at all; a single
+    // in-memory source string (generateIr above) can never produce one.
+    struct TempModuleDir
+    {
+        std::filesystem::path path;
+
+        TempModuleDir()
+            : path(std::filesystem::temp_directory_path() /
+                   ("axea_irgen_module_test_" + std::to_string(nextId())))
+        {
+            std::filesystem::create_directories(path);
+        }
+
+        static int nextId()
+        {
+            static std::atomic<int> counter{0};
+            return counter++;
+        }
+
+        ~TempModuleDir()
+        {
+            std::error_code ignored;
+            std::filesystem::remove_all(path, ignored);
+        }
+
+        std::string write(const std::string& filename, const std::string& content) const
+        {
+            const auto filePath = path / filename;
+            std::ofstream out(filePath);
+            out << content;
+            out.close();
+            return filePath.string();
+        }
+    };
+
+    // Same pipeline as generateIr above, starting from a real merged (ModuleLoader) program
+    // instead of a single in-memory source string.
+    IrProgram generateIrFromModule(const std::string& entrySource, const std::string& moduleName,
+                                   const std::string& moduleSource)
+    {
+        TempModuleDir dir;
+        dir.write(moduleName + ".ax", moduleSource);
+        const std::string entryPath = dir.write("main.ax", entrySource);
+
+        auto program = loadProgram(entryPath);
+        monomorphizeGenerics(program);
+
+        TypeChecker typeChecker;
+        typeChecker.check(program);
+
+        CapabilityChecker capabilityChecker;
+        capabilityChecker.check(program);
+
+        RegionChecker regionChecker;
+        regionChecker.check(program,
+                            capabilityChecker.effectiveCapabilities(),
+                            capabilityChecker.closureEffectiveCapabilities());
+
+        IrGenerator irGenerator;
+        return irGenerator.generate(program,
+                                    capabilityChecker.effectiveCapabilities(),
+                                    regionChecker.regions(),
+                                    capabilityChecker.closureEffectiveCapabilities(),
+                                    regionChecker.closureRegions());
     }
 } // namespace
 
@@ -279,29 +352,53 @@ TEST("IrGenerator drops an owned (take) struct parameter at function exit")
     EXPECT_TRUE(sawDrop);
 }
 
-TEST("IrGenerator does not let a name mutated inside an if-branch escape past the branch")
+TEST("IrGenerator merges a name mutated inside an if-branch into a real phi-backed register "
+     "visible past the branch (see docs/language/0021-axea-ir.md's own follow-up correcting its "
+     "own originally-documented 'no merge' limitation - accurate when that IR was only ever "
+     "printed for `ax ir`, wrong once it started driving real LLVM codegen: a compiled `if flag "
+     "{ n++ } return n` used to silently return the pre-if `n`, regardless of `flag`)")
 {
     // No else: the parser desugars this to an empty (unit) else, so both
-    // branches stay type-compatible. The trailing `n` is outside the if, so
-    // it must still resolve to the original parameter register (0) - the
-    // mutation inside the then-branch must not leak past the branch boundary
-    // (see the IrScope "barrier" mechanism in IrGenerator.hpp/.cpp).
+    // branches stay type-compatible. The trailing `n` is outside the if -
+    // IrGenerator::mergeBranchScopes must record a carriedMerges entry on the
+    // IrBranch for `n` (thenReg = the incremented register, elseReg = the
+    // original parameter register 0) and reassign `n`'s own IrScope binding
+    // to that entry's destReg, so `return n` reads the merged register, not
+    // register 0 directly.
     auto program = generateIr("f(n: i32, flag: bool) -> i32 { "
                               "  if flag { n++ } "
                               "  return n "
                               "}");
     const auto& fn = functionNamed(program, "f");
 
+    const IrBranch* branch = nullptr;
     const IrReturn* returnInst = nullptr;
     for (const auto& inst : fn.body)
     {
+        if (const auto* b = dynamic_cast<const IrBranch*>(inst.get()))
+        {
+            branch = b;
+        }
         if (const auto* r = dynamic_cast<const IrReturn*>(inst.get()))
         {
             returnInst = r;
         }
     }
+    EXPECT_TRUE(branch != nullptr);
     EXPECT_TRUE(returnInst != nullptr);
-    EXPECT_EQ(returnInst->value, 0); // still the original parameter register
+    EXPECT_TRUE(returnInst->value != 0); // no longer the original parameter register
+
+    bool foundMerge = false;
+    for (const auto& [thenReg, elseReg, destReg] : branch->carriedMerges)
+    {
+        if (destReg == returnInst->value)
+        {
+            foundMerge = true;
+            EXPECT_EQ(elseReg, 0); // else-branch never touched `n` - still the original register
+            EXPECT_TRUE(thenReg != 0); // then-branch's own `n++` rebound it to a fresh register
+        }
+    }
+    EXPECT_TRUE(foundMerge);
 }
 
 TEST("IrGenerator lets a name mutated inside an if-branch persist for the rest of that same branch")
@@ -526,25 +623,6 @@ TEST("IrGenerator lowers .join(separator) into an IrJoin with object/separator w
     EXPECT_TRUE(join->object != join->separator);
 }
 
-TEST("IrGenerator lowers Array/List slicing into the same IrStrSlice instruction str slicing "
-     "already uses, with a -1 start when the low bound is omitted")
-{
-    auto program = generateIr("f() -> List<i32> { numbers = [1, 2, 3] return numbers[..2] }");
-    const auto& f = functionNamed(program, "f");
-
-    const IrStrSlice* slice = nullptr;
-    for (const auto& inst : f.body)
-    {
-        if (const auto* s = dynamic_cast<const IrStrSlice*>(inst.get()))
-        {
-            slice = s;
-        }
-    }
-    EXPECT_TRUE(slice != nullptr);
-    EXPECT_EQ(slice->start, -1);
-    EXPECT_TRUE(slice->end != -1);
-}
-
 TEST("IrGenerator's closure trampoline emits a real IrBorrowRead (not the pre-existing "
      "unconditional IrMove fallback) for a struct-typed closure parameter that CapabilityChecker "
      "inferred as read-only and RegionChecker resolved as Borrowed (see "
@@ -666,4 +744,289 @@ TEST("IrGenerator registers a monomorphized generic struct instantiation under i
     EXPECT_EQ(it->second.size(), static_cast<std::size_t>(1));
     EXPECT_EQ(it->second[0].first, "value");
     EXPECT_EQ(it->second[0].second, "i32");
+}
+
+TEST("IrGenerator lowers '*ptr' to an IrDeref instruction")
+{
+    auto program = generateIr("f(ptr: *i32) -> i32 { unsafe { return *ptr } }");
+    const auto& f = functionNamed(program, "f");
+
+    bool foundDeref = false;
+    for (const auto& inst : f.body)
+    {
+        if (dynamic_cast<const IrDeref*>(inst.get()))
+        {
+            foundDeref = true;
+        }
+    }
+    EXPECT_TRUE(foundDeref);
+}
+
+TEST("IrGenerator lowers '*ptr = v' to an IrDerefAssign instruction")
+{
+    auto program = generateIr("f(ptr: *i32) { unsafe { *ptr = 5 } }");
+    const auto& f = functionNamed(program, "f");
+
+    bool foundDerefAssign = false;
+    for (const auto& inst : f.body)
+    {
+        if (dynamic_cast<const IrDerefAssign*>(inst.get()))
+        {
+            foundDerefAssign = true;
+        }
+    }
+    EXPECT_TRUE(foundDerefAssign);
+}
+
+TEST("IrGenerator lowers 'ptr + 1' to a plain IrBinOp - the pointer-vs-arithmetic decision is "
+     "made entirely at the LlvmIrEmitter layer, not here")
+{
+    auto program = generateIr("f(ptr: *i32) -> *i32 { unsafe { return ptr + 1 } }");
+    const auto& f = functionNamed(program, "f");
+
+    bool foundBinOp = false;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* binOp = dynamic_cast<const IrBinOp*>(inst.get()))
+        {
+            EXPECT_TRUE(binOp->op == TokenKind::Plus);
+            foundBinOp = true;
+        }
+    }
+    EXPECT_TRUE(foundBinOp);
+}
+
+namespace
+{
+    std::size_t countAllocas(const std::vector<std::unique_ptr<IrInst>>& body)
+    {
+        std::size_t count = 0;
+        for (const auto& inst : body)
+        {
+            if (dynamic_cast<const IrAlloca*>(inst.get()))
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+} // namespace
+
+TEST("IrGenerator lowers '&x' at a local's own definition to an IrAlloca")
+{
+    auto program = generateIr("f() -> i32 { "
+                              "  x = 5 "
+                              "  p = &x "
+                              "  return unsafe { *p } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+    EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(1));
+}
+
+TEST("IrGenerator produces no IrAlloca anywhere for a local whose address is never taken - "
+     "regression guard against the escape analysis over-firing")
+{
+    auto program = generateIr("f() -> i32 { "
+                              "  x = 5 "
+                              "  return x "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+    EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(0));
+}
+
+TEST("IrGenerator lowers '*(&x)' and '(*&x)=v' to IrDeref/IrDerefAssign off the alloca's own dest "
+     "register, not a dedicated load/store instruction")
+{
+    auto program = generateIr("f() -> i32 { "
+                              "  x = 5 "
+                              "  p = &x "
+                              "  unsafe { *p = 9 } "
+                              "  return unsafe { *p } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+
+    int allocaDest = -1;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* alloca = dynamic_cast<const IrAlloca*>(inst.get()))
+        {
+            allocaDest = alloca->dest;
+        }
+    }
+    EXPECT_TRUE(allocaDest != -1);
+
+    bool foundDerefOffSlot = false;
+    bool foundDerefAssignOffSlot = false;
+    for (const auto& inst : f.body)
+    {
+        if (const auto* deref = dynamic_cast<const IrDeref*>(inst.get());
+            deref && deref->pointer == allocaDest)
+        {
+            foundDerefOffSlot = true;
+        }
+        if (const auto* derefAssign = dynamic_cast<const IrDerefAssign*>(inst.get());
+            derefAssign && derefAssign->pointer == allocaDest)
+        {
+            foundDerefAssignOffSlot = true;
+        }
+    }
+    EXPECT_TRUE(foundDerefOffSlot);
+    EXPECT_TRUE(foundDerefAssignOffSlot);
+}
+
+TEST("IrGenerator emits an IrAlloca for a parameter whose address is taken, right after entry")
+{
+    auto program = generateIr("f(x: i32) -> i32 { "
+                              "  p = &x "
+                              "  return unsafe { *p } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+    EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(1));
+}
+
+TEST("IrGenerator emits exactly one IrAlloca (not one per iteration) for a name reassigned "
+     "inside a loop after its address was taken outside it")
+{
+    auto program = generateIr("f() -> i32 { "
+                              "  n = 0 "
+                              "  p = &n "
+                              "  i = 0 "
+                              "  while i < 3 { "
+                              "    n = n + 1 "
+                              "    i = i + 1 "
+                              "  } "
+                              "  return unsafe { *p } "
+                              "}");
+    const auto& f = functionNamed(program, "f");
+    // Only `n` is ever address-taken (via `p = &n`) - `i` never is - so exactly one alloca is
+    // expected. This is a static, compile-time count regardless of how many times the loop
+    // actually runs, so the real regression this guards against is an IrAlloca appearing *inside*
+    // IrLoop::body (re-executed every iteration) instead of once, before the IrLoop itself.
+    EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(1));
+    bool allocaBeforeLoop = false;
+    bool sawLoop = false;
+    for (const auto& inst : f.body)
+    {
+        if (dynamic_cast<const IrAlloca*>(inst.get()) && !sawLoop)
+        {
+            allocaBeforeLoop = true;
+        }
+        if (const auto* loop = dynamic_cast<const IrLoop*>(inst.get()))
+        {
+            sawLoop = true;
+            EXPECT_EQ(countAllocas(loop->body), static_cast<std::size_t>(0));
+        }
+    }
+    EXPECT_TRUE(allocaBeforeLoop);
+}
+
+TEST("IrGenerator emits an IrAlloca for a top-level 'p = &x' - the top-level topCtx needs the "
+     "identical address-taken-name treatment generateFunction's own Context already gets")
+{
+    auto program = generateIr("x = 5 "
+                              "p = &x");
+    EXPECT_EQ(countAllocas(program.topLevel), static_cast<std::size_t>(1));
+}
+
+TEST("IrGenerator lowers an inherent (no-trait) struct method call to an ordinary IrCall to "
+     "the mangled 'TypeName.method' name, with the receiver prepended as the first argument")
+{
+    auto program = generateIr("struct Point { x: i32  y: i32 } "
+                              "impl Point { sum(self) -> i32 { return self.x + self.y } } "
+                              "run() -> i32 { p = Point { x: 1, y: 2 } return p.sum() }");
+    const auto& run = functionNamed(program, "run");
+
+    const IrCall* methodCall = nullptr;
+    for (const auto& inst : run.body)
+    {
+        if (const auto* c = dynamic_cast<const IrCall*>(inst.get()); c && c->callee == "Point.sum")
+        {
+            methodCall = c;
+        }
+    }
+    EXPECT_TRUE(methodCall != nullptr);
+    EXPECT_EQ(methodCall->args.size(), static_cast<std::size_t>(1));
+}
+
+TEST("IrGenerator lowers sizeof<T>() to an IrSizeOf instruction")
+{
+    auto program = generateIr("struct Point { x: i32  y: i32 } "
+                              "run() -> i64 { return sizeof<Point>() }");
+    const auto& run = functionNamed(program, "run");
+
+    const IrSizeOf* sizeOf = nullptr;
+    for (const auto& inst : run.body)
+    {
+        if (const auto* s = dynamic_cast<const IrSizeOf*>(inst.get()))
+        {
+            sizeOf = s;
+        }
+    }
+    EXPECT_TRUE(sizeOf != nullptr);
+    EXPECT_EQ(sizeOf->typeName, "Point");
+}
+
+TEST("IrGenerator lowers a generic top-level function call to an ordinary IrCall to the "
+     "mangled name")
+{
+    auto program = generateIr("identity<T>(x: T) -> T { return x } "
+                              "run() -> i32 { return identity<i32>(42) }");
+    const auto& run = functionNamed(program, "run");
+
+    const IrCall* call = nullptr;
+    for (const auto& inst : run.body)
+    {
+        if (const auto* c = dynamic_cast<const IrCall*>(inst.get());
+            c && c->callee == "identity$i32")
+        {
+            call = c;
+        }
+    }
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->args.size(), static_cast<std::size_t>(1));
+}
+
+TEST("IrGenerator resolves a struct method call on a local built via a module-qualified generic "
+     "constructor with no declared type, dispatching to the real method rather than falling "
+     "through to a stale builtin-collection fallback")
+{
+    // A real, previously-undiscovered bug found while verifying PriorityQueue<T>'s own port
+    // (docs/language/0039-priority-queues.md's own "2026 Update"): `module.newX<T>()` parses as
+    // a MethodCallExpr, not a CallExpr - simpleTypeOfExpr had a case for the latter (used to
+    // resolve a bare local's own type for the general struct method dispatch a few lines later)
+    // but none for the former, so a bare local built this way with no declared type
+    // (`b = boxmod.newBox<i32>()`, as opposed to `b: Box<i32> = boxmod.newBox<i32>()`) never got
+    // its own simpleType recorded at all - a later `b.get()` then couldn't resolve
+    // resolveStructOrEnumType(b) and silently fell through every builtin-collection branch in
+    // IrGenerator's own MethodCallExpr dispatch to the final Map/Set/SortedMap/SortedSet
+    // catch-all "remove" case, which unconditionally reads `methodCall->arguments.front()` -
+    // crashing outright for a zero-arg call like `.get()`'s own analogue here, or silently
+    // calling the wrong method entirely for a call whose own argument count happened to match.
+    // Affected every List<T>-shaped composed collection this session ported identically
+    // (confirmed directly for Stack<T> too, not just PriorityQueue<T>) - this repro uses a
+    // minimal inline generic struct with the same "construct via a module-qualified generic
+    // function, no declared type, then call a method" shape rather than a real collection.
+    const std::string moduleSource = "module boxmod "
+                                     "struct Box<T> { value: T } "
+                                     "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } } "
+                                     "impl<T> Box<T> { get(self) -> T { return self.value } }";
+    auto program = generateIrFromModule("use boxmod "
+                                        "run() -> i32 { "
+                                        "  b = boxmod.newBox<i32>(7) "
+                                        "  return b.get() "
+                                        "}",
+                                        "boxmod", moduleSource);
+    const auto& run = functionNamed(program, "run");
+
+    const IrCall* getCall = nullptr;
+    for (const auto& inst : run.body)
+    {
+        if (const auto* c = dynamic_cast<const IrCall*>(inst.get());
+            c && c->callee.find("get") != std::string::npos)
+        {
+            getCall = c;
+        }
+    }
+    EXPECT_TRUE(getCall != nullptr);
+    EXPECT_EQ(getCall->callee, "Box$i32.get");
 }

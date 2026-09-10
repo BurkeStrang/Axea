@@ -506,6 +506,29 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
                 raise(function.name, *paramIndex, Capability::Write, changed);
             }
         }
+
+        // General struct method dispatch (see docs/language/0006-generics.md's own
+        // generic-methods follow-up) - unlike the hardcoded builtin-method-name list just above,
+        // an arbitrary user method's mutation-of-self isn't knowable by name alone. Reuses
+        // rootParamIndex to find the receiver's own declared type straight from the enclosing
+        // function's own param list (no separate type-resolution machinery needed - this pass
+        // tracks no static types at all), then defers to that resolved method's own effective/
+        // inferred capability on its own self param (index 0) - mirrors the CallExpr case
+        // above's own "ask the callee what capability it needs" mechanism, generalized to a
+        // method-call callee instead of an ordinary one.
+        if (const auto paramIndex = rootParamIndex(*methodCall->object, function))
+        {
+            const std::string& receiverType = function.params[*paramIndex].type;
+            if (const auto it = functions_.find(receiverType + "." + methodCall->method);
+                it != functions_.end() && !it->second->params.empty())
+            {
+                const Capability calleeCapability = effectiveOrInferred(it->second->name, 0);
+                if (calleeCapability == Capability::Write || calleeCapability == Capability::Take)
+                {
+                    raise(function.name, *paramIndex, calleeCapability, changed);
+                }
+            }
+        }
         return;
     }
 
@@ -585,6 +608,12 @@ void CapabilityChecker::inferStmt(const Stmt& stmt, const FunctionDecl& function
         inferExpr(*indexAssign->value, function, changed);
         return;
     }
+
+    // Deliberately no DerefAssignStmt branch here (see Stmt.hpp's own comment on that node) -
+    // `*T` does not participate in the existing safe-reference capability inference at all, per
+    // docs/language/0019-unsafe.md's own Ownership & Capability Rules: `*ptr = value` never
+    // raises `ptr`'s own inferred capability the way `obj.field = value`/`arr[i] = value` raise
+    // `obj`/`arr`'s above.
 
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
@@ -818,6 +847,39 @@ void CapabilityChecker::checkMovesInExpr(const Expr& expr,
         {
             checkMovesInExpr(*argument, function, moved);
         }
+
+        // General struct method dispatch (see docs/language/0006-generics.md's own
+        // generic-methods follow-up) - mirrors the CallExpr case above's own "a take-declared
+        // param receiving a NameExpr argument moves it" check, generalized to a resolved method
+        // callee. Resolves the receiver's declared type the same way inferExpr's own struct
+        // method branch does (rootParamIndex - this pass tracks no other static types); a
+        // receiver not rooted at one of the enclosing function's own params is skipped, same as
+        // inferExpr's own branch (there is nothing of the enclosing function's own to move
+        // in that case). Argument indices are offset by 1 in the resolved method's own params
+        // (index 0 is self, never a caller-supplied argument).
+        if (const auto paramIndex = rootParamIndex(*methodCall->object, function))
+        {
+            const std::string& receiverType = function.params[*paramIndex].type;
+            if (const auto it = functions_.find(receiverType + "." + methodCall->method);
+                it != functions_.end() && !it->second->params.empty())
+            {
+                for (std::size_t i = 0;
+                     i < methodCall->arguments.size() && i + 1 < it->second->params.size();
+                     ++i)
+                {
+                    const auto* argName = dynamic_cast<const NameExpr*>(methodCall->arguments[i].get());
+                    if (!argName)
+                    {
+                        continue;
+                    }
+                    if (ownParamIndex(argName->name, function) &&
+                        effectiveOrInferred(it->second->name, i + 1) == Capability::Take)
+                    {
+                        moved.insert(argName->name);
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -945,9 +1007,15 @@ void CapabilityChecker::check(const Program& program)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            functions_[function->name] = function;
-            inferred_[function->name] =
-                std::vector<Capability>(function->params.size(), Capability::Read);
+            // A generic top-level function template is never registered here (mirrors
+            // IrGenerator/TypeChecker's own identical guard) - only GenericMonomorphizer's
+            // synthesized, concrete-per-call-site clones are.
+            if (function->typeParams.empty())
+            {
+                functions_[function->name] = function;
+                inferred_[function->name] =
+                    std::vector<Capability>(function->params.size(), Capability::Read);
+            }
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {

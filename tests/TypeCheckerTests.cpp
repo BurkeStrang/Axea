@@ -294,66 +294,101 @@ TEST("TypeChecker allows indexing, .length, index-assignment, and for-in on a sl
           "x = f([1, 2, 3])");
 }
 
-TEST("TypeChecker accepts push/pop/indexing/.length/for-in on a List<T>")
+// List<T> is a real, user-declared generic struct now (see docs/language/0006-generics.md's own
+// List<T> port follow-up and std/collections.ax) - `[]`/`for`-in are retired for it (general
+// struct method dispatch's own coverage already exercises push/pop/.get/.set/.length; see
+// "TypeChecker type-checks an ordinary obj.method(args) call..." and its neighbors above). This
+// file's own `check()` helper parses a single in-memory string with no module loader, so these
+// tests use a small inline generic struct with the same shape rather than `use`-ing the real
+// module.
+TEST("TypeChecker accepts push/pop/.get/.set/.length on a generic struct via inherent methods")
 {
-    check("f() -> i32 { "
-          "  numbers = List<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  push(self, value: T) { } "
+          "  pop(self) -> T { return self.get(0) } "
+          "  get(self, index: i32) -> T { return self.get(index) } "
+          "  set(self, index: i32, value: T) { } "
+          "} "
+          "f() -> i32 { "
+          "  numbers = Box<i32> { length: 0 } "
           "  numbers.push(4) "
           "  numbers.push(5) "
           "  last = numbers.pop() "
-          "  numbers[0] = 99 "
-          "  total = 0 "
-          "  for v in numbers { total = total + v } "
-          "  return total + numbers[0] + numbers.length + last "
+          "  numbers.set(0, 99) "
+          "  return numbers.get(0) + numbers.length + last "
           "} "
           "x = f()");
 }
 
 TEST("TypeChecker rejects 'push' with the wrong element type")
 {
-    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.push(true) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { numbers = Box<i32> { length: 0 }  numbers.push(true) }"));
 }
 
 TEST("TypeChecker rejects 'push' with the wrong argument count")
 {
-    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.push(1, 2) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { numbers = Box<i32> { length: 0 }  numbers.push(1, 2) }"));
 }
 
 TEST("TypeChecker rejects 'pop' with arguments")
 {
-    EXPECT_THROWS(check("f() -> i32 { numbers = List<i32>()  return numbers.pop(1) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { pop(self) -> T { return self.length } } "
+                        "f() -> i32 { numbers = Box<i32> { length: 0 }  return numbers.pop(1) }"));
 }
 
 TEST("TypeChecker rejects an unknown method")
 {
-    EXPECT_THROWS(check("f() { numbers = List<i32>()  numbers.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { numbers = Box<i32> { length: 0 }  numbers.size() }"));
 }
 
-TEST("TypeChecker rejects a method call on a non-List value")
+TEST("TypeChecker rejects a method call on a non-generic-struct value")
 {
     EXPECT_THROWS(check("f() { x = 5  x.push(1) }"));
 }
 
-TEST("TypeChecker accepts List<T> as a parameter, return type, and local declared type")
+TEST("TypeChecker accepts a generic struct as a parameter, return type, and local declared type "
+     "(see docs/language/0006-generics.md's own List<T> port follow-up - a real List<T>'s own "
+     "construction needs std/collections.ax's actual malloc-based body, so this uses a small "
+     "inline generic struct with the same shape instead)")
 {
-    check("build() -> List<i32> { "
-          "  x: List<i32> = List<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(numbers: List<i32>) -> i32 { return numbers.length } "
+          "consume(numbers: Box<i32>) -> i32 { return numbers.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects List<T> as a struct field type")
+TEST("TypeChecker accepts List<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: List<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
-TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T>")
+TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T> (see docs/language/0006-generics.md's "
+     "own List<T>/Stack<T> port follow-up - a real Stack<T>'s own construction needs "
+     "std/collections.ax's actual malloc-based body, so this uses a small inline generic struct "
+     "with the same push/pop/peek/length method shape instead)")
 {
-    check("f() -> i32 { "
-          "  s = Stack<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  push(self, value: T) { } "
+          "  pop(self) -> T { return self.length } "
+          "  peek(self) -> T { return self.length } "
+          "} "
+          "f() -> i32 { "
+          "  s = Box<i32> { length: 0 } "
           "  s.push(4) "
           "  s.push(5) "
           "  top = s.peek() "
@@ -363,35 +398,45 @@ TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T>")
           "x = f()");
 }
 
-TEST("TypeChecker rejects 'push' with the wrong element type on a Stack<T>")
+TEST("TypeChecker rejects 'push' with the wrong element type on a Stack<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { s = Stack<i32>()  s.push(true) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.push(true) }"));
 }
 
 TEST("TypeChecker rejects 'peek' with arguments")
 {
-    EXPECT_THROWS(check("f() -> i32 { s = Stack<i32>()  return s.peek(1) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { peek(self) -> T { return self.length } } "
+                        "f() -> i32 { s = Box<i32> { length: 0 }  return s.peek(1) }"));
 }
 
-TEST("TypeChecker rejects an unknown method on a Stack<T>")
+TEST("TypeChecker rejects an unknown method on a Stack<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { s = Stack<i32>()  s.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.size() }"));
 }
 
-TEST("TypeChecker accepts Stack<T> as a parameter, return type, and local declared type")
+TEST("TypeChecker accepts a Stack<T>-shaped struct as a parameter, return type, and local "
+     "declared type")
 {
-    check("build() -> Stack<i32> { "
-          "  x: Stack<i32> = Stack<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(s: Stack<i32>) -> i32 { return s.length } "
+          "consume(s: Box<i32>) -> i32 { return s.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects Stack<T> as a struct field type")
+TEST("TypeChecker accepts Stack<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: Stack<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
 TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a LinkedList<T>")
@@ -438,202 +483,238 @@ TEST("TypeChecker rejects LinkedList<T> as a struct field type")
     EXPECT_THROWS(check("struct Wrapper { items: LinkedList<i32> }"));
 }
 
-TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/[i] on a Deque<T>")
+TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/.get/.set on a "
+     "Deque<T>-shaped struct (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> "
+     "port follow-up - a real Deque<T>'s own construction needs std/collections.ax's actual "
+     "malloc-based body, so this uses a small inline generic struct with the same method shape "
+     "instead)")
 {
-    check("f() -> i32 { "
-          "  d = Deque<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  push_front(self, value: T) { } "
+          "  push_back(self, value: T) { } "
+          "  pop_front(self) -> T { return self.get(0) } "
+          "  pop_back(self) -> T { return self.get(0) } "
+          "  get(self, index: i32) -> T { return self.get(index) } "
+          "  set(self, index: i32, value: T) { } "
+          "} "
+          "f() -> i32 { "
+          "  d = Box<i32> { length: 0 } "
           "  d.push_front(4) "
           "  d.push_back(5) "
           "  front = d.pop_front() "
           "  back = d.pop_back() "
           "  d.push_back(9) "
-          "  mid = d[0] "
+          "  d.set(0, 99) "
+          "  mid = d.get(0) "
           "  return front + back + mid + d.length "
           "} "
           "x = f()");
 }
 
-TEST("TypeChecker accepts index-assignment into a Deque<T>")
+TEST("TypeChecker rejects 'push_front' with the wrong element type on a Deque<T>-shaped struct")
 {
-    check("f() { d = Deque<i32>()  d.push_back(1)  d[0] = 99 }");
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push_front(self, value: T) { } } "
+                        "f() { d = Box<i32> { length: 0 }  d.push_front(true) }"));
 }
 
-TEST("TypeChecker rejects a non-i32 index into a Deque<T>")
+TEST("TypeChecker rejects an unknown method on a Deque<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() -> i32 { d = Deque<i32>()  d.push_back(1)  return d[true] }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push_front(self, value: T) { } } "
+                        "f() { d = Box<i32> { length: 0 }  d.size() }"));
 }
 
-TEST("TypeChecker rejects 'push_front' with the wrong element type on a Deque<T>")
+TEST("TypeChecker accepts a Deque<T>-shaped struct as a parameter, return type, and local "
+     "declared type")
 {
-    EXPECT_THROWS(check("f() { d = Deque<i32>()  d.push_front(true) }"));
-}
-
-TEST("TypeChecker rejects an unknown method on a Deque<T>")
-{
-    EXPECT_THROWS(check("f() { d = Deque<i32>()  d.size() }"));
-}
-
-TEST("TypeChecker accepts Deque<T> as a parameter, return type, and local declared type")
-{
-    check("build() -> Deque<i32> { "
-          "  x: Deque<i32> = Deque<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(d: Deque<i32>) -> i32 { return d.length } "
+          "consume(d: Box<i32>) -> i32 { return d.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects Deque<T> as a struct field type")
+TEST("TypeChecker accepts Deque<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: Deque<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
-TEST("TypeChecker accepts enqueue/dequeue/.length on a Queue<T>")
+TEST("TypeChecker accepts enqueue/dequeue/.length() on a Queue<T>-shaped struct (see "
+     "docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up - "
+     "a real Queue<T>'s own construction needs std/collections.ax's actual malloc-based body, "
+     "so this uses a small inline generic struct with the same method shape instead)")
 {
-    check("f() -> i32 { "
-          "  q = Queue<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  enqueue(self, value: T) { } "
+          "  dequeue(self) -> T { return self.length } "
+          "  length(self) -> i32 { return self.length } "
+          "} "
+          "f() -> i32 { "
+          "  q = Box<i32> { length: 0 } "
           "  q.enqueue(4) "
           "  q.enqueue(5) "
           "  first = q.dequeue() "
-          "  return first + q.length "
+          "  return first + q.length() "
           "} "
           "x = f()");
 }
 
-TEST("TypeChecker rejects indexing into a Queue<T> - deliberately not indexable, unlike Deque<T> "
-     "(communicate intent, see docs/language/0038-queues.md)")
+TEST("TypeChecker rejects 'enqueue' with the wrong element type on a Queue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() -> i32 { q = Queue<i32>()  q.enqueue(1)  return q[0] }"));
-}
-
-TEST("TypeChecker rejects 'enqueue' with the wrong element type on a Queue<T>")
-{
-    EXPECT_THROWS(check("f() { q = Queue<i32>()  q.enqueue(true) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { enqueue(self, value: T) { } } "
+                        "f() { q = Box<i32> { length: 0 }  q.enqueue(true) }"));
 }
 
 TEST("TypeChecker rejects 'dequeue' with arguments")
 {
-    EXPECT_THROWS(check("f() -> i32 { q = Queue<i32>()  return q.dequeue(1) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { dequeue(self) -> T { return self.length } } "
+                        "f() -> i32 { q = Box<i32> { length: 0 }  return q.dequeue(1) }"));
 }
 
-TEST("TypeChecker rejects an unknown method on a Queue<T>")
+TEST("TypeChecker rejects an unknown method on a Queue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { q = Queue<i32>()  q.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { enqueue(self, value: T) { } } "
+                        "f() { q = Box<i32> { length: 0 }  q.size() }"));
 }
 
-TEST("TypeChecker accepts Queue<T> as a parameter, return type, and local declared type")
+TEST("TypeChecker accepts a Queue<T>-shaped struct as a parameter, return type, and local "
+     "declared type")
 {
-    check("build() -> Queue<i32> { "
-          "  x: Queue<i32> = Queue<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(q: Queue<i32>) -> i32 { return q.length } "
+          "consume(q: Box<i32>) -> i32 { return q.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects Queue<T> as a struct field type")
+TEST("TypeChecker accepts Queue<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: Queue<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
-TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<T>")
+TEST("TypeChecker accepts push/pop/peek/.length() on a PriorityQueue<T>-shaped struct (see "
+     "docs/language/0006-generics.md's own PriorityQueue<T> port follow-up - a real "
+     "PriorityQueue<T>'s own construction needs std/collections.ax's actual List<T>-composing "
+     "body, so this uses a small inline generic struct with the same method shape instead)")
 {
-    check("f() -> i32 { "
-          "  q = PriorityQueue<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  push(self, value: T) { } "
+          "  pop(self) -> T { return self.length } "
+          "  peek(self) -> T { return self.length } "
+          "  length(self) -> i32 { return self.length } "
+          "} "
+          "f() -> i32 { "
+          "  q = Box<i32> { length: 0 } "
           "  q.push(4) "
           "  q.push(5) "
           "  top = q.peek() "
           "  smallest = q.pop() "
-          "  return top + smallest + q.length "
+          "  return top + smallest + q.length() "
           "} "
           "x = f()");
 }
 
-TEST("TypeChecker rejects 'push' with the wrong element type on a PriorityQueue<T>")
+TEST("TypeChecker rejects 'push' with the wrong element type on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { q = PriorityQueue<i32>()  q.push(true) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { q = Box<i32> { length: 0 }  q.push(true) }"));
 }
 
-TEST("TypeChecker rejects 'peek' with arguments on a PriorityQueue<T>")
+TEST("TypeChecker rejects 'peek' with arguments on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() -> i32 { q = PriorityQueue<i32>()  return q.peek(1) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { peek(self) -> T { return self.length } } "
+                        "f() -> i32 { q = Box<i32> { length: 0 }  return q.peek(1) }"));
 }
 
-TEST("TypeChecker rejects an unknown method on a PriorityQueue<T>")
+TEST("TypeChecker rejects an unknown method on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { q = PriorityQueue<i32>()  q.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push(self, value: T) { } } "
+                        "f() { q = Box<i32> { length: 0 }  q.size() }"));
 }
 
-TEST("TypeChecker rejects indexing into a PriorityQueue<T> - deliberately not indexable "
-     "(communicate intent, see docs/language/0039-priority-queues.md)")
+TEST("TypeChecker accepts a PriorityQueue<T>-shaped struct as a parameter, return type, and "
+     "local declared type")
 {
-    EXPECT_THROWS(check("f() -> i32 { q = PriorityQueue<i32>()  q.push(1)  return q[0] }"));
-}
-
-TEST("TypeChecker accepts PriorityQueue<T> as a parameter, return type, and local declared type")
-{
-    check("build() -> PriorityQueue<i32> { "
-          "  x: PriorityQueue<i32> = PriorityQueue<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(q: PriorityQueue<i32>) -> i32 { return q.length } "
+          "consume(q: Box<i32>) -> i32 { return q.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects PriorityQueue<T> as a struct field type")
+TEST("TypeChecker accepts PriorityQueue<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: PriorityQueue<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
-TEST("TypeChecker rejects a non-i32 element type on a PriorityQueue<T> - no other type is "
-     "comparable yet (see docs/language/0039-priority-queues.md)")
+// PriorityQueue<T>'s own "T must be orderable" restriction is no longer enforced eagerly at
+// construction time (see docs/language/0039-priority-queues.md's own 2026 update) - it now
+// surfaces from within the monomorphized push/pop method's own '<' sift comparison instead, the
+// exact same shared BinaryExpr/isOrderableKind path every plain 'x < y' in the language already
+// uses (confirmed this session: no PriorityQueue-specific gate). These tests reproduce that same
+// hazard with a small inline generic struct doing a '<' comparison on T, rather than the real
+// malloc-based PriorityQueue<T> body.
+TEST("TypeChecker rejects a non-orderable element type used in a generic method's own '<' "
+     "comparison - the same hazard PriorityQueue<T>'s own sift-up/sift-down relies on")
 {
-    EXPECT_THROWS(check("q = PriorityQueue<bool>()"));
+    EXPECT_THROWS(check("struct Box<T> { value: T } "
+                        "impl<T> Box<T> { less(self, other: Box<T>) -> bool { "
+                        "  return self.value < other.value } } "
+                        "a = Box<bool> { value: true } "
+                        "b = Box<bool> { value: false } "
+                        "c = a.less(b)"));
 }
 
-TEST("TypeChecker rejects a non-i32 element type on a PriorityQueue<T> parameter")
+TEST("TypeChecker accepts a generic method's own '<' comparison for every type "
+     "PriorityQueue<T> itself accepts - i32, i64, f64, char, str (see "
+     "docs/language/0039-priority-queues.md)")
 {
-    EXPECT_THROWS(check("f(q: PriorityQueue<bool>) {}"));
+    const std::string prelude = "struct Box<T> { value: T } "
+                                "impl<T> Box<T> { less(self, other: Box<T>) -> bool { "
+                                "  return self.value < other.value } } ";
+    check(prelude + "a = Box<i32> { value: 1 }  b = Box<i32> { value: 2 }  c = a.less(b)");
+    check(prelude + "a = Box<i64> { value: 1i64 }  b = Box<i64> { value: 2i64 }  c = a.less(b)");
+    check(prelude + "a = Box<f64> { value: 1.0 }  b = Box<f64> { value: 2.0 }  c = a.less(b)");
+    check(prelude + "a = Box<char> { value: 'a' }  b = Box<char> { value: 'b' }  c = a.less(b)");
+    check(prelude +
+          "a = Box<str> { value: \"a\" }  b = Box<str> { value: \"b\" }  c = a.less(b)");
 }
 
-TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<char> - char is orderable "
-     "by codepoint, same as i32 (see docs/language/0044-char.md)")
+TEST("TypeChecker rejects the owned String type in a generic method's own '<' comparison - "
+     "orderability, like Set<T>/Map<K,V>'s own hashability, only ever considers the bare str "
+     "value type, not the owned String type it's otherwise str-coercible to")
 {
-    check("f() -> char { "
-          "  q = PriorityQueue<char>() "
-          "  q.push('B') "
-          "  q.push('A') "
-          "  n = q.length "
-          "  x = q.peek() "
-          "  y = q.pop() "
-          "  return y "
-          "} "
-          "z = f()");
-}
-
-TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<str> - str has a real "
-     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
-{
-    check("f() -> str { "
-          "  q = PriorityQueue<str>() "
-          "  q.push(\"banana\") "
-          "  q.push(\"apple\") "
-          "  n = q.length "
-          "  x = q.peek() "
-          "  y = q.pop() "
-          "  return y "
-          "} "
-          "z = f()");
-}
-
-TEST("TypeChecker rejects the owned String type as a PriorityQueue<T> element - orderability, "
-     "like Set<T>/Map<K,V>'s own hashability, only ever considers the bare str value type, not "
-     "the owned String type it's otherwise str-coercible to")
-{
-    EXPECT_THROWS(check("q = PriorityQueue<String>()"));
+    EXPECT_THROWS(check("struct Box<T> { value: T } "
+                        "impl<T> Box<T> { less(self, other: Box<T>) -> bool { "
+                        "  return self.value < other.value } } "
+                        "a = Box<String> { value: String(\"a\") } "
+                        "b = Box<String> { value: String(\"b\") } "
+                        "c = a.less(b)"));
 }
 
 TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
@@ -700,20 +781,20 @@ TEST("TypeChecker rejects a struct key if any field is not hashable (List<T> fie
                         "f() { s = Set<Bag>() }"));
 }
 
-TEST("TypeChecker accepts a fixed array or List<T> key if the element is hashable")
+TEST("TypeChecker accepts a fixed array key if the element is hashable")
 {
     check("f() { s = Set<[i32;3]>() }");
-    check("f() { s = Set<List<i32>>() }");
 }
 
-TEST("TypeChecker accepts arbitrary V (struct, array, List, nested Map) with no hashability "
-     "requirement")
+TEST("TypeChecker accepts arbitrary V (struct, array, generic struct, nested Map) with no "
+     "hashability requirement")
 {
     check("struct Point { x: i32 } "
+          "struct Box<T> { value: T } "
           "f() { "
           "  m1 = Map<i32,Point>() "
           "  m2 = Map<i32,[i32;3]>() "
-          "  m3 = Map<i32,List<i32>>() "
+          "  m3 = Map<i32,Box<i32>>() "
           "  m4 = Map<i32,Map<i32,i32>>() "
           "}");
 }
@@ -818,15 +899,16 @@ TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<str,i32
           "x = f()");
 }
 
-TEST("TypeChecker accepts arbitrary V (struct, array, List) on a SortedMap<i32,V> - only K is "
-     "restricted to i32, V has no such requirement, mirroring Map<K,V>'s own V")
+TEST("TypeChecker accepts arbitrary V (struct, array, generic struct) on a SortedMap<i32,V> - "
+     "only K is restricted to i32, V has no such requirement, mirroring Map<K,V>'s own V")
 {
     check("struct Point { x: i32 } "
+          "struct Box<T> { value: T } "
           "f() { "
           "  m = SortedMap<i32,Point>() "
           "  m.set(1, Point { x: 1 }) "
-          "  l = SortedMap<i32,List<i32>>() "
-          "  l.set(1, List<i32>()) "
+          "  l = SortedMap<i32,Box<i32>>() "
+          "  l.set(1, Box<i32> { value: 1 }) "
           "}");
 }
 
@@ -1161,6 +1243,60 @@ TEST("TypeChecker accepts a real field access on self inside an impl method body
           "}");
 }
 
+TEST("TypeChecker type-checks an ordinary obj.method(args) call dispatched to an inherent "
+     "(no-trait) impl method, returning its declared return type")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "impl Point { sum(self) -> i32 { return self.x + self.y } } "
+          "p = Point{x: 1, y: 2} "
+          "n = p.sum()");
+}
+
+TEST("TypeChecker rejects a struct method call with the wrong argument count")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "impl Point { add(self, n: i32) -> i32 { return self.x + n } } "
+                        "p = Point{x: 1} "
+                        "n = p.add()"));
+}
+
+TEST("TypeChecker rejects a struct method call with the wrong argument type")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "impl Point { add(self, n: i32) -> i32 { return self.x + n } } "
+                        "p = Point{x: 1} "
+                        "n = p.add(true)"));
+}
+
+TEST("TypeChecker still rejects an undefined method on a struct with the existing diagnostic")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "p = Point{x: 1} "
+                        "n = p.missing()"));
+}
+
+TEST("TypeChecker type-checks a generic struct's method call for two different concrete "
+     "instantiations in the same program")
+{
+    check("struct Box<T> { value: T } "
+          "impl<T> Box<T> { get(self) -> T { return self.value } } "
+          "a = Box<i32>{value: 1} "
+          "x = a.get() "
+          "b = Box<bool>{value: true} "
+          "y = b.get()");
+}
+
+TEST("TypeChecker rejects impl for an unknown (non-struct) target when the impl is inherent")
+{
+    EXPECT_THROWS(check("impl Ghost { render(self) { } }"));
+}
+
+TEST("TypeChecker rejects a generic impl whose own arity disagrees with its target struct's")
+{
+    EXPECT_THROWS(check("struct Box<T> { value: T } "
+                        "impl<T, U> Box<T, U> { get(self) -> T { return self.value } }"));
+}
+
 TEST("TypeChecker accepts Buffer as a parameter, return type, and local declared type")
 {
     check("build() -> Buffer { "
@@ -1289,19 +1425,6 @@ TEST("TypeChecker accepts i64/f64 as print/write/interpolation arguments")
           "p1 = print(a) "
           "p2 = print(b) "
           "s = \"n={a} f={b}\"");
-}
-
-TEST("TypeChecker accepts push/pop/peek/.length on a PriorityQueue<i64> and PriorityQueue<f64> "
-     "- both are orderable, same as i32/char/str (see docs/language/0039-priority-queues.md)")
-{
-    check("f() { "
-          "  qi = PriorityQueue<i64>() "
-          "  qi.push(100i64) "
-          "  y = qi.pop() "
-          "  qf = PriorityQueue<f64>() "
-          "  qf.push(1.5) "
-          "  z = qf.pop() "
-          "}");
 }
 
 TEST("TypeChecker rejects char arithmetic")
@@ -1755,8 +1878,7 @@ TEST("TypeChecker accepts every collection kind as a print(...)/write(...) argum
 {
     check("m: Map<i32,i32> = Map<i32,i32>() print(m)");
     check("s: Set<i32> = Set<i32>() print(s)");
-    check("dq: Deque<i32> = Deque<i32>() print(dq)");
-    check("pq: PriorityQueue<i32> = PriorityQueue<i32>() print(pq)");
+    check("l: LinkedList<i32> = LinkedList<i32>() print(l)");
 }
 
 TEST("TypeChecker checks a bare top-level print(...)/write(...) call via the new ExprStmt "
@@ -1789,36 +1911,10 @@ TEST("TypeChecker accepts i32/bool/char/str/String interpolation spans")
           "return 0 } r = run()");
 }
 
-TEST("TypeChecker accepts slicing a fixed-size array of i32 into a List<i32> - the result "
-     "supports indexing and .length like any other List")
-{
-    check("run() -> i32 { "
-          "numbers = [1, 2, 3, 4] "
-          "sliced = numbers[..2] "
-          "first = sliced[0] "
-          "len = sliced.length "
-          "return first + len } r = run()");
-}
-
-TEST("TypeChecker accepts slicing a List<T> into another List<T>")
-{
-    check("run() -> i32 { "
-          "numbers = List<i32>() "
-          "pushed = numbers.push(1) "
-          "sliced = numbers[..] "
-          "first = sliced[0] "
-          "return first } r = run()");
-}
-
-TEST("TypeChecker accepts slicing an Array/List of struct elements - slicing itself is a "
-     "generic value copy, unrelated to text-representability (docs/language/0050-collection-"
-     "join-and-slicing.md's own arrslice.copy loop shape); print(...)'s own wider allowlist "
-     "(docs/language/0054-collection-printing.md) unblocked this as a side effect")
-{
-    check("struct Point { x: i32 } "
-          "run() -> i32 { pts = [Point{x:1}] sliced = pts[..1] return 0 } "
-          "r = run()");
-}
+// Array/List slicing (arr[a..b] producing a fresh List<T>) is no longer supported - narrowed
+// back to str-only slicing now that List<T> is a real, user-declared generic struct (see
+// docs/language/0006-generics.md's own List<T> port follow-up and TypeChecker's own StrSliceExpr
+// comment for why).
 
 TEST("TypeChecker accepts .join(separator) on an Array of i32, returning a String")
 {
@@ -1827,15 +1923,6 @@ TEST("TypeChecker accepts .join(separator) on an Array of i32, returning a Strin
           "joined = numbers.join(\",\") "
           "len = joined.length "
           "return len } r = run()");
-}
-
-TEST("TypeChecker accepts .join(separator) on a List<str>")
-{
-    check("run() -> i32 { "
-          "names = List<str>() "
-          "pushed = names.push(\"ada\") "
-          "joined = names.join(\", \") "
-          "return joined.length } r = run()");
 }
 
 TEST("TypeChecker rejects .join on a non-Array/List type")
@@ -2183,4 +2270,153 @@ TEST("TypeChecker treats two different instantiations of the same generic struct
 {
     EXPECT_THROWS(check("struct Box<T> { value: T } "
                         "b: Box<i32> = Box<str> { value: \"hi\" }"));
+}
+
+TEST("TypeChecker accepts a pointer dereference inside an 'unsafe' block")
+{
+    check("extern c malloc(size: i64) -> *i32 "
+          "f(ptr: *i32) -> i32 { unsafe { return *ptr } } "
+          "b = malloc(4i64) "
+          "n = f(b)");
+}
+
+TEST("TypeChecker rejects a pointer dereference outside an 'unsafe' block")
+{
+    EXPECT_THROWS(check("f(ptr: *i32) -> i32 { return *ptr }"));
+}
+
+TEST("TypeChecker rejects a pointer dereference assignment outside an 'unsafe' block")
+{
+    EXPECT_THROWS(check("f(ptr: *i32) { *ptr = 5 }"));
+}
+
+TEST("TypeChecker rejects pointer arithmetic outside an 'unsafe' block")
+{
+    EXPECT_THROWS(check("f(ptr: *i32) -> *i32 { return ptr + 1 }"));
+}
+
+TEST("TypeChecker accepts pointer arithmetic inside an 'unsafe' block, result type still a "
+     "pointer")
+{
+    check("f(ptr: *i32) -> i32 { "
+          "  x: *i32 = unsafe { ptr + 1 } "
+          "  return unsafe { *x } "
+          "}");
+}
+
+TEST("TypeChecker rejects dereferencing a non-pointer value")
+{
+    EXPECT_THROWS(check("f(x: i32) -> i32 { unsafe { return *x } }"));
+}
+
+TEST("TypeChecker rejects a pointer dereference assignment whose value type doesn't match the "
+     "pointee type")
+{
+    EXPECT_THROWS(check("f(ptr: *i32) { unsafe { *ptr = \"wrong type\" } }"));
+}
+
+TEST("TypeChecker accepts 'extern c malloc(size: i64) -> *i32' - i64 and *T are FFI-safe")
+{
+    check("extern c malloc(size: i64) -> *i32 extern c free(ptr: *i32)");
+}
+
+TEST("TypeChecker's insideUnsafe resets to false after an 'unsafe' block ends")
+{
+    EXPECT_THROWS(check("f(ptr: *i32) -> i32 { "
+                        "  unsafe { total = *ptr } "
+                        "  return *ptr "
+                        "}"));
+}
+
+TEST("TypeChecker accepts '&x' outside 'unsafe' - taking an address is always safe")
+{
+    check("x = 5 "
+          "p: *i32 = &x");
+}
+
+TEST("TypeChecker accepts dereferencing an address-of result inside 'unsafe'")
+{
+    check("x = 5 "
+          "p = &x "
+          "y = unsafe { *p }");
+}
+
+TEST("TypeChecker rejects '&x.field' - only a bare local variable is supported this phase")
+{
+    EXPECT_THROWS(check("struct Point { x: i32 } "
+                        "f(p: Point) -> *i32 { return &p.x }"));
+}
+
+TEST("TypeChecker rejects '&arr[i]' - only a bare local variable is supported this phase")
+{
+    EXPECT_THROWS(check("f(arr: [i32; 3]) -> *i32 { return &arr[0] }"));
+}
+
+TEST("TypeChecker rejects '&(*p)' - only a bare local variable is supported this phase")
+{
+    EXPECT_THROWS(check("f(p: *i32) -> *i32 { unsafe { return &(*p) } }"));
+}
+
+TEST("TypeChecker rejects '&undefinedName'")
+{
+    EXPECT_THROWS(check("p = &doesNotExist"));
+}
+
+TEST("TypeChecker rejects '&' inside a closure body")
+{
+    EXPECT_THROWS(check("run() -> i32 { "
+                        "  f: fn() -> i32 = fn() -> i32 { "
+                        "    x = 5 "
+                        "    p = &x "
+                        "    return unsafe { *p } "
+                        "  } "
+                        "  return f() "
+                        "} "
+                        "y = run()"));
+}
+
+TEST("TypeChecker types '&x' as '*T' where T is x's own declared type")
+{
+    check("x: i32 = 5 "
+          "p: *i32 = &x");
+    EXPECT_THROWS(check("x: i32 = 5 "
+                        "p: *str = &x"));
+}
+
+TEST("TypeChecker types sizeof<T>() as i64 for a primitive and a struct")
+{
+    check("struct Point { x: i32  y: i32 } "
+          "a: i64 = sizeof<i32>() "
+          "b: i64 = sizeof<Point>()");
+}
+
+TEST("TypeChecker rejects sizeof<T>() for an unknown type")
+{
+    EXPECT_THROWS(check("a = sizeof<Ghost>()"));
+}
+
+TEST("TypeChecker accepts a pointer-to-pointer cast only inside 'unsafe'")
+{
+    check("extern c malloc(size: i64) -> *i32 "
+          "struct Point { x: i32 } "
+          "raw = malloc(4i64) "
+          "p = unsafe { raw as *Point }");
+    EXPECT_THROWS(check("extern c malloc(size: i64) -> *i32 "
+                        "struct Point { x: i32 } "
+                        "raw = malloc(4i64) "
+                        "p = raw as *Point"));
+}
+
+TEST("TypeChecker type-checks a generic top-level function call for two different concrete "
+     "instantiations in the same program")
+{
+    check("identity<T>(x: T) -> T { return x } "
+          "a = identity<i32>(1) "
+          "b = identity<bool>(true)");
+}
+
+TEST("TypeChecker rejects a generic top-level function call with the wrong argument type")
+{
+    EXPECT_THROWS(check("identity<T>(x: T) -> T { return x } "
+                        "a = identity<i32>(true)"));
 }

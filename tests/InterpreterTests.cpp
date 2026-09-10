@@ -30,6 +30,231 @@ namespace
     {
         return runProgram(source).at("x");
     }
+
+    // A minimal, real (malloc-backed) growable-array generic struct, mirroring
+    // std/collections.ax's own actual List<T> (see docs/language/0006-generics.md's own List<T>
+    // port follow-up) - used by tests that need genuinely-working push/pop/get/set behavior.
+    // This file's own runProgram/run helpers parse a single in-memory string with no module
+    // loader, so tests needing a real List<T> prepend this instead of `use`-ing the real module.
+    const std::string kListPrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "struct List<T> { length: i32  data: *T  capacity: i32 } "
+        "newList<T>() -> List<T> { "
+        "  capacity = 1 "
+        "  raw = malloc(capacity as i64 * sizeof<T>()) "
+        "  data = unsafe { raw as *T } "
+        "  return List<T> { length: 0, data: data, capacity: capacity } "
+        "} "
+        "impl<T> List<T> { "
+        "  push(self, value: T) { "
+        "    needed = self.length + 1 "
+        "    if needed > self.capacity { "
+        "      doubled = self.capacity * 2 "
+        "      newCapacity = doubled "
+        "      if needed > doubled { newCapacity = needed } "
+        "      raw = malloc(newCapacity as i64 * sizeof<T>()) "
+        "      newData = unsafe { raw as *T } "
+        "      i = 0 "
+        "      loop { "
+        "        if i >= self.length { break } "
+        "        unsafe { *(newData + i) = *(self.data + i) } "
+        "        i = i + 1 "
+        "      } "
+        "      oldData = unsafe { self.data as *i32 } "
+        "      free(oldData) "
+        "      self.data = newData "
+        "      self.capacity = newCapacity "
+        "    } "
+        "    unsafe { *(self.data + self.length) = value } "
+        "    self.length = self.length + 1 "
+        "  } "
+        "  pop(self) -> T { "
+        "    self.length = self.length - 1 "
+        "    return unsafe { *(self.data + self.length) } "
+        "  } "
+        "  get(self, index: i32) -> T { "
+        "    return unsafe { *(self.data + index) } "
+        "  } "
+        "  set(self, index: i32, value: T) { "
+        "    unsafe { *(self.data + index) = value } "
+        "  } "
+        "  clone(self) -> List<T> { "
+        "    raw = malloc(self.capacity as i64 * sizeof<T>()) "
+        "    newData = unsafe { raw as *T } "
+        "    i = 0 "
+        "    loop { "
+        "      if i >= self.length { break } "
+        "      unsafe { *(newData + i) = *(self.data + i) } "
+        "      i = i + 1 "
+        "    } "
+        "    return List<T> { length: self.length, data: newData, capacity: self.capacity } "
+        "  } "
+        "} "
+        "newListFrom<T>(elements: slice<T>) -> List<T> { "
+        "  list = newList<T>() "
+        "  for value in elements { "
+        "    list.push(value) "
+        "  } "
+        "  return list "
+        "} ";
+
+    // A real (List<T>-composing) Stack<T>, mirroring std/collections.ax's own actual Stack<T>
+    // (see docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up). Built on top
+    // of kListPrelude - tests needing a real Stack<T> prepend this instead.
+    const std::string kStackPrelude = kListPrelude +
+        "struct Stack<T> { items: List<T> } "
+        "newStack<T>() -> Stack<T> { "
+        "  return Stack<T> { items: newList<T>() } "
+        "} "
+        "impl<T> Stack<T> { "
+        "  push(self, value: T) { self.items.push(value) } "
+        "  pop(self) -> T { return self.items.pop() } "
+        "  peek(self) -> T { return self.items.get(self.items.length - 1) } "
+        "  length(self) -> i32 { return self.items.length } "
+        "} ";
+
+    // A real (independent, not List<T>-composing) Deque<T>, mirroring std/collections.ax's own
+    // actual Deque<T> (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port
+    // follow-up) - reallocates to exactly length+1 on every push (matching the retired
+    // intrinsic's own documented behavior, no amortized growth), reading/writing through a
+    // `start` offset so pop_front never needs to shift.
+    const std::string kDequePrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "struct Deque<T> { length: i32  start: i32  data: *T } "
+        "newDeque<T>() -> Deque<T> { "
+        "  raw = malloc(0 as i64 * sizeof<T>()) "
+        "  data = unsafe { raw as *T } "
+        "  return Deque<T> { length: 0, start: 0, data: data } "
+        "} "
+        "impl<T> Deque<T> { "
+        "  push_back(self, value: T) { "
+        "    newLength = self.length + 1 "
+        "    raw = malloc(newLength as i64 * sizeof<T>()) "
+        "    newData = unsafe { raw as *T } "
+        "    i = 0 "
+        "    loop { "
+        "      if i >= self.length { break } "
+        "      unsafe { *(newData + i) = *(self.data + (self.start + i)) } "
+        "      i = i + 1 "
+        "    } "
+        "    unsafe { *(newData + self.length) = value } "
+        "    oldData = unsafe { self.data as *i32 } "
+        "    free(oldData) "
+        "    self.data = newData "
+        "    self.start = 0 "
+        "    self.length = newLength "
+        "  } "
+        "  push_front(self, value: T) { "
+        "    newLength = self.length + 1 "
+        "    raw = malloc(newLength as i64 * sizeof<T>()) "
+        "    newData = unsafe { raw as *T } "
+        "    i = 0 "
+        "    loop { "
+        "      if i >= self.length { break } "
+        "      unsafe { *(newData + (i + 1)) = *(self.data + (self.start + i)) } "
+        "      i = i + 1 "
+        "    } "
+        "    unsafe { *newData = value } "
+        "    oldData = unsafe { self.data as *i32 } "
+        "    free(oldData) "
+        "    self.data = newData "
+        "    self.start = 0 "
+        "    self.length = newLength "
+        "  } "
+        "  pop_front(self) -> T { "
+        "    value = unsafe { *(self.data + self.start) } "
+        "    self.start = self.start + 1 "
+        "    self.length = self.length - 1 "
+        "    return value "
+        "  } "
+        "  pop_back(self) -> T { "
+        "    lastIndex = self.start + self.length - 1 "
+        "    value = unsafe { *(self.data + lastIndex) } "
+        "    self.length = self.length - 1 "
+        "    return value "
+        "  } "
+        "  get(self, index: i32) -> T { return unsafe { *(self.data + (self.start + index)) } } "
+        "  set(self, index: i32, value: T) { unsafe { *(self.data + (self.start + index)) = "
+        "value } } "
+        "} ";
+
+    // A real (Deque<T>-composing) Queue<T>, mirroring std/collections.ax's own actual Queue<T>
+    // (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port
+    // follow-up). Built on top of kDequePrelude - tests needing a real Queue<T> prepend this
+    // instead.
+    const std::string kQueuePrelude = kDequePrelude +
+        "struct Queue<T> { items: Deque<T> } "
+        "newQueue<T>() -> Queue<T> { "
+        "  return Queue<T> { items: newDeque<T>() } "
+        "} "
+        "impl<T> Queue<T> { "
+        "  enqueue(self, value: T) { self.items.push_back(value) } "
+        "  dequeue(self) -> T { return self.items.pop_front() } "
+        "  length(self) -> i32 { return self.items.length } "
+        "} ";
+
+    // A real (List<T>-composing) PriorityQueue<T>'s own struct/impl only, mirroring
+    // std/collections.ax's own actual PriorityQueue<T> (see docs/language/0006-generics.md's own
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up) - split out from
+    // kPriorityQueuePrelude below so a test that already has kStackPrelude's own List<T> (and
+    // doesn't want a second, redeclared copy of it) can append just this instead.
+    const std::string kPriorityQueueImplOnly =
+        "struct PriorityQueue<T> { items: List<T> } "
+        "newPriorityQueue<T>() -> PriorityQueue<T> { "
+        "  return PriorityQueue<T> { items: newList<T>() } "
+        "} "
+        "impl<T> PriorityQueue<T> { "
+        "  push(self, value: T) { "
+        "    self.items.push(value) "
+        "    i = self.items.length - 1 "
+        "    loop { "
+        "      if i <= 0 { break } "
+        "      parent = (i - 1) / 2 "
+        "      if self.items.get(i) < self.items.get(parent) { "
+        "        tmp = self.items.get(parent) "
+        "        self.items.set(parent, self.items.get(i)) "
+        "        self.items.set(i, tmp) "
+        "        i = parent "
+        "      } else { "
+        "        break "
+        "      } "
+        "    } "
+        "  } "
+        "  pop(self) -> T { "
+        "    top = self.items.get(0) "
+        "    lastValue = self.items.pop() "
+        "    if self.items.length > 0 { "
+        "      self.items.set(0, lastValue) "
+        "      i = 0 "
+        "      loop { "
+        "        left = i * 2 + 1 "
+        "        right = i * 2 + 2 "
+        "        smallest = i "
+        "        if left < self.items.length { "
+        "          if self.items.get(left) < self.items.get(smallest) { smallest = left } "
+        "        } "
+        "        if right < self.items.length { "
+        "          if self.items.get(right) < self.items.get(smallest) { smallest = right } "
+        "        } "
+        "        if smallest == i { break } "
+        "        tmp = self.items.get(i) "
+        "        self.items.set(i, self.items.get(smallest)) "
+        "        self.items.set(smallest, tmp) "
+        "        i = smallest "
+        "      } "
+        "    } "
+        "    return top "
+        "  } "
+        "  peek(self) -> T { return self.items.get(0) } "
+        "  length(self) -> i32 { return self.items.length } "
+        "} ";
+
+    // Built on top of kListPrelude, exactly like kStackPrelude - tests needing a real
+    // PriorityQueue<T> (and no other List<T>-composing collection already in scope) prepend
+    // this instead.
+    const std::string kPriorityQueuePrelude = kListPrelude + kPriorityQueueImplOnly;
 } // namespace
 
 TEST("Interpreter evaluates arithmetic with operator precedence")
@@ -194,6 +419,41 @@ TEST("Interpreter field increment mutates the shared struct instance")
                                "called = bump(p) "
                                "x = p.x";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
+}
+
+TEST("Interpreter dispatches a real user-declared 'clone' method instead of Shared<T>'s own "
+     "hardcoded clone shortcut - a real, previously-undiscovered bug: the shortcut used to fire "
+     "unconditionally for any struct's own method literally named 'clone', silently bypassing "
+     "the method body and returning the exact same shared instance as the receiver instead of "
+     "a real, independent copy")
+{
+    const std::string source = "struct Box { value: i32 } "
+                               "impl Box { clone(self) -> Box { return Box { value: self.value } } } "
+                               "bump(b: Box) -> i32 { b.value = b.value + 1  return b.value } "
+                               "a = Box { value: 1 } "
+                               "b = a.clone() "
+                               "called = bump(b) "
+                               "x = a.value "
+                               "y = b.value";
+    auto vars = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 1);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("y")), 2);
+}
+
+TEST("Interpreter's Shared<T>.clone() still returns a second handle to the exact same "
+     "allocation - the intrinsic clone shortcut's own real case, unaffected by the fix above "
+     "that lets a real struct method named 'clone' take precedence over it")
+{
+    const std::string source = "struct Counter { count: i32 } "
+                               "bump(c: Shared<Counter>) { c.count = c.count + 1 } "
+                               "original = Shared(Counter { count: 1 }) "
+                               "copy = original.clone() "
+                               "called = bump(copy) "
+                               "x = original.count "
+                               "y = copy.count";
+    auto vars = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 2);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("y")), 2);
 }
 
 TEST("Interpreter increment of a plain parameter mutates it through nested blocks")
@@ -444,14 +704,25 @@ TEST("Interpreter forwards an existing slice to another slice parameter without 
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
 }
 
-TEST("Interpreter pushes, indexes, and reads .length on a List<T>")
+TEST("Interpreter throws reading past a fresh List<T>'s own single-element backing arena "
+     "(the underlying pointer-arena bounds check, unsafe Milestone 1 - not a dedicated "
+     "\"pop on empty\" error, since a real generic List<T>'s pop() has no bounds check of its "
+     "own, matching the compiled backend's own documented behavior)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  numbers = List<i32>() "
+    EXPECT_THROWS(runProgram(kListPrelude +
+                             "f() -> i32 { l: List<i32> = newList<i32>() return l.pop() } "
+                             "x = f()"));
+}
+
+TEST("Interpreter pushes, gets, and reads .length on a List<T>")
+{
+    const std::string source = kListPrelude +
+                               "f() -> i32 { "
+                               "  numbers: List<i32> = newList<i32>() "
                                "  numbers.push(10) "
                                "  numbers.push(20) "
                                "  numbers.push(30) "
-                               "  return numbers[0] + numbers[2] + numbers.length "
+                               "  return numbers.get(0) + numbers.get(2) + numbers.length "
                                "} "
                                "x = f()"; // 10 + 30 + 3 = 43
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 43);
@@ -459,8 +730,9 @@ TEST("Interpreter pushes, indexes, and reads .length on a List<T>")
 
 TEST("Interpreter pop removes and returns the last element, shrinking .length")
 {
-    const std::string source = "f() -> i32 { "
-                               "  numbers = List<i32>() "
+    const std::string source = kListPrelude +
+                               "f() -> i32 { "
+                               "  numbers: List<i32> = newList<i32>() "
                                "  numbers.push(1) "
                                "  numbers.push(2) "
                                "  numbers.push(3) "
@@ -471,62 +743,69 @@ TEST("Interpreter pop removes and returns the last element, shrinking .length")
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 302);
 }
 
-TEST("Interpreter throws on pop from an empty List")
+TEST("Interpreter set(index, value) on a List mutates it in place")
 {
-    EXPECT_THROWS(runProgram("x = List<i32>().pop()"));
-}
-
-TEST("Interpreter index-assignment on a List mutates it in place")
-{
-    const std::string source = "f() -> i32 { "
-                               "  numbers = List<i32>() "
+    const std::string source = kListPrelude +
+                               "f() -> i32 { "
+                               "  numbers: List<i32> = newList<i32>() "
                                "  numbers.push(1) "
-                               "  numbers[0] = 99 "
-                               "  return numbers[0] "
+                               "  numbers.set(0, 99) "
+                               "  return numbers.get(0) "
                                "} "
                                "x = f()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter for-in-over-a-List sums its elements")
+TEST("Interpreter newListFrom<T> populates a List<T> from an array literal via the ordinary "
+     "array-literal-to-slice<T> coercion")
 {
-    const std::string source = "f() -> i32 { "
-                               "  numbers = List<i32>() "
-                               "  numbers.push(1) "
-                               "  numbers.push(2) "
-                               "  numbers.push(3) "
-                               "  total = 0 "
-                               "  for v in numbers { total = total + v } "
-                               "  return total "
+    const std::string source = kListPrelude +
+                               "f() -> i32 { "
+                               "  numbers = newListFrom<i32>([1, 2, 3]) "
+                               "  return numbers.get(0) * 100 + numbers.get(1) * 10 + "
+                               "         numbers.get(2) + numbers.length "
                                "} "
-                               "x = f()"; // 6
-    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+                               "x = f()"; // 100 + 20 + 3 + 3 = 126
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 126);
+}
+
+TEST("Interpreter List<T>.clone() is a real, independent deep copy - pushing to the clone "
+     "never affects the original's own length or contents, unlike plain struct-value aliasing")
+{
+    const std::string source = kListPrelude +
+                               "f() -> i32 { "
+                               "  numbers = newListFrom<i32>([1, 2, 3]) "
+                               "  clone = numbers.clone() "
+                               "  clone.push(4) "
+                               "  clone.set(0, 99) "
+                               "  return numbers.length * 1000 + numbers.get(0) * 100 + "
+                               "         clone.length * 10 + clone.get(0) "
+                               "} "
+                               "x = f()"; // 3000 + 100 + 40 + 99 = 3239
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3239);
 }
 
 TEST("Interpreter push through a List<T> parameter writes through to the caller")
 {
-    const std::string source = "appendOne(numbers: List<i32>) { numbers.push(99) } "
-                               "a = List<i32>() "
+    const std::string source = kListPrelude +
+                               "appendOne(numbers: List<i32>) { numbers.push(99) } "
+                               "a: List<i32> = newList<i32>() "
                                "called = appendOne(a) "
-                               "x = a[0]";
+                               "x = a.get(0)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a List like an array")
+TEST("Interpreter pushes, peeks, and pops on a Stack<T>, reading .length()")
 {
-    EXPECT_EQ(toString(run("x = List<i32>()")), "[]");
-}
-
-TEST("Interpreter pushes, peeks, and pops on a Stack<T>, reading .length")
-{
-    const std::string source = "f() -> i32 { "
-                               "  s = Stack<i32>() "
+    const std::string source = kStackPrelude +
+                               "f() -> i32 { "
+                               "  s: Stack<i32> = newStack<i32>() "
                                "  s.push(10) "
                                "  s.push(20) "
                                "  s.push(30) "
                                "  top = s.peek() "
                                "  last = s.pop() "
-                               "  return top * 100 + last * 10 + s.length "
+                               "  return top * 100 + last * 10 + s.length() "
                                "} "
                                "x = f()"; // 3000 + 300 + 2 = 3302
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3302);
@@ -534,49 +813,54 @@ TEST("Interpreter pushes, peeks, and pops on a Stack<T>, reading .length")
 
 TEST("Interpreter peek does not remove, unlike pop")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = Stack<i32>() "
+    const std::string source = kStackPrelude +
+                               "f() -> i32 { "
+                               "  s: Stack<i32> = newStack<i32>() "
                                "  s.push(1) "
                                "  s.push(2) "
                                "  a = s.peek() "
                                "  b = s.peek() "
-                               "  return a + b + s.length "
+                               "  return a + b + s.length() "
                                "} "
                                "x = f()"; // 2 + 2 + 2 = 6, peek is idempotent
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
-TEST("Interpreter throws on pop from an empty Stack")
+TEST("Interpreter throws on pop from an empty Stack (the underlying List<T> pointer-arena bounds "
+     "check, unsafe Milestone 1 - not a dedicated \"pop on empty\" error, matching List<T>'s own "
+     "identical behavior since Stack<T> composes over it)")
 {
-    EXPECT_THROWS(runProgram("x = Stack<i32>().pop()"));
+    EXPECT_THROWS(
+        runProgram(kStackPrelude + "f() -> i32 { s: Stack<i32> = newStack<i32>() return s.pop() } "
+                                   "x = f()"));
 }
 
 TEST("Interpreter throws on peek of an empty Stack")
 {
-    EXPECT_THROWS(runProgram("x = Stack<i32>().peek()"));
+    EXPECT_THROWS(runProgram(kStackPrelude +
+                             "f() -> i32 { s: Stack<i32> = newStack<i32>() return s.peek() } "
+                             "x = f()"));
 }
 
 TEST("Interpreter push through a Stack<T> parameter writes through to the caller")
 {
-    const std::string source = "pushOne(s: Stack<i32>) { s.push(99) } "
-                               "a = Stack<i32>() "
+    const std::string source = kStackPrelude +
+                               "pushOne(s: Stack<i32>) { s.push(99) } "
+                               "a: Stack<i32> = newStack<i32>() "
                                "called = pushOne(a) "
                                "x = a.peek()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a Stack like an array (order-preserving, unlike Map/Set)")
+TEST("Interpreter's generic struct List<T> and Stack<T> resolve their own 'push'/'pop' "
+     "independently through the general struct method dispatch, despite Stack<T> composing "
+     "over List<T> internally")
 {
-    EXPECT_EQ(toString(run("x = Stack<i32>()")), "[]");
-}
-
-TEST("Interpreter List<T> and Stack<T> push/pop resolve independently on the same-shaped element "
-     "type")
-{
-    const std::string source = "f() -> i32 { "
-                               "  l = List<i32>() "
+    const std::string source = kStackPrelude +
+                               "f() -> i32 { "
+                               "  l: List<i32> = newList<i32>() "
                                "  l.push(1) "
-                               "  s = Stack<i32>() "
+                               "  s: Stack<i32> = newStack<i32>() "
                                "  s.push(2) "
                                "  return l.pop() * 10 + s.pop() "
                                "} "
@@ -618,7 +902,7 @@ TEST("Interpreter push_front through a LinkedList<T> parameter writes through to
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a LinkedList as a count only, unlike List/Stack's bracket "
+TEST("Interpreter toString formats a LinkedList as a count only, unlike an array's bracket "
      "format")
 {
     const std::string source = "x = LinkedList<i32>() "
@@ -629,8 +913,9 @@ TEST("Interpreter toString formats a LinkedList as a count only, unlike List/Sta
 
 TEST("Interpreter push_front/push_back/pop_front/pop_back on a Deque<T>, reading .length")
 {
-    const std::string source = "f() -> i32 { "
-                               "  d = Deque<i32>() "
+    const std::string source = kDequePrelude +
+                               "f() -> i32 { "
+                               "  d: Deque<i32> = newDeque<i32>() "
                                "  d.push_back(10) "
                                "  d.push_back(20) "
                                "  d.push_front(5) "
@@ -642,72 +927,57 @@ TEST("Interpreter push_front/push_back/pop_front/pop_back on a Deque<T>, reading
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 701);
 }
 
-TEST("Interpreter indexes into a Deque<T> with [i], and supports [i] = assignment")
+TEST("Interpreter reads and writes into a Deque<T> via .get(i)/.set(i, v)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  d = Deque<i32>() "
+    const std::string source = kDequePrelude +
+                               "f() -> i32 { "
+                               "  d: Deque<i32> = newDeque<i32>() "
                                "  d.push_back(10) "
                                "  d.push_back(20) "
                                "  d.push_front(5) "
-                               "  d[1] = 99 "
-                               "  return d[0] + d[1] + d[2] "
+                               "  d.set(1, 99) "
+                               "  return d.get(0) + d.get(1) + d.get(2) "
                                "} "
                                "x = f()"; // 5 + 99 + 20 = 124
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 124);
 }
 
-TEST("Interpreter for-in iterates a Deque<T> - the first collection this session where for-in "
-     "works with no dedicated Parser/IrGenerator support, purely via the shared asIndexable "
-     "mechanism (see docs/language/0037-deques.md)")
+TEST("Interpreter throws on pop_front from an empty Deque (the underlying pointer-arena bounds "
+     "check, unsafe Milestone 1 - not a dedicated \"pop on empty\" error, matching List<T>'s own "
+     "identical port decision)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  d = Deque<i32>() "
-                               "  d.push_back(1) "
-                               "  d.push_back(2) "
-                               "  d.push_back(3) "
-                               "  total = 0 "
-                               "  for v in d { total = total + v } "
-                               "  return total "
-                               "} "
-                               "x = f()"; // 1 + 2 + 3 = 6
-    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
-}
-
-TEST("Interpreter throws on pop_front from an empty Deque")
-{
-    EXPECT_THROWS(runProgram("x = Deque<i32>().pop_front()"));
+    EXPECT_THROWS(
+        runProgram(kDequePrelude +
+                  "f() -> i32 { d: Deque<i32> = newDeque<i32>() return d.pop_front() } "
+                  "x = f()"));
 }
 
 TEST("Interpreter throws on pop_back from an empty Deque")
 {
-    EXPECT_THROWS(runProgram("x = Deque<i32>().pop_back()"));
+    EXPECT_THROWS(
+        runProgram(kDequePrelude +
+                  "f() -> i32 { d: Deque<i32> = newDeque<i32>() return d.pop_back() } "
+                  "x = f()"));
 }
 
 TEST("Interpreter push_front through a Deque<T> parameter writes through to the caller")
 {
-    const std::string source = "pushOne(d: Deque<i32>) { d.push_front(99) } "
-                               "a = Deque<i32>() "
+    const std::string source = kDequePrelude +
+                               "pushOne(d: Deque<i32>) { d.push_front(99) } "
+                               "a: Deque<i32> = newDeque<i32>() "
                                "called = pushOne(a) "
                                "x = a.pop_front()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a Deque with full bracket contents, unlike LinkedList/Map/"
-     "Set's count-only fallback")
+TEST("Interpreter's still-intrinsic LinkedList<T> and its own generic struct Deque<T> resolve "
+     "'push_front'/'pop_front' independently, despite sharing the same method names")
 {
-    const std::string source = "x = Deque<i32>() "
-                               "b = x.push_back(1) "
-                               "c = x.push_front(0)";
-    EXPECT_EQ(toString(run(source)), "[0, 1]");
-}
-
-TEST("Interpreter LinkedList<T> and Deque<T> push_front/pop_front resolve independently on the "
-     "same-shaped element type")
-{
-    const std::string source = "f() -> i32 { "
+    const std::string source = kDequePrelude +
+                               "f() -> i32 { "
                                "  l = LinkedList<i32>() "
                                "  l.push_front(1) "
-                               "  d = Deque<i32>() "
+                               "  d: Deque<i32> = newDeque<i32>() "
                                "  d.push_front(2) "
                                "  return l.pop_front() * 10 + d.pop_front() "
                                "} "
@@ -715,50 +985,50 @@ TEST("Interpreter LinkedList<T> and Deque<T> push_front/pop_front resolve indepe
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 12);
 }
 
-TEST("Interpreter enqueue/dequeue on a Queue<T>, reading .length (classic FIFO order)")
+TEST("Interpreter enqueue/dequeue on a Queue<T>, reading .length() (classic FIFO order)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  q = Queue<i32>() "
+    const std::string source = kQueuePrelude +
+                               "f() -> i32 { "
+                               "  q: Queue<i32> = newQueue<i32>() "
                                "  q.enqueue(10) "
                                "  q.enqueue(20) "
                                "  q.enqueue(30) "
                                "  first = q.dequeue() "
-                               "  return first * 100 + q.length "
+                               "  return first * 100 + q.length() "
                                "} "
                                "x = f()"; // 1000 + 2 = 1002
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1002);
 }
 
-TEST("Interpreter throws on dequeue from an empty Queue")
+TEST("Interpreter throws on dequeue from an empty Queue (the underlying Deque<T> pointer-arena "
+     "bounds check, unsafe Milestone 1 - not a dedicated \"dequeue on empty\" error, matching "
+     "Deque<T>'s own identical behavior since Queue<T> composes over it)")
 {
-    EXPECT_THROWS(runProgram("x = Queue<i32>().dequeue()"));
+    EXPECT_THROWS(
+        runProgram(kQueuePrelude +
+                  "f() -> i32 { q: Queue<i32> = newQueue<i32>() return q.dequeue() } "
+                  "x = f()"));
 }
 
 TEST("Interpreter enqueue through a Queue<T> parameter writes through to the caller")
 {
-    const std::string source = "pushOne(q: Queue<i32>) { q.enqueue(99) } "
-                               "a = Queue<i32>() "
+    const std::string source = kQueuePrelude +
+                               "pushOne(q: Queue<i32>) { q.enqueue(99) } "
+                               "a: Queue<i32> = newQueue<i32>() "
                                "called = pushOne(a) "
                                "x = a.dequeue()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a Queue with full bracket contents, unlike LinkedList/Map/"
-     "Set's count-only fallback")
+TEST("Interpreter's generic structs Deque<T> and Queue<T> resolve their own "
+     "'push_back'/'pop_back'-vs-'enqueue'/'dequeue' independently, despite Queue<T> composing "
+     "over Deque<T> internally")
 {
-    const std::string source = "x = Queue<i32>() "
-                               "b = x.enqueue(1) "
-                               "c = x.enqueue(2)";
-    EXPECT_EQ(toString(run(source)), "[1, 2]");
-}
-
-TEST("Interpreter Deque<T> and Queue<T> are independent types despite the same underlying "
-     "header shape (see docs/language/0038-queues.md)")
-{
-    const std::string source = "g() -> i32 { "
-                               "  d = Deque<i32>() "
+    const std::string source = kQueuePrelude +
+                               "g() -> i32 { "
+                               "  d: Deque<i32> = newDeque<i32>() "
                                "  d.push_back(1) "
-                               "  q = Queue<i32>() "
+                               "  q: Queue<i32> = newQueue<i32>() "
                                "  q.enqueue(2) "
                                "  return d.pop_back() * 10 + q.dequeue() "
                                "} "
@@ -767,16 +1037,17 @@ TEST("Interpreter Deque<T> and Queue<T> are independent types despite the same u
 }
 
 TEST("Interpreter pushes, peeks, and pops on a PriorityQueue<T>, always returning the minimum, "
-     "reading .length")
+     "reading .length()")
 {
-    const std::string source = "f() -> i32 { "
-                               "  q = PriorityQueue<i32>() "
+    const std::string source = kPriorityQueuePrelude +
+                               "f() -> i32 { "
+                               "  q = newPriorityQueue<i32>() "
                                "  q.push(30) "
                                "  q.push(10) "
                                "  q.push(20) "
                                "  top = q.peek() "
                                "  smallest = q.pop() "
-                               "  return top * 100 + smallest * 10 + q.length "
+                               "  return top * 100 + smallest * 10 + q.length() "
                                "} "
                                "x = f()"; // 1000 + 100 + 2 = 1102
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1102);
@@ -784,13 +1055,14 @@ TEST("Interpreter pushes, peeks, and pops on a PriorityQueue<T>, always returnin
 
 TEST("Interpreter PriorityQueue peek does not remove, unlike pop")
 {
-    const std::string source = "f() -> i32 { "
-                               "  q = PriorityQueue<i32>() "
+    const std::string source = kPriorityQueuePrelude +
+                               "f() -> i32 { "
+                               "  q = newPriorityQueue<i32>() "
                                "  q.push(5) "
                                "  q.push(2) "
                                "  a = q.peek() "
                                "  b = q.peek() "
-                               "  return a + b + q.length "
+                               "  return a + b + q.length() "
                                "} "
                                "x = f()"; // 2 + 2 + 2 = 6, peek is idempotent
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
@@ -798,14 +1070,15 @@ TEST("Interpreter PriorityQueue peek does not remove, unlike pop")
 
 TEST("Interpreter PriorityQueue pop always drains in ascending order regardless of push order")
 {
-    const std::string source = "drain(q: PriorityQueue<i32>) -> i32 { "
+    const std::string source = kPriorityQueuePrelude +
+                               "drain(q: PriorityQueue<i32>) -> i32 { "
                                "  total = 0 "
-                               "  while q.length > 0 { "
+                               "  while q.length() > 0 { "
                                "    total = total * 1000 + q.pop() "
                                "  } "
                                "  return total "
                                "} "
-                               "q = PriorityQueue<i32>() "
+                               "q = newPriorityQueue<i32>() "
                                "a = q.push(50) "
                                "b = q.push(10) "
                                "c = q.push(30) "
@@ -816,7 +1089,8 @@ TEST("Interpreter PriorityQueue pop always drains in ascending order regardless 
 TEST("Interpreter PriorityQueue<char> pop drains in ascending codepoint order, mirroring "
      "PriorityQueue<i32>'s own ordering (see docs/language/0044-char.md)")
 {
-    auto vars = runProgram("q = PriorityQueue<char>() "
+    auto vars = runProgram(kPriorityQueuePrelude +
+                           "q = newPriorityQueue<char>() "
                            "a = q.push('C') b = q.push('A') c = q.push('B') "
                            "x = q.pop() y = q.pop() z = q.pop()");
     EXPECT_EQ(toString(vars.at("x")), "A");
@@ -827,7 +1101,8 @@ TEST("Interpreter PriorityQueue<char> pop drains in ascending codepoint order, m
 TEST("Interpreter PriorityQueue<str> pop drains in ascending lexicographic order, mirroring "
      "PriorityQueue<i32>/PriorityQueue<char>'s own ordering (see docs/language/0042-string.md)")
 {
-    auto vars = runProgram("q = PriorityQueue<str>() "
+    auto vars = runProgram(kPriorityQueuePrelude +
+                           "q = newPriorityQueue<str>() "
                            "a = q.push(\"cherry\") b = q.push(\"apple\") c = q.push(\"banana\") "
                            "x = q.pop() y = q.pop() z = q.pop()");
     EXPECT_EQ(toString(vars.at("x")), "apple");
@@ -837,42 +1112,41 @@ TEST("Interpreter PriorityQueue<str> pop drains in ascending lexicographic order
 
 TEST("Interpreter throws on pop from an empty PriorityQueue")
 {
-    EXPECT_THROWS(runProgram("x = PriorityQueue<i32>().pop()"));
+    EXPECT_THROWS(runProgram(kPriorityQueuePrelude + "x = newPriorityQueue<i32>().pop()"));
 }
 
-TEST("Interpreter throws on peek of an empty PriorityQueue")
+// PriorityQueue<T>.peek() on an empty queue no longer throws, unlike .push()/.pop() above -
+// a genuine, narrow behavioral gap from the retired intrinsic, accepted and documented in
+// docs/language/0039-priority-queues.md's own "2026 Update" section. Unlike Stack<T>.peek()
+// (which reads index `length - 1`, naturally landing out of bounds when empty), a heap's root
+// is always index 0, which stays in-bounds even on an empty List<T>'s own eagerly-allocated
+// 1-slot buffer - so this reads whatever value happens to sit there instead of throwing.
+TEST("Interpreter PriorityQueue<T>.peek() on an empty queue no longer throws (documented "
+     "tradeoff of composing over List<T> instead of a dedicated intrinsic)")
 {
-    EXPECT_THROWS(runProgram("x = PriorityQueue<i32>().peek()"));
+    runProgram(kPriorityQueuePrelude + "x = newPriorityQueue<i32>().peek()");
 }
 
 TEST("Interpreter push through a PriorityQueue<T> parameter writes through to the caller")
 {
-    const std::string source = "pushOne(q: PriorityQueue<i32>) { q.push(99) } "
-                               "a = PriorityQueue<i32>() "
+    const std::string source = kPriorityQueuePrelude +
+                               "pushOne(q: PriorityQueue<i32>) { q.push(99) } "
+                               "a = newPriorityQueue<i32>() "
                                "called = pushOne(a) "
                                "x = a.peek()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a PriorityQueue with bracket contents in heap order, not "
-     "sorted order")
+TEST("Interpreter's generic structs List<T>/Stack<T>/PriorityQueue<T> resolve their own "
+     "'push'/'pop' independently")
 {
-    const std::string source = "x = PriorityQueue<i32>() "
-                               "a = x.push(30) "
-                               "b = x.push(10) "
-                               "c = x.push(20)";
-    EXPECT_EQ(toString(run(source)), "[10, 30, 20]");
-}
-
-TEST("Interpreter List<T>/Stack<T>/PriorityQueue<T> push/pop resolve independently on the "
-     "same-shaped element type")
-{
-    const std::string source = "f() -> i32 { "
-                               "  l = List<i32>() "
+    const std::string source = kStackPrelude + kPriorityQueueImplOnly +
+                               "f() -> i32 { "
+                               "  l: List<i32> = newList<i32>() "
                                "  l.push(1) "
-                               "  s = Stack<i32>() "
+                               "  s: Stack<i32> = newStack<i32>() "
                                "  s.push(2) "
-                               "  q = PriorityQueue<i32>() "
+                               "  q = newPriorityQueue<i32>() "
                                "  q.push(3) "
                                "  return l.pop() * 100 + s.pop() * 10 + q.pop() "
                                "} "
@@ -988,20 +1262,21 @@ TEST("Interpreter Map<i32,Point>.get() returns an alias to the map's own stored 
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter Map<K,V> supports arbitrary V: struct, array, List, nested Map")
+TEST("Interpreter Map<K,V> supports arbitrary V: struct, array, generic struct, nested Map")
 {
     const std::string source =
+        kListPrelude +
         "struct Point { x: i32 } "
         "f() -> i32 { "
         "  m1 = Map<i32,Point>()  m1.set(1, Point { x: 10 }) "
         "  m2 = Map<i32,[i32;2]>()  m2.set(1, [1, 2]) "
         "  m3 = Map<i32,List<i32>>() "
-        "  inner = List<i32>()  inner.push(7) "
+        "  inner: List<i32> = newList<i32>()  inner.push(7) "
         "  m3.set(1, inner) "
         "  m4 = Map<i32,Map<i32,i32>>() "
         "  innerMap = Map<i32,i32>()  innerMap.set(5, 50) "
         "  m4.set(1, innerMap) "
-        "  return m1.get(1).x + m2.get(1)[0] + m3.get(1)[0] + m4.get(1).get(5) "
+        "  return m1.get(1).x + m2.get(1)[0] + m3.get(1).get(0) + m4.get(1).get(5) "
         "} "
         "x = f()"; // 10 + 1 + 7 + 50
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 68);
@@ -1546,7 +1821,8 @@ TEST("Interpreter prints i64/f64 top-level bindings and print() arguments via a 
 TEST("Interpreter PriorityQueue<f64>/PriorityQueue<i64> pop in ascending numeric order, "
      "mirroring PriorityQueue<i32>'s own ordering")
 {
-    auto vars = runProgram("q = PriorityQueue<f64>() "
+    auto vars = runProgram(kPriorityQueuePrelude +
+                           "q = newPriorityQueue<f64>() "
                            "a = q.push(3.5) b = q.push(1.5) c = q.push(2.5) "
                            "x = q.pop()");
     EXPECT_EQ(std::get<double>(vars.at("x")), 1.5);
@@ -1598,17 +1874,6 @@ TEST("Interpreter reads a char struct field, printed via the struct's own toStri
     const std::string source = "struct Letter { value: char } "
                                "x = Letter { value: 'Q' }";
     EXPECT_EQ(toString(run(source)), "Letter { value: Q }");
-}
-
-TEST("Interpreter constructs a List<char> and prints it with each element's own Unicode "
-     "character, matching the compiled backend's own byte-for-byte encoding")
-{
-    const std::string source = "xs = List<char>() "
-                               "t1 = xs.push('a') "
-                               "t2 = xs.push('é') "
-                               "t3 = xs.push('🚀') "
-                               "x = xs";
-    EXPECT_EQ(toString(run(source)), "[a, é, 🚀]");
 }
 
 TEST("Interpreter slices a str with a bounded, open-start, open-end, and fully-open range")
@@ -2061,9 +2326,7 @@ TEST("Interpreter evaluates a string interpolation span containing its own neste
      "literal (e.g. `.join(\",\")`'s own separator argument) - see "
      "docs/language/0049-printing-formatting.md's own follow-up")
 {
-    const std::string source = "numbers: List<i32> = List<i32>() "
-                               "a = numbers.push(1) "
-                               "b = numbers.push(2) "
+    const std::string source = "numbers = [1, 2] "
                                "x = \"nums: {numbers.join(\",\")}\"";
     EXPECT_EQ(toString(run(source)), "nums: 1,2");
 }
@@ -2093,34 +2356,10 @@ TEST("Interpreter's print()/write() and interpolation both stringify a plain str
     EXPECT_EQ(captured.str(), "plain\n");
 }
 
-TEST("Interpreter slices a fixed-size array into a fresh List<T> - indexing and .length both "
-     "work on the result, same as any other List (see "
-     "docs/language/0050-collection-join-and-slicing.md)")
-{
-    const std::string source = "f() -> i32 { "
-                               "  numbers = [10, 20, 30, 40] "
-                               "  sliced = numbers[1..3] "
-                               "  return sliced[0] + sliced[1] + sliced.length "
-                               "} "
-                               "x = f()"; // 20 + 30 + 2 = 52
-    EXPECT_EQ(std::get<std::int64_t>(run(source)), 52);
-}
-
-TEST("Interpreter slices a List<T> into another fresh List<T>, unaffected by later mutation of "
-     "the source")
-{
-    const std::string source = "f() -> i32 { "
-                               "  numbers = List<i32>() "
-                               "  numbers.push(1) "
-                               "  numbers.push(2) "
-                               "  numbers.push(3) "
-                               "  sliced = numbers[..] "
-                               "  numbers.push(4) "
-                               "  return sliced.length "
-                               "} "
-                               "x = f()";
-    EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
-}
+// Array/List slicing (arr[a..b] producing a fresh List<T>) is no longer supported - narrowed
+// back to str-only slicing now that List<T> is a real, user-declared generic struct (see
+// docs/language/0006-generics.md's own List<T> port follow-up and TypeChecker's own StrSliceExpr
+// comment for why).
 
 TEST("Interpreter defaults a missing slice start to 0 and a missing end to the collection's own "
      "length, matching str slicing's own precedent")
@@ -2162,18 +2401,6 @@ TEST("Interpreter's .join() on an empty Array/List returns an empty String")
                                "} "
                                "x = f()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
-}
-
-TEST("Interpreter's .join() works on a List<str>, joining each string with the separator")
-{
-    const std::string source = "f() -> String { "
-                               "  names = List<str>() "
-                               "  names.push(\"ada\") "
-                               "  names.push(\"grace\") "
-                               "  return names.join(\", \") "
-                               "} "
-                               "x = f()";
-    EXPECT_EQ(toString(run(source)), "ada, grace");
 }
 
 TEST("Interpreter applies a numeric format spec's zero-padded width to an i32 interpolation "
@@ -2348,6 +2575,54 @@ TEST("Interpreter combines a self-doc prefix with a debug spec: '{s=:?}' prints 
      "source text, '=', then the quoted debug representation")
 {
     EXPECT_EQ(toString(run("s = \"hi\" x = \"{s=:?}\"")), "s=\"hi\"");
+}
+
+TEST("Interpreter dispatches an ordinary obj.method(args) call to an inherent (no-trait) impl "
+     "method, returning the right value (see docs/language/0006-generics.md's own "
+     "generic-methods follow-up)")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "impl Point { sum(self) -> i32 { return self.x + self.y } } "
+        "p = Point { x: 3, y: 4 } "
+        "x = p.sum()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 7);
+}
+
+TEST("Interpreter's inherent method mutates self and the caller observes the mutation - real "
+     "aliasing (by shared_ptr), not a copy")
+{
+    const std::string source =
+        "struct Counter { value: i32 } "
+        "impl Counter { increment(self) { self.value = self.value + 1 } } "
+        "run() -> i32 { "
+        "  c = Counter { value: 0 } "
+        "  c.increment() "
+        "  c.increment() "
+        "  return c.value "
+        "} "
+        "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
+}
+
+TEST("Interpreter throws for an undefined method on a struct")
+{
+    EXPECT_THROWS(run("struct Point { x: i32 } p = Point { x: 1 } x = p.missing()"));
+}
+
+TEST("Interpreter dispatches a generic struct's method call correctly for two different "
+     "concrete instantiations in the same program")
+{
+    const std::string source =
+        "struct Box<T> { value: T } "
+        "impl<T> Box<T> { get(self) -> T { return self.value } } "
+        "a = Box<i32>{value: 42} "
+        "b = Box<bool>{value: true} "
+        "x = a.get() "
+        "y = b.get()";
+    auto vars = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 42);
+    EXPECT_EQ(std::get<bool>(vars.at("y")), true);
 }
 
 TEST("Interpreter dispatches to a user's impl Display for a struct interpolated inside a "
@@ -2614,4 +2889,181 @@ TEST("Interpreter supports a struct type argument in a generic struct instantiat
                                "b = Box<Point> { value: Point { x: 1  y: 2 } } "
                                "x = b.value.x + b.value.y";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
+}
+
+TEST("Interpreter round-trips a malloc'd pointer through a write and a read")
+{
+    const std::string source = "extern c malloc(size: i64) -> *i32 "
+                               "buf = malloc(4i64) "
+                               "unsafe { *buf = 42 } "
+                               "x = unsafe { *buf }";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
+}
+
+TEST("Interpreter's 'ptr + i' / 'ptr - i' address the correct arena slot")
+{
+    // Real newlines (not the usual space-joined one-liner style) between consecutive
+    // '*'-led statements - required so the parser's own line-based guard against
+    // "total = 2\n*buf = 1" being misparsed as multiplication doesn't instead misparse these
+    // three back-to-back dereference-assignments as one long chain on a single source line.
+    const std::string source = "extern c malloc(size: i64) -> *i32 \n"
+                               "buf = malloc(12i64) \n"
+                               "unsafe { \n"
+                               "  *buf = 1 \n"
+                               "  *(buf + 1) = 2 \n"
+                               "  *(buf + 2) = 3 \n"
+                               "} \n"
+                               "x = unsafe { *(buf + 2) - *(buf + 1) - *buf }";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
+}
+
+TEST("Interpreter's 'free' is a harmless no-op")
+{
+    const std::string source = "extern c malloc(size: i64) -> *i32 "
+                               "extern c free(ptr: *i32) "
+                               "buf = malloc(4i64) "
+                               "unsafe { *buf = 7 } "
+                               "x = unsafe { *buf } "
+                               "called = free(buf)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 7);
+}
+
+TEST("Interpreter runs the full malloc/unsafe/pointer-arithmetic worked example end to end")
+{
+    // Real newlines between consecutive '*'-led statements - see the identical note on the
+    // pointer-arithmetic test just above.
+    const std::string source =
+        "extern c malloc(size: i64) -> *i32 \n"
+        "extern c free(ptr: *i32) \n"
+        "sumFirstFour(ptr: *i32) -> i32 { \n"
+        "  total = 0 \n"
+        "  unsafe { \n"
+        "    total = total + *ptr \n"
+        "    total = total + *(ptr + 1) \n"
+        "    total = total + *(ptr + 2) \n"
+        "    total = total + *(ptr + 3) \n"
+        "  } \n"
+        "  return total \n"
+        "} \n"
+        "buf = malloc(16i64) \n"
+        "unsafe { \n"
+        "  *buf = 10 \n"
+        "  *(buf + 1) = 20 \n"
+        "  *(buf + 2) = 30 \n"
+        "  *(buf + 3) = 40 \n"
+        "} \n"
+        "x = sumFirstFour(buf) \n"
+        "called = free(buf)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 100);
+}
+
+TEST("Interpreter throws when dereferencing an out-of-bounds pointer offset")
+{
+    EXPECT_THROWS(runProgram("extern c malloc(size: i64) -> *i32 "
+                             "buf = malloc(4i64) "
+                             "x = unsafe { *(buf + 10) }"));
+}
+
+TEST("Interpreter throws calling 'malloc' via an extern declared without a pointer return type")
+{
+    EXPECT_THROWS(runProgram("extern c malloc(size: i64) -> i32 "
+                             "buf = malloc(4i64)"));
+}
+
+TEST("Interpreter reads through '&x' via a dereference")
+{
+    const std::string source = "x = 5 "
+                               "p = &x "
+                               "y = unsafe { *p }";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 5);
+}
+
+TEST("Interpreter's write through '&x' is observed via the original name - real aliasing, not a "
+     "copy")
+{
+    const std::string source = "x = 5 "
+                               "p = &x "
+                               "unsafe { *p = 9 } "
+                               "y = x";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter throws pointer arithmetic past a '&x'-produced singleton pointer - a runtime "
+     "error, matching the existing out-of-bounds arena check exactly (an address-of cell is "
+     "simply a size-1 arena)")
+{
+    EXPECT_THROWS(runProgram("x = 5 "
+                             "p = &x "
+                             "y = unsafe { *(p + 1) }"));
+}
+
+TEST("Interpreter's '&' works the same for a function parameter as for a local")
+{
+    const std::string source = "f(x: i32) -> i32 { "
+                               "  p = &x "
+                               "  unsafe { *p = 9 } "
+                               "  return x "
+                               "} "
+                               "x = f(5)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
+}
+
+TEST("Interpreter behaves identically for a local whose address is never taken - regression "
+     "guard against the address-taken scan over-firing")
+{
+    const std::string source = "y = 5 "
+                               "x = y + 1";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
+}
+
+TEST("Interpreter's variables() still finds a top-level name after its address was taken - "
+     "regression guard for Environment::bindings() merging boxed cells back in")
+{
+    auto results = runProgram("x = 5 "
+                              "p = &x");
+    EXPECT_EQ(std::get<std::int64_t>(results.at("x")), 5);
+}
+
+TEST("Interpreter evaluates sizeof<T>() for a primitive and a struct")
+{
+    const std::string source =
+        "struct Point { x: i32  y: i32 } "
+        "a = sizeof<i32>() "
+        "b = sizeof<i64>() "
+        "c = sizeof<Point>() "
+        "x = a";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
+    auto vars = runProgram(source);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("b")), 8);
+    EXPECT_EQ(std::get<std::int64_t>(vars.at("c")), 8);
+}
+
+TEST("Interpreter round-trips a pointer-to-pointer cast: a malloc'd *i32 cast to *i64, "
+     "written and read back correctly, inside 'unsafe'")
+{
+    const std::string source =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "run(raw: *i32) -> i64 { "
+        "  p = unsafe { raw as *i64 } "
+        "  unsafe { *p = 123456789i64 } "
+        "  return unsafe { *p } "
+        "} "
+        "buf = malloc(8i64) "
+        "x = run(buf) "
+        "y = free(buf)";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 123456789);
+}
+
+TEST("Interpreter dispatches a generic top-level function call correctly for two different "
+     "concrete instantiations in the same program")
+{
+    const std::string source =
+        "identity<T>(x: T) -> T { return x } "
+        "a = identity<i32>(42) "
+        "b = identity<bool>(true) "
+        "x = a";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
+    auto vars = runProgram(source);
+    EXPECT_EQ(std::get<bool>(vars.at("b")), true);
 }

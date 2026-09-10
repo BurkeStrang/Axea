@@ -1,25 +1,33 @@
+use collections
+
 build() -> List<i32>
 {
+    // Unqualified TypeName<T>() construction sugar - resolves to
+    // collections.newList<i32>() since exactly one used module (collections)
+    // declares both `struct List<T>` and a matching `newList<T>` constructor.
     numbers = List<i32>()
-    numbers.push(10)
-    numbers.push(20)
-    numbers.push(30)
+    p1 = numbers.push(10)
+    p2 = numbers.push(20)
+    p3 = numbers.push(30)
     return numbers
 }
 
 sum(numbers: List<i32>) -> i32
 {
     total = 0
-    for v in numbers
+    i = 0
+    loop
     {
-        total = total + v
+        if i >= numbers.length { break }
+        total = total + numbers.get(i)
+        i = i + 1
     }
     return total
 }
 
 appendOne(numbers: List<i32>)
 {
-    numbers.push(99)
+    p = numbers.push(99)
 }
 
 numbers = build()
@@ -33,3 +41,14 @@ print("total = {total}")
 print("totalAfterAppend = {totalAfterAppend}")
 print("last = {last}")
 print("count = {count}")
+
+// A compact way to build a List<T> already populated from an array literal, and an explicit,
+// honest deep copy - pushing to the clone never touches the original.
+literalNumbers = collections.newListFrom<i32>([1, 2, 3])
+cloneNumbers = literalNumbers.clone()
+pushedToClone = cloneNumbers.push(4)
+literalSum = sum(literalNumbers)
+cloneSum = sum(cloneNumbers)
+
+print("literalSum = {literalSum}")
+print("cloneSum = {cloneSum}")

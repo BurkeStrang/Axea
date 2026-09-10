@@ -282,149 +282,11 @@ TEST("LlvmIrEmitter reads a slice's .length via extractvalue, not a compile-time
     EXPECT_TRUE(ir.find("extractvalue {i32*, i32} %0, 1") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter represents List<T> as a pointer to an anonymous {length, data, capacity} "
-     "heap record - capacity (amortized growth, see ensureListCapacity) is field 2, at the "
-     "end, not field 1, to avoid colliding with Deque<T>'s own {i32, i32, T*}* header text")
-{
-    auto ir = emitLlvmIr("sum(numbers: List<i32>) -> i32 { return numbers[0] }");
-    EXPECT_TRUE(ir.find("define i32 @sum({i32, i32*, i32}* %0) {") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's List<T>() construction mallocs a header and zero-initializes it")
-{
-    auto ir = emitLlvmIr("f() -> i32 { numbers = List<i32>()  return numbers.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's push grows (via the shared ensureListCapacity helper) plus a hand-rolled "
-     "copy loop, no phi - capacity starts at 0, so the very first push always grows")
-{
-    auto ir = emitLlvmIr("f() { numbers = List<i32>()  numbers.push(4) }");
-    // Two mallocs: one for the fresh empty list, one for push's grown buffer.
-    const auto firstMalloc = ir.find("call i8* @malloc(i64");
-    EXPECT_TRUE(firstMalloc != std::string::npos);
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64", firstMalloc + 1) != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.body") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.done") != std::string::npos);
-    // Loop-carried state here uses alloca/load/store, not a phi node (see
-    // docs/language/0033-lists.md - unnamed sequential registers here can't
-    // forward-reference a not-yet-emitted value the way a phi would need).
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter's List push grows by doubling capacity (or exactly enough, whichever is "
-     "larger) - amortized O(1) push, not a reallocate-to-exactly-length-every-time O(n) one "
-     "(see ensureListCapacity)")
-{
-    auto ir = emitLlvmIr("f() { numbers = List<i32>()  numbers.push(4) }");
-    // The doubling formula itself: capacity * 2, then select the larger of
-    // that and the actually-needed length - the same shape
-    // ensureBufferCapacity already established for Buffer.
-    EXPECT_TRUE(ir.find("mul i32 %") != std::string::npos);
-    const auto mulPos = ir.find("mul i32 %");
-    EXPECT_TRUE(ir.find(", 2\n", mulPos) != std::string::npos);
-    EXPECT_TRUE(ir.find("select i1 %") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter pop has no bounds check, matching every other out-of-bounds case here")
-{
-    auto ir =
-        emitLlvmIr("f() -> i32 { numbers = List<i32>()  numbers.push(1)  return numbers.pop() }");
-    // Decrements length and loads the element at the old (pre-decrement)
-    // length - 1, with no runtime check that length was > 0 beforehand.
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter indexes a List via a header-then-flat-pointer GEP chain, not array's "
-     "direct two-index form")
-{
-    auto ir = emitLlvmIr("get(numbers: List<i32>, i: i32) -> i32 { return numbers[i] }");
-    // Field 1 (data pointer) of the header is loaded first - still field 1,
-    // even with the new capacity field at the end (field 2) - see
-    // ensureListCapacity's own comment for why capacity went at the end
-    // instead of field 1.
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32*, i32}, {i32, i32*, i32}* %0, i32 0, i32 1") !=
-                std::string::npos);
-    // ...then a flat single-index GEP into it (same idiom slice indexing uses).
-    EXPECT_TRUE(ir.find("getelementptr i32, i32* %") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a List's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(numbers: List<i32>) -> i32 { return numbers.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32*, i32}, {i32, i32*, i32}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter represents Stack<T> as the exact same LLVM type as List<T>")
-{
-    auto ir = emitLlvmIr("useStack(s: Stack<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("define i32 @useStack({i32, i32*, i32}* %0) {") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's Stack<T>() construction mallocs a header and zero-initializes it")
-{
-    auto ir = emitLlvmIr("f() -> i32 { s = Stack<i32>()  return s.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's Stack push grows (via the same shared ensureListCapacity helper List's "
-     "own push uses) plus a hand-rolled copy loop, no phi")
-{
-    auto ir = emitLlvmIr("f() { s = Stack<i32>()  s.push(4) }");
-    EXPECT_TRUE(ir.find("list.grow.copy.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.body") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.done") != std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter Stack pop has no bounds check")
-{
-    auto ir = emitLlvmIr("f() -> i32 { s = Stack<i32>()  s.push(1)  return s.pop() }");
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter Stack peek reads the top element without decrementing length")
-{
-    // Isolated to a function taking Stack<i32> as a *parameter* (no
-    // construction/push in the same function) - emitStackPeek's own output
-    // is then the function's entire body: computes length-1 (sub) to index
-    // the top element, but - unlike pop - never stores anything back (see
-    // docs/language/0035-stacks.md); pop's own decrement-and-store-back
-    // would introduce a "store i32 %..." into the length field that peek's
-    // pure-read shape never does.
-    auto ir = emitLlvmIr("f(s: Stack<i32>) -> i32 { return s.peek() }");
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
-    EXPECT_TRUE(ir.find("store") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a Stack's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(s: Stack<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32*, i32}, {i32, i32*, i32}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter List<T> and Stack<T> push each call ensureListCapacity (two separate "
-     "grow-check sites, since push itself is still an independently hand-duplicated emit "
-     "function per collection) and produce the same underlying shape")
-{
-    auto ir = emitLlvmIr("useList(l: List<i32>) { l.push(1) } "
-                         "useStack(s: Stack<i32>) { s.push(1) }");
-    // Two independent "did we need to grow" checks, one per push call site -
-    // not one shared check reused across both (each push call still emits
-    // its own inline call into ensureListCapacity).
-    const auto firstGrowCheck = ir.find("icmp sgt i32 %");
-    EXPECT_TRUE(firstGrowCheck != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp sgt i32 %", firstGrowCheck + 1) != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @useList({i32, i32*, i32}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @useStack({i32, i32*, i32}* %0) {") != std::string::npos);
-}
+// List<T>/Stack<T> are real, user-declared generic structs now, not compiler intrinsics (see
+// docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up and std/collections.ax) -
+// their own internal LLVM representation is no longer this compiler's concern to unit-test; their
+// behavior is verified via examples/list.ax and examples/stack.ax instead (both interpreted and
+// compiled).
 
 TEST("LlvmIrEmitter declares a named self-referential node type for LinkedList<T>")
 {
@@ -497,255 +359,25 @@ TEST("LlvmIrEmitter reads a LinkedList's .length via GEP+load, not a compile-tim
                 std::string::npos);
 }
 
-TEST("LlvmIrEmitter prints a top-level LinkedList<T> binding as a count only, unlike List/Stack's "
+TEST("LlvmIrEmitter prints a top-level LinkedList<T> binding as a count only, unlike an array's "
      "runtime print loop")
 {
     auto ir = emitLlvmIr("s = LinkedList<i32>()");
     EXPECT_TRUE(ir.find("LinkedList(") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter represents Deque<i32> as a pointer to an anonymous 3-field heap header, no "
-     "named type at all")
-{
-    // Unlike Map/Set/LinkedList (all named, self-referential), Deque<T>'s
-    // third field is a plain T*, not an entry pointer - no monomorphization
-    // needed (see docs/language/0037-deques.md).
-    auto ir = emitLlvmIr("useDeque(d: Deque<i32>) -> i32 { return d.length }");
-    EXPECT_TRUE(ir.find("define i32 @useDeque({i32, i32, i32*}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("%axea.") == std::string::npos);
-}
+// Deque<T>/Queue<T> are real, user-declared generic structs now, not compiler intrinsics (see
+// docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up and
+// std/collections.ax) - their own internal LLVM representation is no longer this compiler's
+// concern to unit-test; their behavior is verified via examples/deque.ax and examples/queue.ax
+// instead (both interpreted and compiled).
 
-TEST("LlvmIrEmitter's Deque<T>() construction mallocs a header and zero-initializes all 3 fields")
-{
-    auto ir = emitLlvmIr("f() -> i32 { d = Deque<i32>()  return d.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0 (and start = 0)
-    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos); // data = null
-}
-
-TEST("LlvmIrEmitter Deque push_front/push_back reallocate via a hand-rolled copy loop, no phi")
-{
-    auto ir = emitLlvmIr("f() { d = Deque<i32>()  d.push_front(1)  d.push_back(2) }");
-    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("deque.push.copy.body") != std::string::npos);
-    EXPECT_TRUE(ir.find("deque.push.copy.done") != std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter Deque pop_front/pop_back have no bounds check and need no loop or branch")
-{
-    // Isolated to a function taking Deque<i32> as a parameter (no
-    // construction/push in the same function) - simpler than even List's
-    // own pop: just start/count arithmetic, no loop label of any kind.
-    auto ir = emitLlvmIr("f(d: Deque<i32>) -> i32 { return d.pop_front() + d.pop_back() }");
-    EXPECT_TRUE(ir.find("add i32") != std::string::npos); // pop_front's start+1
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos); // pop_back's count-1
-    EXPECT_TRUE(ir.find("deque.push.copy") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter Deque [i] read/write offsets the index by `start`, not a plain GEP")
-{
-    auto ir = emitLlvmIr("f(d: Deque<i32>) -> i32 { d[0] = 5  return d[1] }");
-    // The `start` field (index 1) is read and added to the given index -
-    // distinguishes Deque's own indexing from List's plain `i32 %index` GEP.
-    EXPECT_TRUE(ir.find("i32 0, i32 1\n") != std::string::npos);
-    EXPECT_TRUE(ir.find("add i32 %") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a Deque's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(d: Deque<i32>) -> i32 { return d.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i32*}, {i32, i32, i32*}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level Deque<T> binding with full bracket contents, unlike "
-     "LinkedList/Map/Set's count-only fallback")
-{
-    auto ir = emitLlvmIr("d = Deque<i32>()");
-    EXPECT_TRUE(ir.find("print.deque.") != std::string::npos);
-    EXPECT_TRUE(ir.find("Deque(") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter LinkedList<T> and Deque<T> push_front/pop_front resolve to distinct emit "
-     "functions")
-{
-    auto ir = emitLlvmIr("useLinkedList(l: LinkedList<i32>) { l.push_front(1) } "
-                         "useDeque(d: Deque<i32>) { d.push_front(1) }");
-    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_front(") != std::string::npos);
-    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter represents Queue<i32> with the literal same header text as Deque<i32> - no "
-     "isQueueType predicate exists anywhere")
-{
-    // Mirrors Stack<T>/List<T>'s own identical relationship (see
-    // docs/language/0038-queues.md) - llvmType("Queue<T>") produces the
-    // exact same text llvmType("Deque<T>") does.
-    auto ir = emitLlvmIr("useQueue(q: Queue<i32>) -> i32 { return q.length }");
-    EXPECT_TRUE(ir.find("define i32 @useQueue({i32, i32, i32*}* %0) {") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's Queue<T>() construction mallocs a header and zero-initializes all 3 "
-     "fields, structurally identical to Deque<T>'s own")
-{
-    auto ir = emitLlvmIr("f() -> i32 { q = Queue<i32>()  return q.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter Queue enqueue reallocates via the same hand-rolled copy loop Deque push "
-     "uses, no phi")
-{
-    auto ir = emitLlvmIr("f() { q = Queue<i32>()  q.enqueue(1) }");
-    EXPECT_TRUE(ir.find("deque.push.copy.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("deque.push.copy.body") != std::string::npos);
-    EXPECT_TRUE(ir.find("deque.push.copy.done") != std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter Queue dequeue has no bounds check and needs no loop or branch, just "
-     "start/count arithmetic")
-{
-    auto ir = emitLlvmIr("f(q: Queue<i32>) -> i32 { return q.dequeue() }");
-    EXPECT_TRUE(ir.find("add i32") != std::string::npos); // start + 1
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos); // count - 1
-    EXPECT_TRUE(ir.find("deque.push.copy") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a Queue's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(q: Queue<i32>) -> i32 { return q.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32, i32*}, {i32, i32, i32*}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter Deque<T> and Queue<T> push/pop-equivalents resolve to distinct emit "
-     "functions despite sharing the exact same header shape")
-{
-    auto ir = emitLlvmIr("useDeque(d: Deque<i32>) { d.push_back(1) } "
-                         "useQueue(q: Queue<i32>) { q.enqueue(1) }");
-    EXPECT_TRUE(ir.find("define void @useDeque({i32, i32, i32*}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @useQueue({i32, i32, i32*}* %0) {") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter represents PriorityQueue<T> as the exact same LLVM type as List<T>/Stack<T>")
-{
-    auto ir = emitLlvmIr("usePQ(q: PriorityQueue<i32>) -> i32 { return q.length }");
-    EXPECT_TRUE(ir.find("define i32 @usePQ({i32, i32*, i32}* %0) {") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's PriorityQueue<T>() construction mallocs a header and zero-initializes it")
-{
-    auto ir = emitLlvmIr("f() -> i32 { q = PriorityQueue<i32>()  return q.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32* null, i32**") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter PriorityQueue push grows via the same shared ensureListCapacity helper "
-     "Stack/List push use, then sifts the new element up - no phi anywhere")
-{
-    auto ir = emitLlvmIr("f() { q = PriorityQueue<i32>()  q.push(4) }");
-    EXPECT_TRUE(ir.find("list.grow.copy.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.body") != std::string::npos);
-    EXPECT_TRUE(ir.find("list.grow.copy.done") != std::string::npos);
-    EXPECT_TRUE(ir.find("priorityqueue.push.siftup.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("priorityqueue.push.siftup.swap") != std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter PriorityQueue pop has no bounds check and sifts the new root down - no phi "
-     "anywhere")
-{
-    auto ir = emitLlvmIr("f() -> i32 { q = PriorityQueue<i32>()  q.push(1)  return q.pop() }");
-    EXPECT_TRUE(ir.find("sub i32") != std::string::npos);
-    EXPECT_TRUE(ir.find("priorityqueue.pop.siftdown.header") != std::string::npos);
-    EXPECT_TRUE(ir.find("priorityqueue.pop.siftdown.swap") != std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter PriorityQueue<char> push/pop compare at char's own i24 width, not a "
-     "hardcoded i32 - char is orderable by codepoint, same as i32 (see "
-     "docs/language/0044-char.md)")
-{
-    auto ir = emitLlvmIr("f() -> char { "
-                         "  q = PriorityQueue<char>() "
-                         "  q.push('b')  q.push('a') "
-                         "  return q.pop() "
-                         "}");
-    EXPECT_TRUE(ir.find("icmp sle i24") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp slt i24") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp sle i32") == std::string::npos);
-    // The only remaining "icmp slt i32"/"icmp sgt i32" in this program are
-    // the sift loops' own index-vs-length bookkeeping (always genuinely
-    // i32, regardless of element type) - not element comparisons.
-}
-
-TEST("LlvmIrEmitter PriorityQueue<str> push/pop compare via a real lexicographic @axea.less.str "
-     "call, not a pointer-identity icmp on i8* - str has a real order, same as i32/char (see "
-     "docs/language/0042-string.md)")
-{
-    auto ir = emitLlvmIr("f() -> str { "
-                         "  q = PriorityQueue<str>() "
-                         "  q.push(\"b\")  q.push(\"a\") "
-                         "  return q.pop() "
-                         "}");
-    EXPECT_TRUE(ir.find("define i1 @axea.less.str(i8* %a, i8* %b)") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.less.str(") != std::string::npos);
-    // Never a raw icmp directly on two i8* values - that would compare
-    // pointer identity, not string content.
-    EXPECT_TRUE(ir.find("icmp slt i8*") == std::string::npos);
-    EXPECT_TRUE(ir.find("icmp sle i8*") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter PriorityQueue peek reads index 0 directly, no length arithmetic and no store")
-{
-    // Isolated to a function taking PriorityQueue<i32> as a *parameter* (no
-    // construction/push in the same function), mirroring the equivalent
-    // Stack<T> peek test - emitPriorityQueuePeek's own output is then the
-    // function's entire body.
-    auto ir = emitLlvmIr("f(q: PriorityQueue<i32>) -> i32 { return q.peek() }");
-    EXPECT_TRUE(ir.find("getelementptr i32, i32* %2, i32 0") != std::string::npos);
-    EXPECT_TRUE(ir.find("store") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a PriorityQueue's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(q: PriorityQueue<i32>) -> i32 { return q.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32*, i32}, {i32, i32*, i32}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter List<T>/Stack<T>/PriorityQueue<T> push resolve to three distinct emit "
-     "functions on the same-shaped element type, each calling the same shared "
-     "ensureListCapacity helper")
-{
-    auto ir = emitLlvmIr("useList(l: List<i32>) { l.push(1) } "
-                         "useStack(s: Stack<i32>) { s.push(1) } "
-                         "usePQ(q: PriorityQueue<i32>) { q.push(1) }");
-    EXPECT_TRUE(ir.find("define void @useList({i32, i32*, i32}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @useStack({i32, i32*, i32}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @usePQ({i32, i32*, i32}* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("priorityqueue.push.siftup.header") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter Stack<T>.peek() and PriorityQueue<T>.peek() resolve to distinct emit "
-     "functions despite sharing the same method name")
-{
-    auto ir = emitLlvmIr("useStack(s: Stack<i32>) -> i32 { return s.peek() } "
-                         "usePQ(q: PriorityQueue<i32>) -> i32 { return q.peek() }");
-    // Stack peek computes length-1 (a "sub") before indexing; PriorityQueue
-    // peek indexes 0 directly with no arithmetic - so useStack's body
-    // contains a "sub" and usePQ's does not, verified by isolating each
-    // function's own text.
-    const auto useStackPos = ir.find("define i32 @useStack");
-    const auto usePQPos = ir.find("define i32 @usePQ");
-    EXPECT_TRUE(useStackPos != std::string::npos && usePQPos != std::string::npos);
-    const std::string useStackBody = ir.substr(useStackPos, usePQPos - useStackPos);
-    EXPECT_TRUE(useStackBody.find("sub i32") != std::string::npos);
-}
+// PriorityQueue<T> is a real, user-declared generic struct now, not a compiler intrinsic (see
+// docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port
+// follow-up and std/collections.ax) - its own internal LLVM representation (including its
+// hand-rolled sift-up/sift-down loops, now ordinary Axea `loop`/`if` source instead of hand-
+// emitted LLVM basic blocks) is no longer this compiler's concern to unit-test; its behavior is
+// verified via examples/priority_queue.ax instead (both interpreted and compiled).
 
 TEST("LlvmIrEmitter declares named self-referential types for Map/Set entries")
 {
@@ -875,15 +507,10 @@ TEST("LlvmIrEmitter generates an unrolled hash/equality pair for a fixed-array k
                 std::string::npos);
 }
 
-TEST("LlvmIrEmitter generates a runtime-loop hash/equality pair for a List<T> key")
-{
-    auto ir = emitLlvmIr("f() { s = Set<List<i32>>()  l = List<i32>()  s.add(l) }");
-    EXPECT_TRUE(ir.find("define i32 @axea.hash.list.0({i32, i32*}* %v) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i1 @axea.eq.list.0({i32, i32*}* %a, {i32, i32*}* %b) {") !=
-                std::string::npos);
-    // Length-mismatch short-circuit before any element walk.
-    EXPECT_TRUE(ir.find("icmp eq i32 %alen, %blen") != std::string::npos);
-}
+// List<T> as a Set/Map key is no longer supported - it's a real, user-declared generic struct
+// now (see docs/language/0006-generics.md's own List<T> port follow-up and std/collections.ax),
+// and hashing/equality for it would need a real user-level implementation, not the retired
+// intrinsic's own runtime-loop hash/equality pair.
 
 TEST("LlvmIrEmitter prints a top-level Map/Set binding by count, not contents")
 {
@@ -1306,7 +933,9 @@ TEST("LlvmIrEmitter Buffer.append and String.append resolve to distinct emit fun
 }
 
 TEST("LlvmIrEmitter prints a top-level Buffer binding via a direct %s of its data pointer at "
-     "field index 2, not the generic byte-print loop or Deque's own field-2 print branch")
+     "field index 2, not the generic byte-print loop or the isDequeType-shaped field-2 print "
+     "branch (Queue<T>'s own header shape now, since the Deque<T> intrinsic this branch "
+     "originally served is retired)")
 {
     auto ir = emitLlvmIr("b = Buffer()");
     EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
@@ -1484,19 +1113,6 @@ TEST("LlvmIrEmitter prints an i64/f64 struct field via the same stringifyValueOf
     EXPECT_TRUE(ir.find("call i8* @axea.f64.to_str(") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter's PriorityQueue<f64> push/pop compare via fcmp (ordered predicate), not "
-     "icmp - f64 has a real order, same as i32/i64/char/str (see "
-     "docs/language/0039-priority-queues.md)")
-{
-    auto ir = emitLlvmIr("f() -> f64 { "
-                         "  q = PriorityQueue<f64>() "
-                         "  q.push(2.5)  q.push(1.5) "
-                         "  return q.pop() "
-                         "}");
-    EXPECT_TRUE(ir.find("fcmp ole double") != std::string::npos);
-    EXPECT_TRUE(ir.find("fcmp olt double") != std::string::npos);
-}
-
 TEST("LlvmIrEmitter's SortedMap<i64,f64> node type stores the key at i64 width and compares "
      "via @axea.less.i64 - a real order, same as i32 (see docs/language/0040-sorted-maps.md)")
 {
@@ -1574,14 +1190,6 @@ TEST("LlvmIrEmitter prints a struct with two char fields without a duplicate-lab
                          "p = Pair { a: 'X'  b: 'Y' }");
     EXPECT_TRUE(ir.find("char.utf8.len1.0") != std::string::npos);
     EXPECT_TRUE(ir.find("char.utf8.len1.1") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a List<char> element via the same UTF-8 encoder, not the generic "
-     "nested-struct-pointer fallback")
-{
-    auto ir = emitLlvmIr("xs = List<char>()  t = xs.push('A')");
-    EXPECT_TRUE(ir.find("char.utf8.len1") != std::string::npos);
-    EXPECT_TRUE(ir.find("@axea.print.i24") == std::string::npos);
 }
 
 TEST("LlvmIrEmitter's bounded str slice mallocs a fresh buffer and copies exactly end-start "
@@ -1936,23 +1544,6 @@ TEST("LlvmIrEmitter's collection stringifier for Map<K,V> is count-only, matchin
     EXPECT_TRUE(ir.find("@axea.i32.to_str") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter's collection stringifier for a nested List<List<i32>> recurses correctly "
-     "- the outer stringifier (registered first, from print(outer) itself) calls the inner "
-     "one (registered second, while building the outer's own body) by name")
-{
-    auto ir = emitLlvmIr("f() { "
-                         "  inner: List<i32> = List<i32>() "
-                         "  outer: List<List<i32>> = List<List<i32>>() "
-                         "  pushed = outer.push(inner) "
-                         "  print(outer) "
-                         "}");
-    const auto outerFn = ir.find("define i8* @axea.tostring.collection.0(");
-    const auto innerFn = ir.find("define i8* @axea.tostring.collection.1(");
-    EXPECT_TRUE(outerFn != std::string::npos);
-    EXPECT_TRUE(innerFn != std::string::npos);
-    EXPECT_TRUE(ir.find("call i8* @axea.tostring.collection.1(", outerFn) != std::string::npos);
-}
-
 TEST("LlvmIrEmitter's print(...) calls printf(\"%s\", ...) once per argument, space-separated, "
      "with a trailing newline printf - see docs/language/Axea_Printing_Formatting.md")
 {
@@ -2202,23 +1793,10 @@ TEST("LlvmIrEmitter continue re-checks the loop header instead of falling throug
     EXPECT_TRUE(ir.find("br label %loop.header0") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter slices a fixed-size array element-wise into a fresh List<T> header, via the "
-     "same arrslice.copy loop shape emitStrSlice's own str branch uses - see "
-     "docs/language/0050-collection-join-and-slicing.md")
-{
-    auto ir = emitLlvmIr("f() -> List<i32> { numbers = [1, 2, 3, 4] return numbers[..2] }");
-    EXPECT_TRUE(ir.find("br label %arrslice.copy.header0") != std::string::npos);
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32*, i32}, {i32, i32*, i32}* null, i32 1") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter slices a List<T> into another fresh List<T>, reading the source's own "
-     "runtime length field rather than a compile-time size")
-{
-    auto ir = emitLlvmIr("f() -> List<i32> { numbers = List<i32>() a = numbers.push(1) return "
-                         "numbers[..] }");
-    EXPECT_TRUE(ir.find("br label %arrslice.copy.header") != std::string::npos);
-}
+// Array/List slicing (arr[a..b] producing a fresh List<T>) is no longer supported - narrowed
+// back to str-only slicing now that List<T> is a real, user-declared generic struct (see
+// docs/language/0006-generics.md's own List<T> port follow-up and TypeChecker's own StrSliceExpr
+// comment for why).
 
 TEST("LlvmIrEmitter's .join(separator) on an Array<i32> stringifies each element via the same "
      "@axea.i32.to_str runtime print()/interpolation already share, appended through its own "
@@ -2573,4 +2151,135 @@ TEST("LlvmIrEmitter registers one struct type per distinct generic instantiation
     EXPECT_TRUE(first != std::string::npos);
     const auto second = ir.find("%Box$i32 = type { i32 }", first + 1);
     EXPECT_TRUE(second == std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a plain load for '*ptr' dereference")
+{
+    auto ir = emitLlvmIr("f(ptr: *i32) -> i32 { unsafe { return *ptr } }");
+    EXPECT_TRUE(ir.find("= load i32, i32*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a plain store for '*ptr = v' dereference assignment")
+{
+    auto ir = emitLlvmIr("f(ptr: *i32) { unsafe { *ptr = 5 } }");
+    EXPECT_TRUE(ir.find("store i32") != std::string::npos &&
+               ir.find(", i32*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a getelementptr for 'ptr + 1' pointer arithmetic - element-scaled "
+     "automatically by LLVM's own type system, the identical shape every slice/List/Array index "
+     "GEP already uses")
+{
+    auto ir = emitLlvmIr("f(ptr: *i32) -> *i32 { unsafe { return ptr + 1 } }");
+    EXPECT_TRUE(ir.find("= getelementptr i32, i32*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a negation followed by a getelementptr for 'ptr - 1' pointer "
+     "arithmetic")
+{
+    auto ir = emitLlvmIr("f(ptr: *i32) -> *i32 { unsafe { return ptr - 1 } }");
+    const auto subPos = ir.find("= sub i32 0,");
+    EXPECT_TRUE(subPos != std::string::npos);
+    EXPECT_TRUE(ir.find("= getelementptr i32, i32*", subPos) != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits no duplicate '@malloc'/'@free' declares for a user extern reusing "
+     "those exact names, and their call sites bitcast to/from the shared i8*-based declaration")
+{
+    auto ir = emitLlvmIr("extern c malloc(size: i64) -> *i32 "
+                         "extern c free(ptr: *i32) "
+                         "buf = malloc(4i64) "
+                         "called = free(buf)");
+
+    const auto firstMallocDecl = ir.find("declare i8* @malloc(i64)");
+    EXPECT_TRUE(firstMallocDecl != std::string::npos);
+    EXPECT_TRUE(ir.find("declare i8* @malloc(i64)", firstMallocDecl + 1) == std::string::npos);
+
+    const auto firstFreeDecl = ir.find("declare void @free(i8*)");
+    EXPECT_TRUE(firstFreeDecl != std::string::npos);
+    EXPECT_TRUE(ir.find("declare void @free(i8*)", firstFreeDecl + 1) == std::string::npos);
+
+    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
+    EXPECT_TRUE(ir.find("bitcast i8*") != std::string::npos && ir.find(" to i32*") != std::string::npos);
+    EXPECT_TRUE(ir.find(" to i8*") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @free(i8*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits an alloca plus an immediate store for '&x'")
+{
+    auto ir = emitLlvmIr("f() -> i32 { "
+                         "  x = 5 "
+                         "  p = &x "
+                         "  return unsafe { *p } "
+                         "}");
+    const auto allocaPos = ir.find("= alloca i32");
+    EXPECT_TRUE(allocaPos != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32", allocaPos) != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a load off the alloca's own register for '*(&x)'")
+{
+    auto ir = emitLlvmIr("f() -> i32 { "
+                         "  x = 5 "
+                         "  p = &x "
+                         "  return unsafe { *p } "
+                         "}");
+    EXPECT_TRUE(ir.find("= load i32, i32*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a store off the alloca's own register for '(*&x) = v'")
+{
+    auto ir = emitLlvmIr("f() -> i32 { "
+                         "  x = 5 "
+                         "  p = &x "
+                         "  unsafe { *p = 9 } "
+                         "  return x "
+                         "}");
+    const auto allocaPos = ir.find("= alloca i32");
+    EXPECT_TRUE(allocaPos != std::string::npos);
+    // The alloca's own dest register is stored to twice: once for the initial value (5), once for
+    // the later '*p = 9' write-through - both as plain "store i32 ..., i32* %<reg>" text.
+    const auto firstStore = ir.find("store i32", allocaPos);
+    EXPECT_TRUE(firstStore != std::string::npos);
+    EXPECT_TRUE(ir.find("store i32", firstStore + 1) != std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers an inherent struct method call to an ordinary LLVM 'call' to the "
+     "mangled 'TypeName.method' function, the receiver passed as the first argument")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "impl Point { sum(self) -> i32 { return self.x + self.y } } "
+                         "run() -> i32 { p = Point { x: 1, y: 2 } return p.sum() } "
+                         "r = run()");
+    EXPECT_TRUE(ir.find("define i32 @Point.sum(%Point* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @Point.sum(%Point*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits sizeof<T>() via the null-pointer-GEP + ptrtoint idiom, matching real "
+     "byte sizes for a primitive and a struct")
+{
+    auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
+                         "a = sizeof<i32>() "
+                         "b = sizeof<Point>()");
+    EXPECT_TRUE(ir.find("getelementptr i32, i32* null, i32 1") != std::string::npos);
+    EXPECT_TRUE(ir.find("getelementptr %Point, %Point* null, i32 1") != std::string::npos);
+    EXPECT_TRUE(ir.find("ptrtoint") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a pointer-to-pointer cast as a plain bitcast")
+{
+    auto ir = emitLlvmIr("extern c malloc(size: i64) -> *i32 "
+                         "raw = malloc(8i64) "
+                         "p = unsafe { raw as *i64 }");
+    EXPECT_TRUE(ir.find("bitcast i32* ") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter compiles a generic top-level function's mangled clone as an entirely "
+     "ordinary function, called via a plain 'call' instruction")
+{
+    auto ir = emitLlvmIr("identity<T>(x: T) -> T { return x } "
+                         "run() -> i32 { return identity<i32>(42) } "
+                         "r = run()");
+    EXPECT_TRUE(ir.find("define i32 @identity$i32(i32 %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i32 @identity$i32(i32") != std::string::npos);
 }

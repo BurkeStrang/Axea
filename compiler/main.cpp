@@ -191,12 +191,6 @@ namespace
             return;
         }
 
-        if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
-        {
-            std::cout << pad << "ListNew(" << listNew->elementType << ")\n";
-            return;
-        }
-
         if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
         {
             std::cout << pad << "MapNew(" << mapNew->keyType << ", " << mapNew->valueType << ")\n";
@@ -239,27 +233,9 @@ namespace
             return;
         }
 
-        if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
-        {
-            std::cout << pad << "StackNew(" << stackNew->elementType << ")\n";
-            return;
-        }
-
         if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
         {
             std::cout << pad << "LinkedListNew(" << linkedListNew->elementType << ")\n";
-            return;
-        }
-
-        if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
-        {
-            std::cout << pad << "DequeNew(" << dequeNew->elementType << ")\n";
-            return;
-        }
-
-        if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
-        {
-            std::cout << pad << "QueueNew(" << queueNew->elementType << ")\n";
             return;
         }
 
@@ -519,54 +495,6 @@ namespace
             return;
         }
 
-        if (const auto* listNew = dynamic_cast<const IrListNew*>(&inst))
-        {
-            std::cout << pad << "%" << listNew->dest << " = list.new " << listNew->elementTypeName
-                      << "\n";
-            return;
-        }
-
-        if (const auto* listPush = dynamic_cast<const IrListPush*>(&inst))
-        {
-            std::cout << pad << "%" << listPush->dest << " = list.push %" << listPush->list << ", %"
-                      << listPush->value << "\n";
-            return;
-        }
-
-        if (const auto* listPop = dynamic_cast<const IrListPop*>(&inst))
-        {
-            std::cout << pad << "%" << listPop->dest << " = list.pop %" << listPop->list << "\n";
-            return;
-        }
-
-        if (const auto* stackNew = dynamic_cast<const IrStackNew*>(&inst))
-        {
-            std::cout << pad << "%" << stackNew->dest << " = stack.new "
-                      << stackNew->elementTypeName << "\n";
-            return;
-        }
-
-        if (const auto* stackPush = dynamic_cast<const IrStackPush*>(&inst))
-        {
-            std::cout << pad << "%" << stackPush->dest << " = stack.push %" << stackPush->stack
-                      << ", %" << stackPush->value << "\n";
-            return;
-        }
-
-        if (const auto* stackPop = dynamic_cast<const IrStackPop*>(&inst))
-        {
-            std::cout << pad << "%" << stackPop->dest << " = stack.pop %" << stackPop->stack
-                      << "\n";
-            return;
-        }
-
-        if (const auto* stackPeek = dynamic_cast<const IrStackPeek*>(&inst))
-        {
-            std::cout << pad << "%" << stackPeek->dest << " = stack.peek %" << stackPeek->stack
-                      << "\n";
-            return;
-        }
-
         if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(&inst))
         {
             std::cout << pad << "%" << linkedListNew->dest << " = linkedlist.new "
@@ -599,91 +527,6 @@ namespace
         {
             std::cout << pad << "%" << popBack->dest << " = linkedlist.pop_back %" << popBack->list
                       << "\n";
-            return;
-        }
-
-        if (const auto* dequeNew = dynamic_cast<const IrDequeNew*>(&inst))
-        {
-            std::cout << pad << "%" << dequeNew->dest << " = deque.new "
-                      << dequeNew->elementTypeName << "\n";
-            return;
-        }
-
-        if (const auto* dequePushFront = dynamic_cast<const IrDequePushFront*>(&inst))
-        {
-            std::cout << pad << "%" << dequePushFront->dest << " = deque.push_front %"
-                      << dequePushFront->deque << ", %" << dequePushFront->value << "\n";
-            return;
-        }
-
-        if (const auto* dequePushBack = dynamic_cast<const IrDequePushBack*>(&inst))
-        {
-            std::cout << pad << "%" << dequePushBack->dest << " = deque.push_back %"
-                      << dequePushBack->deque << ", %" << dequePushBack->value << "\n";
-            return;
-        }
-
-        if (const auto* dequePopFront = dynamic_cast<const IrDequePopFront*>(&inst))
-        {
-            std::cout << pad << "%" << dequePopFront->dest << " = deque.pop_front %"
-                      << dequePopFront->deque << "\n";
-            return;
-        }
-
-        if (const auto* dequePopBack = dynamic_cast<const IrDequePopBack*>(&inst))
-        {
-            std::cout << pad << "%" << dequePopBack->dest << " = deque.pop_back %"
-                      << dequePopBack->deque << "\n";
-            return;
-        }
-
-        if (const auto* queueNew = dynamic_cast<const IrQueueNew*>(&inst))
-        {
-            std::cout << pad << "%" << queueNew->dest << " = queue.new "
-                      << queueNew->elementTypeName << "\n";
-            return;
-        }
-
-        if (const auto* queueEnqueue = dynamic_cast<const IrQueueEnqueue*>(&inst))
-        {
-            std::cout << pad << "%" << queueEnqueue->dest << " = queue.enqueue %"
-                      << queueEnqueue->queue << ", %" << queueEnqueue->value << "\n";
-            return;
-        }
-
-        if (const auto* queueDequeue = dynamic_cast<const IrQueueDequeue*>(&inst))
-        {
-            std::cout << pad << "%" << queueDequeue->dest << " = queue.dequeue %"
-                      << queueDequeue->queue << "\n";
-            return;
-        }
-
-        if (const auto* priorityQueueNew = dynamic_cast<const IrPriorityQueueNew*>(&inst))
-        {
-            std::cout << pad << "%" << priorityQueueNew->dest << " = priorityqueue.new "
-                      << priorityQueueNew->elementTypeName << "\n";
-            return;
-        }
-
-        if (const auto* priorityQueuePush = dynamic_cast<const IrPriorityQueuePush*>(&inst))
-        {
-            std::cout << pad << "%" << priorityQueuePush->dest << " = priorityqueue.push %"
-                      << priorityQueuePush->priorityQueue << ", %" << priorityQueuePush->value
-                      << "\n";
-            return;
-        }
-
-        if (const auto* priorityQueuePop = dynamic_cast<const IrPriorityQueuePop*>(&inst))
-        {
-            std::cout << pad << "%" << priorityQueuePop->dest << " = priorityqueue.pop %"
-                      << priorityQueuePop->priorityQueue << "\n";
-            return;
-        }
-
-        if (const auto* priorityQueuePeek = dynamic_cast<const IrPriorityQueuePeek*>(&inst))
-        {
-            std::cout << pad << "%" << priorityQueuePeek->dest << " = priorityqueue.peek %"
-                      << priorityQueuePeek->priorityQueue << "\n";
             return;
         }
 

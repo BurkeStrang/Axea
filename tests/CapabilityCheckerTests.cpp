@@ -115,6 +115,20 @@ TEST("CapabilityChecker does not require write for incrementing a plain (non-fie
     EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Read);
 }
 
+TEST("CapabilityChecker infers write for a parameter propagated through an inherent struct "
+     "method call - a user method's own mutation-of-self isn't knowable by name alone, unlike "
+     "the hardcoded builtin collection method names (see docs/language/0006-generics.md's own "
+     "generic-methods follow-up)")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Counter { value: i32 } "
+                       "impl Counter { increment(self) { self.value = self.value + 1 } } "
+                       "bump(c: Counter) { c.increment() } "
+                       "c = Counter { value: 0 } "
+                       "bump(c)");
+    EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Write);
+}
+
 TEST("CapabilityChecker infers take when propagated through a call")
 {
     const auto capabilities =
@@ -247,57 +261,66 @@ TEST("CapabilityChecker infers read for a slice<T> parameter that is only indexe
     EXPECT_TRUE(capabilities.at("sum")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a List<T> parameter that is pushed to")
+// List<T> is a real, user-declared generic struct now (see docs/language/0006-generics.md's own
+// List<T> port follow-up and std/collections.ax) - its own push/pop/get capability inference is
+// exercised through the general struct method dispatch mechanism instead (see "CapabilityChecker
+// infers write for a parameter propagated through an inherent struct method call" above), using
+// a small inline generic struct here rather than `use`-ing the real module (this file's own
+// `capabilitiesOf` helper parses a single in-memory string, with no module loader involved).
+TEST("CapabilityChecker infers write for a generic struct parameter mutated through an "
+     "inherent method call")
 {
-    const auto capabilities = capabilitiesOf("appendOne(numbers: List<i32>) { numbers.push(1) } "
-                                             "a = List<i32>() "
-                                             "called = appendOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { value: T } "
+                       "impl<T> Box<T> { set(self, v: T) { self.value = v } } "
+                       "appendOne(b: Box<i32>) { c = b.set(1) } "
+                       "a = Box<i32> { value: 0 } "
+                       "called = appendOne(a)");
     EXPECT_TRUE(capabilities.at("appendOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a List<T> parameter that is popped")
+TEST("CapabilityChecker infers read for a generic struct parameter only read through an "
+     "inherent method call")
 {
     const auto capabilities =
-        capabilitiesOf("removeOne(numbers: List<i32>) -> i32 { return numbers.pop() } "
-                       "a = List<i32>() "
-                       "called = a.push(1) "
-                       "x = removeOne(a)");
-    EXPECT_TRUE(capabilities.at("removeOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers read for a List<T> parameter that is only indexed for reading")
-{
-    const auto capabilities =
-        capabilitiesOf("first(numbers: List<i32>) -> i32 { return numbers[0] } "
-                       "a = List<i32>() "
-                       "called = a.push(1) "
+        capabilitiesOf("struct Box<T> { value: T } "
+                       "impl<T> Box<T> { get(self) -> T { return self.value } } "
+                       "first(b: Box<i32>) -> i32 { return b.get() } "
+                       "a = Box<i32> { value: 1 } "
                        "x = first(a)");
     EXPECT_TRUE(capabilities.at("first")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a Stack<T> parameter that is pushed to")
+TEST("CapabilityChecker infers write for a Stack<T>-shaped struct parameter that is pushed to")
 {
-    const auto capabilities = capabilitiesOf("pushOne(s: Stack<i32>) { s.push(1) } "
-                                             "a = Stack<i32>() "
-                                             "called = pushOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { push(self, value: T) { } } "
+                       "pushOne(s: Box<i32>) { s.push(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
     EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a Stack<T> parameter that is popped")
+TEST("CapabilityChecker infers write for a Stack<T>-shaped struct parameter that is popped")
 {
-    const auto capabilities = capabilitiesOf("popOne(s: Stack<i32>) -> i32 { return s.pop() } "
-                                             "a = Stack<i32>() "
-                                             "called = a.push(1) "
-                                             "x = popOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { pop(self) -> T { return self.length } } "
+                       "popOne(s: Box<i32>) -> i32 { return s.pop() } "
+                       "a = Box<i32> { length: 0 } "
+                       "x = popOne(a)");
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers read for a Stack<T> parameter that is only peeked")
+TEST("CapabilityChecker infers read for a Stack<T>-shaped struct parameter that is only peeked")
 {
-    const auto capabilities = capabilitiesOf("peekOne(s: Stack<i32>) -> i32 { return s.peek() } "
-                                             "a = Stack<i32>() "
-                                             "called = a.push(1) "
-                                             "x = peekOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { peek(self) -> T { return self.length } } "
+                       "peekOne(s: Box<i32>) -> i32 { return s.peek() } "
+                       "a = Box<i32> { length: 0 } "
+                       "x = peekOne(a)");
     EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
 }
 
@@ -337,88 +360,110 @@ TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is pop_b
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a Deque<T> parameter that is push_back'd")
+TEST("CapabilityChecker infers write for a Deque<T>-shaped struct parameter that is "
+     "push_back'd")
 {
-    const auto capabilities = capabilitiesOf("pushOne(d: Deque<i32>) { d.push_back(1) } "
-                                             "a = Deque<i32>() "
-                                             "called = pushOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { push_back(self, value: T) { } } "
+                       "pushOne(d: Box<i32>) { d.push_back(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
     EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a Deque<T> parameter that is pop_front'd")
+TEST("CapabilityChecker infers write for a Deque<T>-shaped struct parameter that is pop_front'd")
 {
     const auto capabilities =
-        capabilitiesOf("popOne(d: Deque<i32>) -> i32 { return d.pop_front() } "
-                       "a = Deque<i32>() "
-                       "called = a.push_back(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { pop_front(self) -> T { return self.length } } "
+                       "popOne(d: Box<i32>) -> i32 { return d.pop_front() } "
+                       "a = Box<i32> { length: 0 } "
                        "x = popOne(a)");
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a Deque<T> parameter whose element is index-assigned")
+TEST("CapabilityChecker infers write for a Deque<T>-shaped struct parameter whose element is "
+     "set")
 {
-    // Regression insurance again (see the slice<T> test above) - the same
-    // type-agnostic IndexExpr-walking mechanism applies to Deque<T> too,
-    // with zero Deque-specific CapabilityChecker code (see
-    // docs/language/0037-deques.md).
     const auto capabilities =
-        capabilitiesOf("bump(d: Deque<i32>) -> i32 { d[0] = 99  return d[0] } "
-                       "a = Deque<i32>() "
-                       "called = a.push_back(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { "
+                       "  get(self, index: i32) -> T { return self.length } "
+                       "  set(self, index: i32, value: T) { } "
+                       "} "
+                       "bump(d: Box<i32>) -> i32 { d.set(0, 99)  return d.get(0) } "
+                       "a = Box<i32> { length: 0 } "
                        "x = bump(a)");
     EXPECT_TRUE(capabilities.at("bump")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers read for a Deque<T> parameter that is only indexed for reading")
+TEST("CapabilityChecker infers read for a Deque<T>-shaped struct parameter that is only "
+     "read via .get")
 {
-    const auto capabilities = capabilitiesOf("first(d: Deque<i32>) -> i32 { return d[0] } "
-                                             "a = Deque<i32>() "
-                                             "called = a.push_back(1) "
-                                             "x = first(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { get(self, index: i32) -> T { return self.length } } "
+                       "first(d: Box<i32>) -> i32 { return d.get(0) } "
+                       "a = Box<i32> { length: 0 } "
+                       "x = first(a)");
     EXPECT_TRUE(capabilities.at("first")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a Queue<T> parameter that is enqueue'd")
-{
-    const auto capabilities = capabilitiesOf("pushOne(q: Queue<i32>) { q.enqueue(1) } "
-                                             "a = Queue<i32>() "
-                                             "called = pushOne(a)");
-    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a Queue<T> parameter that is dequeue'd")
-{
-    const auto capabilities = capabilitiesOf("popOne(q: Queue<i32>) -> i32 { return q.dequeue() } "
-                                             "a = Queue<i32>() "
-                                             "called = a.enqueue(1) "
-                                             "x = popOne(a)");
-    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a PriorityQueue<T> parameter that is pushed to")
-{
-    const auto capabilities = capabilitiesOf("pushOne(q: PriorityQueue<i32>) { q.push(1) } "
-                                             "a = PriorityQueue<i32>() "
-                                             "called = pushOne(a)");
-    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a PriorityQueue<T> parameter that is popped")
+TEST("CapabilityChecker infers write for a Queue<T>-shaped struct parameter that is enqueue'd")
 {
     const auto capabilities =
-        capabilitiesOf("popOne(q: PriorityQueue<i32>) -> i32 { return q.pop() } "
-                       "a = PriorityQueue<i32>() "
-                       "called = a.push(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { enqueue(self, value: T) { } } "
+                       "pushOne(q: Box<i32>) { q.enqueue(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a Queue<T>-shaped struct parameter that is dequeue'd")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { dequeue(self) -> T { return self.length } } "
+                       "popOne(q: Box<i32>) -> i32 { return q.dequeue() } "
+                       "a = Box<i32> { length: 0 } "
                        "x = popOne(a)");
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers read for a PriorityQueue<T> parameter that is only peeked")
+TEST("CapabilityChecker infers write for a PriorityQueue<T>-shaped struct parameter that is "
+     "pushed to")
 {
     const auto capabilities =
-        capabilitiesOf("peekOne(q: PriorityQueue<i32>) -> i32 { return q.peek() } "
-                       "a = PriorityQueue<i32>() "
-                       "called = a.push(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { push(self, value: T) { } } "
+                       "pushOne(q: Box<i32>) { q.push(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a PriorityQueue<T>-shaped struct parameter that is "
+     "popped")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { pop(self) -> T { return self.length } } "
+                       "popOne(q: Box<i32>) -> i32 { return q.pop() } "
+                       "a = Box<i32> { length: 0 } "
+                       "x = popOne(a)");
+    EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a PriorityQueue<T>-shaped struct parameter that is "
+     "only peeked")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { peek(self) -> T { return self.length } } "
+                       "peekOne(q: Box<i32>) -> i32 { return q.peek() } "
+                       "a = Box<i32> { length: 0 } "
                        "x = peekOne(a)");
     EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
 }
@@ -646,16 +691,6 @@ TEST("CapabilityChecker infers read for a str parameter only used inside an inte
     EXPECT_TRUE(capabilities.at("greet")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers read for an Array parameter that is only sliced - slicing never "
-     "mutates its object, same as every other read-only operation (see "
-     "docs/language/0050-collection-join-and-slicing.md)")
-{
-    const auto capabilities =
-        capabilitiesOf("firstTwo(nums: [i32; 4]) -> List<i32> { return nums[..2] } "
-                       "x = firstTwo([1, 2, 3, 4])");
-    EXPECT_TRUE(capabilities.at("firstTwo")[0] == Capability::Read);
-}
-
 TEST("CapabilityChecker infers read for an Array parameter that is only joined - .join() never "
      "mutates its object")
 {
@@ -755,4 +790,12 @@ TEST("CapabilityChecker's move-only capture rejects capturing the same struct-ty
                                  "  return a() + b() "
                                  "} "
                                  "y = run()"));
+}
+
+TEST("CapabilityChecker does not raise a pointer parameter's capability for writing through it "
+     "via '*ptr = value' - *T deliberately never participates in capability inference (see "
+     "docs/language/0019-unsafe.md)")
+{
+    auto capabilities = capabilitiesOf("f(ptr: *i32) { unsafe { *ptr = 5 } }");
+    EXPECT_TRUE(capabilities.at("f")[0] == Capability::Read);
 }

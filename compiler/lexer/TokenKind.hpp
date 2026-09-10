@@ -17,6 +17,7 @@ enum class TokenKind
     MinusMinus,
     Star,
     Slash,
+    Ampersand,
 
     Equal,
     EqualEqual,
@@ -68,6 +69,7 @@ enum class TokenKind
     Module,
     Use,
     Fn,
+    Unsafe,
 
     EndOfFile,
     Invalid
@@ -89,6 +91,7 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::MinusMinus: return "MinusMinus";
         case TokenKind::Star: return "Star";
         case TokenKind::Slash: return "Slash";
+        case TokenKind::Ampersand: return "Ampersand";
         case TokenKind::Equal: return "Equal";
         case TokenKind::EqualEqual: return "EqualEqual";
         case TokenKind::BangEqual: return "BangEqual";
@@ -136,6 +139,7 @@ constexpr std::string_view tokenKindName(TokenKind kind)
         case TokenKind::Module: return "Module";
         case TokenKind::Use: return "Use";
         case TokenKind::Fn: return "Fn";
+        case TokenKind::Unsafe: return "Unsafe";
         case TokenKind::EndOfFile: return "EndOfFile";
         case TokenKind::Invalid: return "Invalid";
     }

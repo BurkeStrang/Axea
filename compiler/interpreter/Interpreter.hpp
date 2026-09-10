@@ -35,6 +35,7 @@ struct OptionalInstance;
 struct ResultInstance;
 struct EnumInstance;
 struct ClosureInstance;
+struct PointerInstance;
 
 using Value =
     std::variant<std::int64_t, // i32 and i64 both (see docs/language/0005-type-system.md) -
@@ -69,6 +70,7 @@ using Value =
                  std::shared_ptr<ResultInstance>,
                  std::shared_ptr<EnumInstance>,
                  std::shared_ptr<ClosureInstance>,
+                 std::shared_ptr<PointerInstance>,
                  std::monostate>;
 
 struct StructInstance
@@ -76,6 +78,22 @@ struct StructInstance
     std::string typeName;
     std::vector<std::pair<std::string, Value>>
         fields; // declared field order, for deterministic printing
+};
+
+// `*T` (see docs/language/0019-unsafe.md) - the interpreter has no real flat address space to
+// point into, so a raw pointer is represented as a shared arena plus an element offset. Since
+// there is no `&value` (address-of an existing local/field - deferred, see the design doc's own
+// Future Work) this milestone, the *only* way any Axea program can produce a PointerInstance is
+// malloc (a fresh arena) or pointer arithmetic on an existing one (a new PointerInstance sharing
+// the same arena, offset adjusted) - this never needs to alias a struct field or local variable
+// the way a general "address of anything" design would.
+struct PointerInstance
+{
+    std::shared_ptr<std::vector<Value>> arena;
+    std::string elementAxeaType; // canonical resolved-type text (e.g. "i32") - consulted only by
+                                 // the interpreter's own hand-implemented "malloc" to convert a
+                                 // byte count into an arena element count (see axeaTypeByteSize).
+    std::int64_t offset = 0;
 };
 
 // Reference semantics (shared_ptr), mirroring StructInstance - see
@@ -358,10 +376,27 @@ public:
     bool
     contains(const std::string& name) const; // walks the chain; used to decide define vs assign
 
-    const std::unordered_map<std::string, Value>& bindings() const;
+    // `&name` (see docs/language/0019-unsafe.md) - defines a name whose address is taken
+    // somewhere in its own scope as a boxed single-element cell instead of a plain Value, so a
+    // PointerInstance can alias it (see boxedCellOf). Reuses PointerInstance's own existing
+    // arena+offset shape (a size-1 arena, offset always 0) rather than a second representation -
+    // every existing deref/assign/pointer-arithmetic/bounds-check code path already handles it
+    // unmodified.
+    void defineBoxed(const std::string& name, Value initialValue);
+    // The boxed cell backing `name`, if it was ever defineBoxed'd anywhere in this Environment's
+    // own parent chain - null otherwise. Walks the chain the same way get()/contains() do.
+    std::shared_ptr<std::vector<Value>> boxedCellOf(const std::string& name) const;
+
+    // Returns *by value*, not by reference (unlike the plain values_ map this used to expose
+    // directly) - merges in a fresh snapshot of every boxedCells_ entry's current value, so a
+    // caller (Interpreter::variables(), used throughout the test suite as
+    // `runProgram(...).at("x")`) doesn't lose a top-level name the instant its address happens to
+    // be taken somewhere in the program.
+    std::unordered_map<std::string, Value> bindings() const;
 
 private:
     std::unordered_map<std::string, Value> values_;
+    std::unordered_map<std::string, std::shared_ptr<std::vector<Value>>> boxedCells_;
     Environment* parent_;
 };
 
@@ -382,7 +417,7 @@ public:
     Value evaluate(const Expr& expr, Environment& env);
     void execute(const Stmt& stmt, Environment& env);
 
-    const std::unordered_map<std::string, Value>& variables() const;
+    std::unordered_map<std::string, Value> variables() const;
 
     // Display trait dispatch (see docs/language/0062-display-trait.md) -
     // called from the free `toString` function below via a file-local
@@ -421,12 +456,29 @@ private:
     // Environment, so the filter drops it).
     static void collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names);
     static void collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names);
+    // `&name` (see docs/language/0019-unsafe.md) - own, separate implementation from
+    // IrGenerator's identical walker (this codebase's established "each pass reimplements what it
+    // needs" convention, same as collectReferencedNames above). Deliberately does not recurse
+    // into a ClosureExpr's own body - TypeChecker's own insideClosureBody_ guard already rejects
+    // '&' there, so there's nothing to find in there.
+    static void collectAddressTakenNames(const Expr& expr, std::unordered_set<std::string>& names);
+    static void collectAddressTakenNames(const Stmt& stmt, std::unordered_set<std::string>& names);
     // extern c functions (see docs/language/0048-ffi.md) - a small,
     // explicit allowlist of hand-implemented libc functions (currently
     // just "puts"), since the interpreter can't dynamically link against
     // arbitrary C symbols the way the compiled backend's own `declare`+
     // `call` genuinely does. Any other name throws.
     Value callExtern(const std::string& name, const std::vector<Value>& args);
+    // The byte width of a resolvable Axea element type (see docs/language/0051-numeric-widening.md's
+    // own i32/i64/f64 assumptions) - used only by "malloc"'s own hand implementation, to convert
+    // malloc's real C byte-count argument into how many interpreter-arena elements to allocate.
+    // The compiled backend needs no equivalent: real malloc allocates literal bytes, and GEP
+    // scales by LLVM's own sizeof(T) automatically - this exists purely because this interpreter
+    // has no real address space to allocate raw bytes into.
+    int axeaTypeByteSize(const std::string& axeaTypeName) const;
+    // The zero Value for a resolvable Axea element type - what a freshly malloc'd arena slot
+    // starts out holding, before anything is written through the pointer.
+    static Value defaultValueForType(const std::string& axeaTypeName);
     // Implicit union wrapping (see docs/language/0065-unions.md) - if `declaredTypeName` is a
     // union ("|"-joined, e.g. "i32|str") and `value`'s own runtime shape matches exactly one of
     // its alternatives, wraps it into that alternative's own EnumInstance (typeName =
@@ -456,6 +508,10 @@ private:
     // TypeChecker::registerSignatures's identical derivation and its own comment on the harmless
     // ImplDecl-mangled-name overlap).
     std::unordered_map<std::string, std::string> externModules_;
+    // extern c function *declarations* (see docs/language/0019-unsafe.md) - see callExtern's own
+    // "malloc" case for why this milestone's hand-implemented malloc genuinely needs its own
+    // declared pointee type, a real, new need externModules_ never had.
+    std::unordered_map<std::string, const ExternDecl*> externDecls_;
     std::unordered_set<std::string> moduleNames_;
     // struct name -> its `impl Display for <name>`'s own "format" method
     // (see docs/language/0062-display-trait.md) - only ever populated for
@@ -464,5 +520,14 @@ private:
     // codebase's "separate over shared" convention between the
     // interpreter and the compiled backend).
     std::unordered_map<std::string, const FunctionDecl*> displayImpls_;
+    // `&name` (see docs/language/0019-unsafe.md) - every local/param name whose address is taken
+    // anywhere in the *currently executing* function body (or, before any function call, the
+    // top-level script). A plain member field, not a parameter threaded through every execute/
+    // evaluate signature (mirrors TypeChecker::insideUnsafe_'s own exact shape): run() computes it
+    // once for the top-level script before its own item loop; callFunction saves the caller's
+    // current set, computes+installs its own function's set, runs the body, then restores the
+    // saved set before returning - the same save/restore boundary TypeChecker's own
+    // UnsafeBlockExpr case uses, just triggered by call boundaries instead of block boundaries.
+    std::unordered_set<std::string> currentAddressTakenNames_;
     Environment globalEnv_;
 };

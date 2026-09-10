@@ -761,35 +761,6 @@ TEST("Parser desugars for-in-over-an-array into a bound/counter setup comparing 
     EXPECT_TRUE(inductionIndex != nullptr);
 }
 
-TEST("Parser builds a List<T> construction expression")
-{
-    auto program = parseOne("x = List<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* listNew = dynamic_cast<ListNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(listNew != nullptr);
-    EXPECT_EQ(listNew->elementType, "i32");
-}
-
-TEST("Parser parses a List<T> parameter type into the canonical form")
-{
-    auto program = parseOne("sum(values: List<i32>) -> i32 { return values[0] }");
-
-    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
-    EXPECT_TRUE(function != nullptr);
-    EXPECT_EQ(function->params[0].type, "List<i32>");
-}
-
-TEST("Parser builds a Stack<T> construction expression")
-{
-    auto program = parseOne("x = Stack<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* stackNew = dynamic_cast<StackNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(stackNew != nullptr);
-    EXPECT_EQ(stackNew->elementType, "i32");
-}
-
 TEST("Parser parses a Stack<T> parameter type into the canonical form")
 {
     auto program = parseOne("useStack(s: Stack<i32>) -> i32 { return s.length }");
@@ -869,16 +840,6 @@ TEST("Parser builds LinkedList<T> push_front/push_back/pop_front/pop_back method
     EXPECT_TRUE(popBackResult->arguments.empty());
 }
 
-TEST("Parser builds a Deque<T> construction expression")
-{
-    auto program = parseOne("x = Deque<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* dequeNew = dynamic_cast<DequeNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(dequeNew != nullptr);
-    EXPECT_EQ(dequeNew->elementType, "i32");
-}
-
 TEST("Parser parses a Deque<T> parameter type into the canonical form")
 {
     auto program = parseOne("useDeque(d: Deque<i32>) -> i32 { return d.length }");
@@ -907,32 +868,6 @@ TEST("Parser builds Deque<T> push_front/push_back/pop_front/pop_back method-call
     EXPECT_EQ(popBackResult->method, "pop_back");
 }
 
-TEST("Parser builds Deque<T> index-get and index-assign expressions")
-{
-    auto program = parseOne("f() { d = Deque<i32>()  d.push_back(1)  d[0] = 2  x = d[0] }");
-
-    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
-    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
-
-    auto* indexAssign = dynamic_cast<IndexAssignStmt*>(body->statements.at(2).get());
-    EXPECT_TRUE(indexAssign != nullptr);
-
-    auto* readAssign = dynamic_cast<AssignmentStmt*>(body->statements.at(3).get());
-    EXPECT_TRUE(readAssign != nullptr);
-    auto* indexGet = dynamic_cast<IndexExpr*>(readAssign->value.get());
-    EXPECT_TRUE(indexGet != nullptr);
-}
-
-TEST("Parser builds a Queue<T> construction expression")
-{
-    auto program = parseOne("x = Queue<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* queueNew = dynamic_cast<QueueNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(queueNew != nullptr);
-    EXPECT_EQ(queueNew->elementType, "i32");
-}
-
 TEST("Parser parses a Queue<T> parameter type into the canonical form")
 {
     auto program = parseOne("useQueue(q: Queue<i32>) -> i32 { return q.length }");
@@ -959,16 +894,6 @@ TEST("Parser builds Queue<T> enqueue/dequeue method-call expressions")
     EXPECT_TRUE(dequeueResult != nullptr);
     EXPECT_EQ(dequeueResult->method, "dequeue");
     EXPECT_TRUE(dequeueResult->arguments.empty());
-}
-
-TEST("Parser builds a PriorityQueue<T> construction expression")
-{
-    auto program = parseOne("x = PriorityQueue<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* priorityQueueNew = dynamic_cast<PriorityQueueNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(priorityQueueNew != nullptr);
-    EXPECT_EQ(priorityQueueNew->elementType, "i32");
 }
 
 TEST("Parser parses a PriorityQueue<T> parameter type into the canonical form")
@@ -1025,8 +950,7 @@ TEST("Parser builds nested construction syntax for List/Map/Set (K/V can themsel
     // A single Identifier token isn't enough here - the value type is
     // itself a nested generic shape (see
     // docs/language/0034-maps-and-sets.md's generic rewrite).
-    auto program = parseOne("x = Map<i32, List<i32>>()  y = List<List<i32>>()  "
-                            "z = Set<[i32;3]>()");
+    auto program = parseOne("x = Map<i32, List<i32>>()  z = Set<[i32;3]>()");
 
     auto* mapAssign = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
     auto* mapNew = dynamic_cast<MapNewExpr*>(mapAssign->value.get());
@@ -1034,12 +958,7 @@ TEST("Parser builds nested construction syntax for List/Map/Set (K/V can themsel
     EXPECT_EQ(mapNew->keyType, "i32");
     EXPECT_EQ(mapNew->valueType, "List<i32>");
 
-    auto* listAssign = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
-    auto* listNew = dynamic_cast<ListNewExpr*>(listAssign->value.get());
-    EXPECT_TRUE(listNew != nullptr);
-    EXPECT_EQ(listNew->elementType, "List<i32>");
-
-    auto* setAssign = dynamic_cast<AssignmentStmt*>(program.items.at(2).get());
+    auto* setAssign = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
     auto* setNew2 = dynamic_cast<SetNewExpr*>(setAssign->value.get());
     EXPECT_TRUE(setNew2 != nullptr);
     EXPECT_EQ(setNew2->elementType, "[i32;3]");
@@ -1969,6 +1888,41 @@ TEST("Parser accepts a real parameter literally named 'self' with an explicit ty
     EXPECT_EQ(impl->methods[0]->params[0].type, "i32");
 }
 
+TEST("Parser builds an inherent (no-trait) ImplDecl with an empty traitName")
+{
+    auto program = parseOne("impl Point { length(self) -> i32 { return 0 } }");
+
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->traitName, "");
+    EXPECT_EQ(impl->typeName, "Point");
+    EXPECT_TRUE(impl->typeParams.empty());
+    EXPECT_EQ(impl->methods.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(impl->methods[0]->name, "Point.length");
+    EXPECT_EQ(impl->methods[0]->params[0].type, "Point");
+}
+
+TEST("Parser parses a generic inherent impl block, restating the type's own type "
+     "parameters, with self's type as the bracket-syntax text")
+{
+    auto program =
+        parseOne("impl<T> Box<T> { get(self) -> T { return self.value } }");
+
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->traitName, "");
+    EXPECT_EQ(impl->typeName, "Box");
+    EXPECT_EQ(impl->typeParams.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(impl->typeParams[0], "T");
+    EXPECT_EQ(impl->methods[0]->name, "Box.get");
+    EXPECT_EQ(impl->methods[0]->params[0].type, "Box<T>");
+}
+
+TEST("Parser rejects a generic impl whose restated type parameter doesn't match its own")
+{
+    EXPECT_THROWS(parseOne("impl<T> Box<U> { get(self) -> T { return self.value } }"));
+}
+
 TEST("Parser parses 'module name' as a single top-level declaration scoping the whole file, "
      "recorded on Program::moduleName (see docs/language/0066-modules.md)")
 {
@@ -2157,4 +2111,204 @@ TEST("Parser parses a nested generic struct literal type argument")
     auto* literal = dynamic_cast<StructLiteralExpr*>(assignment->value.get());
     EXPECT_TRUE(literal != nullptr);
     EXPECT_EQ(literal->typeName, "Box<List<i32>>");
+}
+
+TEST("Parser parses '*i32' as a pointer type in an extern's own return type")
+{
+    auto program = parseOne("extern c malloc(size: i64) -> *i32");
+
+    auto* externDecl = dynamic_cast<ExternDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(externDecl != nullptr);
+    EXPECT_TRUE(externDecl->returnType.has_value());
+    EXPECT_EQ(*externDecl->returnType, "*i32");
+}
+
+TEST("Parser parses '**i32' as a double pointer type, recursively")
+{
+    auto program = parseOne("extern c f(pp: **i32)");
+
+    auto* externDecl = dynamic_cast<ExternDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(externDecl != nullptr);
+    EXPECT_EQ(externDecl->params[0].type, "**i32");
+}
+
+TEST("Parser builds '*ptr' as a DerefExpr")
+{
+    auto program = parseOne("f(ptr: *i32) -> i32 { return *ptr }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* deref = dynamic_cast<DerefExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(deref != nullptr);
+    auto* name = dynamic_cast<NameExpr*>(deref->operand.get());
+    EXPECT_TRUE(name != nullptr);
+    EXPECT_EQ(name->name, "ptr");
+}
+
+TEST("Parser parses '*ptr + 1' as '(*ptr) + 1' - deref binds tighter than binary plus")
+{
+    auto program = parseOne("f(ptr: *i32) -> i32 { return *ptr + 1 }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* binary = dynamic_cast<BinaryExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(binary != nullptr);
+    EXPECT_TRUE(binary->op == TokenKind::Plus);
+    auto* deref = dynamic_cast<DerefExpr*>(binary->left.get());
+    EXPECT_TRUE(deref != nullptr);
+}
+
+TEST("Parser parses '*(ptr + 1)' as a deref of the whole parenthesized sum")
+{
+    auto program = parseOne("f(ptr: *i32) -> i32 { return *(ptr + 1) }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* deref = dynamic_cast<DerefExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(deref != nullptr);
+    auto* binary = dynamic_cast<BinaryExpr*>(deref->operand.get());
+    EXPECT_TRUE(binary != nullptr);
+    EXPECT_TRUE(binary->op == TokenKind::Plus);
+}
+
+TEST("Parser builds 'unsafe { *ptr }' as an UnsafeBlockExpr wrapping a block")
+{
+    auto program = parseOne("f(ptr: *i32) -> i32 { unsafe { *ptr } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* unsafeBlock = dynamic_cast<UnsafeBlockExpr*>(body->result.get());
+    EXPECT_TRUE(unsafeBlock != nullptr);
+    auto* innerBlock = dynamic_cast<BlockExpr*>(unsafeBlock->body.get());
+    EXPECT_TRUE(innerBlock != nullptr);
+    EXPECT_TRUE(dynamic_cast<DerefExpr*>(innerBlock->result.get()) != nullptr);
+}
+
+TEST("Parser builds '*ptr = 5' as a DerefAssignStmt")
+{
+    // "unsafe { ... }" is the whole function body's own trailing expression here (nothing follows
+    // it before the closing '}'), so it lands in body->result, not body->statements.
+    auto program = parseOne("f(ptr: *i32) { unsafe { *ptr = 5 } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* unsafeBlock = dynamic_cast<UnsafeBlockExpr*>(body->result.get());
+    EXPECT_TRUE(unsafeBlock != nullptr);
+    auto* innerBlock = dynamic_cast<BlockExpr*>(unsafeBlock->body.get());
+    EXPECT_TRUE(innerBlock != nullptr);
+    auto* derefAssign = dynamic_cast<DerefAssignStmt*>(innerBlock->statements.at(0).get());
+    EXPECT_TRUE(derefAssign != nullptr);
+    auto* name = dynamic_cast<NameExpr*>(derefAssign->pointer.get());
+    EXPECT_TRUE(name != nullptr);
+    EXPECT_EQ(name->name, "ptr");
+}
+
+TEST("Parser parses a bare top-level 'unsafe { ... }' statement kept for its side effect")
+{
+    auto program = parseOne("buf = 5\nunsafe\n{\n    *buf = 10\n}\n");
+
+    EXPECT_EQ(program.items.size(), static_cast<std::size_t>(2));
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program.items.at(1).get());
+    EXPECT_TRUE(exprStmt != nullptr);
+    auto* unsafeBlock = dynamic_cast<UnsafeBlockExpr*>(exprStmt->expr.get());
+    EXPECT_TRUE(unsafeBlock != nullptr);
+    auto* innerBlock = dynamic_cast<BlockExpr*>(unsafeBlock->body.get());
+    EXPECT_TRUE(innerBlock != nullptr);
+    EXPECT_TRUE(dynamic_cast<DerefAssignStmt*>(innerBlock->statements.at(0).get()) != nullptr);
+}
+
+TEST("Parser still parses 'total = 2' followed by '*buf = 1' on the next line as two separate "
+     "statements, not one multiplication spanning the line break")
+{
+    // "unsafe { ... }" is the whole function body's own trailing expression here, same reasoning
+    // as the DerefAssignStmt test just above.
+    auto program = parseOne("f(buf: *i32) { unsafe { total = 2\n*buf = 1 } }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* unsafeBlock = dynamic_cast<UnsafeBlockExpr*>(body->result.get());
+    EXPECT_TRUE(unsafeBlock != nullptr);
+    auto* innerBlock = dynamic_cast<BlockExpr*>(unsafeBlock->body.get());
+    EXPECT_EQ(innerBlock->statements.size(), static_cast<std::size_t>(2));
+    auto* first = dynamic_cast<AssignmentStmt*>(innerBlock->statements.at(0).get());
+    EXPECT_TRUE(first != nullptr);
+    EXPECT_TRUE(dynamic_cast<DerefAssignStmt*>(innerBlock->statements.at(1).get()) != nullptr);
+}
+
+TEST("Parser builds '&x' as an AddressOfExpr wrapping a NameExpr")
+{
+    auto program = parseOne("x = 5\np = &x");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* addressOf = dynamic_cast<AddressOfExpr*>(assignment->value.get());
+    EXPECT_TRUE(addressOf != nullptr);
+    auto* name = dynamic_cast<NameExpr*>(addressOf->operand.get());
+    EXPECT_TRUE(name != nullptr);
+    EXPECT_EQ(name->name, "x");
+}
+
+TEST("Parser parses '&x.field' as an AddressOfExpr wrapping a FieldExpr - the parser stays "
+     "permissive here, TypeChecker is the actual gate rejecting anything but a bare NameExpr")
+{
+    auto program = parseOne("struct Point { x: i32 } "
+                            "f(p: Point) -> *i32 { return &p.x }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(1).get());
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    auto* returnStmt = dynamic_cast<ReturnStmt*>(body->statements.at(0).get());
+    auto* addressOf = dynamic_cast<AddressOfExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(addressOf != nullptr);
+    EXPECT_TRUE(dynamic_cast<FieldExpr*>(addressOf->operand.get()) != nullptr);
+}
+
+TEST("Parser parses 'sizeof<TypeName>()' as a SizeOfExpr")
+{
+    auto program = parseOne("x = sizeof<i32>()");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* sizeOf = dynamic_cast<SizeOfExpr*>(assignment->value.get());
+    EXPECT_TRUE(sizeOf != nullptr);
+    EXPECT_EQ(sizeOf->typeName, "i32");
+}
+
+TEST("Parser parses a pointer-to-pointer 'as' cast using the ordinary CastExpr node")
+{
+    auto program = parseOne("extern c malloc(size: i64) -> *i32 "
+                            "struct Point { x: i32 } "
+                            "raw = malloc(4i64) "
+                            "p = raw as *Point");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(3).get());
+    auto* cast = dynamic_cast<CastExpr*>(assignment->value.get());
+    EXPECT_TRUE(cast != nullptr);
+    EXPECT_EQ(cast->targetType, "*Point");
+}
+
+TEST("Parser parses a generic top-level function declaration's own type parameters")
+{
+    auto program = parseOne("identity<T>(x: T) -> T { return x }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->typeParams.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(function->typeParams[0], "T");
+    EXPECT_EQ(function->params[0].type, "T");
+    EXPECT_TRUE(function->returnType.has_value());
+    EXPECT_EQ(*function->returnType, "T");
+}
+
+TEST("Parser parses an explicit call-site type argument 'name<Type>(args)' as a CallExpr")
+{
+    auto program = parseOne("identity<T>(x: T) -> T { return x } "
+                            "a = identity<i32>(42)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
+    auto* call = dynamic_cast<CallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "identity");
+    EXPECT_EQ(call->typeArgument, "i32");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(1));
 }

@@ -1,7 +1,65 @@
 # `List<T>`: A Growable, Heap-Allocated List
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0033-lists.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`List<T>` is no longer a compiler intrinsic. It is a real, user-declared generic struct with a
+generic inherent `impl` block, living in `std/collections.ax`, built on top of user-visible
+generics (`docs/language/0006-generics.md`), `unsafe`/raw pointers (`docs/language/0019-unsafe.md`),
+generic top-level functions, and a `sizeof<T>()` builtin — all added specifically to make this
+port possible. Everything below this section documents the *original compiler-intrinsic design*
+(now retired) for historical context; the API itself changed in the port:
+
+```ax
+use collections
+
+l: List<i32> = collections.newList<i32>()
+l.push(4)
+l.push(5)
+last = l.pop()
+first = l.get(0)      // was: l[0]
+l.set(0, 99)          // was: l[0] = 99
+count = l.length       // unchanged - an ordinary struct field read
+```
+
+**What changed and why:**
+
+- **Construction**: `List<i32>()` call-style sugar → `collections.newList<i32>()`, an ordinary
+  (generic) function call. A real struct's own construction is a struct literal, not call
+  syntax — this reuses that, wrapped in a constructor function so the `malloc`/pointer plumbing
+  stays hidden.
+- **Indexing** (`list[i]`, `list[i] = v`) → `.get(i)`/`.set(i, v)` methods. `TypeChecker`'s
+  `isIndexable` check is hardcoded to specific `TypeKind`s (`Array`/`Slice`/`Deque`) — a struct,
+  however many fields it has, is never one of them. Keeping `[]` working would have meant
+  building a new indexing-operator-overload feature; the chosen path avoids inventing that.
+- **`for`-in iteration**, **default bracket-list printing** (`[1, 2, 3]`), **use as a Map/Set
+  key**, and **`.join()`** are not supported on the new `List<T>` — each depended on the same
+  retired intrinsic machinery (the indexing protocol, a hand-rolled stringifier, a hand-rolled
+  hash/equality pair) that a plain struct doesn't participate in. None of these were reimplemented
+  in Axea source as part of the port; they may return as real library code later.
+- **Array slicing** (`arr[a..b]` producing a fresh `List<T>`) was removed entirely (not just
+  changed) — producing one now requires a real `newList<T>()` call plus a push loop, not a
+  type-checked bulk copy, and slicing shouldn't gain a hidden dependency on `std/collections.ax`
+  being in scope. `str` slicing (`date[a..b]`) is unaffected.
+- **Memory**: the real Axea-source `push` actually `free`s its old buffer on growth — a genuine
+  improvement over the intrinsic's own documented buffer leak (see "Known Imprecision" below),
+  possible now that this is ordinary code instead of a fixed C++ emission.
+- **A real API/behavior difference worth knowing**: growth still doubles capacity (`max(needed,
+  capacity*2)`), but the very first allocation is `capacity = 1` immediately (not the intrinsic's
+  lazy `capacity = 0`) — there is no null-pointer literal in Axea to represent "not yet
+  allocated," so the constructor allocates eagerly instead. Unobservable to callers (there is no
+  `.capacity` accessor).
+- `pop`/`get`/`set` still have no bounds check, matching the original's own compiled-backend
+  behavior — an out-of-range access on the interpreter now surfaces as "dereferenced pointer is
+  out of bounds" (the pointer arena's own check, from `docs/language/0019-unsafe.md`) rather than
+  a dedicated "pop on an empty List" message.
+
+See `examples/list.ax` and `examples/char.ax` for worked examples against the real
+implementation.
 
 ---
 

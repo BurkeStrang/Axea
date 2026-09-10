@@ -221,6 +221,10 @@ private:
     bool isSliceType(const std::string& type) const;
     // "{T*, i32}" -> "T".
     std::string sliceElementType(const std::string& type) const;
+    // `*T` (see docs/language/0019-unsafe.md) - a raw pointer to a primitive pointee.
+    bool isPointerType(const std::string& type) const;
+    // "T*" -> "T".
+    std::string pointerElementType(const std::string& type) const;
     // A List<T> is "{i32, T*}*" - a *pointer* to a small anonymous heap
     // record {length, data} (see docs/language/0033-lists.md), distinguished
     // from slice<T> (also '{'-prefixed, but never pointer-suffixed - a slice
@@ -363,9 +367,8 @@ private:
     void ensureBufferCapacity(const std::string& bufferRef,
                               const std::string& neededRef,
                               FunctionContext& fctx);
-    // Shared by emitListPush/emitStackPush/emitPriorityQueuePush - the
-    // List<T>/Stack<T>/PriorityQueue<T> analogue of ensureBufferCapacity
-    // above, generalized over an arbitrary element type (Buffer's own
+    // Shared by emitPriorityQueuePush - the PriorityQueue<T> analogue of
+    // ensureBufferCapacity above, generalized over an arbitrary element type (Buffer's own
     // element type is always i8, so its helper has no elementType
     // parameter; this one does). Same doubling-or-exactly-`neededRef`
     // growth policy, same hand-verified alloca/load/store copy loop (no
@@ -705,37 +708,19 @@ private:
     // element/key type string) a strict less-than function for a given
     // orderable type, returning its name (e.g. "@axea.less.i32"). Only
     // ever called with a type TypeChecker::isOrderableKind accepts (i32,
-    // char, str) - PriorityQueue<T>'s own push/pop sift comparisons and
-    // SortedMap<K,V>/SortedSet<T>'s own generated AVL templates
-    // (`<<LESSFN>>`) share this single primitive, mirroring how
+    // char, str) - SortedMap<K,V>/SortedSet<T>'s own generated AVL templates
+    // (`<<LESSFN>>`) are the remaining consumer (PriorityQueue<T> is a real,
+    // user-declared generic struct now - see docs/language/0006-generics.md's own port
+    // follow-up - so its own sift comparisons are ordinary Axea `<` expressions, lowered
+    // through the same shared BinOp/icmp/@axea.less.str path every other `<` in the language
+    // already uses, not through this registration function directly), mirroring how
     // registerKeyRuntime's hash/eq pair is shared by Map<K,V>/Set<T>. i32/
     // char each reduce to one `icmp slt` instruction; str is a hand-rolled
     // byte-walk lexicographic compare, matching registerKeyRuntime's own
     // @axea.eq.str byte-walk style (unsigned byte comparison, stopping at
     // the first difference or either string's nul terminator - the same
-    // semantics a textbook strcmp has). See
-    // docs/language/0039-priority-queues.md.
+    // semantics a textbook strcmp has). See docs/language/0040-sorted-maps.md.
     std::string registerOrderRuntime(const std::string& axeaKeyType);
-    // Emits "<destReg> = <lhsRef> <predicate> <rhsRef>" (predicate one of
-    // "sle"/"slt") for one PriorityQueue<T> element comparison, returning
-    // the freshly allocated destReg - str compares via
-    // registerOrderRuntime's own @axea.less.str (not pointer identity),
-    // routing "sle" through "not (rhs < lhs)" since only a strict
-    // less-than primitive exists; every other orderable element type
-    // (i32, char) still gets a plain icmp, exactly as before. Returns
-    // (rather than taking) destReg for the same reason emitStrComparison
-    // above takes an Axea register instead of a pre-allocated one: LLVM
-    // requires unnamed registers in strictly increasing textual definition
-    // order, so a caller-pre-allocated destReg could end up numerically
-    // higher than an intermediate register ("sle"'s own notLessReg) this
-    // function still needs to allocate and define first. Shared by all
-    // three of PriorityQueue's own sift comparisons (push's sift-up, pop's
-    // sift-down) - see docs/language/0039-priority-queues.md.
-    int emitPriorityQueueCompare(const std::string& elementType,
-                                 const std::string& predicate,
-                                 const std::string& lhsRef,
-                                 const std::string& rhsRef,
-                                 FunctionContext& fctx);
 
     void inferTypes(const IrFunction& function, FunctionContext& fctx);
     void inferTypesInList(const std::vector<std::unique_ptr<IrInst>>& instructions,
@@ -803,6 +788,14 @@ private:
     void emitArrayNew(const IrArrayNew& arrayNew, FunctionContext& fctx);
     void emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fctx);
     void emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fctx);
+    // `*ptr` read/write (see docs/language/0019-unsafe.md) - dedicated rather than a IrIndexGet/
+    // Set reuse, see IrDeref's own comment in Ir.hpp for why.
+    void emitDeref(const IrDeref& deref, FunctionContext& fctx);
+    void emitDerefAssign(const IrDerefAssign& derefAssign, FunctionContext& fctx);
+    // `&name`'s own backing store (see docs/language/0019-unsafe.md) - alloca + an immediate
+    // store of the initial value, styled after emitLoop's own identical alloca-emission text for
+    // the loop-carried case.
+    void emitAlloca(const IrAlloca& alloca, FunctionContext& fctx);
     // `object[start..end]` etc (see docs/language/0045-str-slicing.md) -
     // resolves `object` to a bare i8* (resolveStrPtr, shared with
     // emitStringNew/emitStringAppend), defaults a missing `start` to 0 and
@@ -862,37 +855,14 @@ private:
     // does, just inlined here since this Buffer has no Axea-level
     // register/variable of its own to call IrBufferFinish against.
     void emitJoin(const IrJoin& join, FunctionContext& fctx);
-    // A fresh, empty {length: 0, data: null} heap record - same malloc +
-    // null-GEP sizeof idiom as emitStructNew/emitArrayNew (see
-    // docs/language/0033-lists.md).
-    void emitListNew(const IrListNew& listNew, FunctionContext& fctx);
-    // The hand-verified grow-on-every-push sequence (no amortized growth
-    // this phase, a deliberate simplification - see docs/language/0033-lists.md):
-    // GEP+load the current length, malloc a fresh buffer sized to length + 1,
-    // a hand-rolled phi-based copy loop moving the old elements across (own
-    // label numbering via fctx.nextLabel++, same convention emitBranch/
-    // emitLoop already use), append the pushed value, then store the new
-    // length/data back into the header's own fields in place.
-    void emitListPush(const IrListPush& listPush, FunctionContext& fctx);
-    // No bounds check (matches every other out-of-bounds case in this
-    // backend - division, array/slice indexing: the interpreter checks,
-    // compiled code does not); no shrink/realloc (matches the "no capacity
-    // tracking" simplification - the buffer just stays at its previous size).
-    void emitListPop(const IrListPop& listPop, FunctionContext& fctx);
-    // Stack<T> (see docs/language/0035-stacks.md) - backed internally by
-    // List<T>'s own machinery. emitStackNew/Push/Pop are structurally
-    // identical to emitListNew/Push/Pop (separate functions, not shared,
-    // per this codebase's "separate over shared" convention - they're
-    // dispatched via distinct IR instruction types either way).
-    void emitStackNew(const IrStackNew& stackNew, FunctionContext& fctx);
-    void emitStackPush(const IrStackPush& stackPush, FunctionContext& fctx);
-    void emitStackPop(const IrStackPop& stackPop, FunctionContext& fctx);
-    // GEP+load the element at length-1, *without* the decrement-and-store-back
-    // emitStackPop does - the one genuinely new operation this feature needs.
-    void emitStackPeek(const IrStackPeek& stackPeek, FunctionContext& fctx);
+    // `List<T>`/`Stack<T>` are real, user-declared generic structs now, not compiler
+    // intrinsics (see docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up and
+    // std/collections.ax) - there is no emitListNew/emitListPush/emitListPop/emitStackNew/
+    // emitStackPush/emitStackPop/emitStackPeek anymore. PriorityQueue<T> below remains
+    // intrinsic, sharing only `ensureListCapacity`'s growth algorithm.
     // A fresh {count: 0, bucketCount: 8, buckets: <8 nulls>} heap header (see
     // docs/language/0034-maps-and-sets.md) - same malloc + null-GEP sizeof
-    // idiom as emitListNew, plus a second malloc for the initial bucket
+    // idiom as emitPriorityQueueNew, plus a second malloc for the initial bucket
     // array, zeroed via 8 unrolled stores (8 is a compile-time constant, so
     // this is cheaper than a real loop).
     void emitMapNew(const IrMapNew& mapNew, FunctionContext& fctx);
@@ -912,7 +882,7 @@ private:
     void emitSetRemove(const IrSetRemove& setRemove, FunctionContext& fctx);
     // A fresh {count: 0, root: null} heap header (see
     // docs/language/0040-sorted-maps.md) - same malloc + null-GEP sizeof
-    // idiom as emitListNew/emitStackNew (2 fields, no bucket array unlike
+    // idiom as emitPriorityQueueNew (2 fields, no bucket array unlike
     // Map/Set's own 3-field header - a tree needs no initial bucket
     // allocation). Direct C++ emission, not template text, mirroring
     // emitMapNew/emitSetNew's own choice.
@@ -993,67 +963,17 @@ private:
     void emitLinkedListPushBack(const IrLinkedListPushBack& pushBack, FunctionContext& fctx);
     void emitLinkedListPopFront(const IrLinkedListPopFront& popFront, FunctionContext& fctx);
     void emitLinkedListPopBack(const IrLinkedListPopBack& popBack, FunctionContext& fctx);
-    // A fresh {count: 0, start: 0, data: null} heap header (see
-    // docs/language/0037-deques.md) - direct inline emission, same
-    // malloc + null-GEP sizeof idiom as emitListNew (3 fields instead of 2).
-    void emitDequeNew(const IrDequeNew& dequeNew, FunctionContext& fctx);
-    // Shared copy-loop helper for emitDequePushFront/emitDequePushBack - see
-    // their own doc comments below and the definition in the .cpp.
-    int emitDequeCopyForPush(const std::string& elementType,
-                             const std::string& oldDataRef,
-                             int oldCountReg,
-                             int oldStartReg,
-                             int newDataReg,
-                             int destOffset,
-                             FunctionContext& fctx);
-    // Direct inline C++ (not template text - unlike LinkedList's push, no
-    // head/tail invariant to conditionally maintain, so no branching is
-    // needed at all): mirrors emitListPush's malloc-a-buffer-of-size-
-    // count+1 + hand-rolled copy loop exactly, except the copy source is
-    // offset by the *old* start (reading data[start+i], not data[i]), and
-    // push_front writes the new element at destination index 0 while
-    // shifting the copied range to start at index 1 (push_back copies
-    // straight across and appends at index count). New start is always
-    // stored as 0 either way - see docs/language/0037-deques.md.
-    void emitDequePushFront(const IrDequePushFront& pushFront, FunctionContext& fctx);
-    void emitDequePushBack(const IrDequePushBack& pushBack, FunctionContext& fctx);
-    // No loop, no branch - simpler than even emitListPop: pop_front reads
-    // data[start] then increments start/decrements count; pop_back reads
-    // data[start+count-1] then decrements count only (start untouched). No
-    // bounds check and no reallocation, matching every other pop in this
-    // backend.
-    void emitDequePopFront(const IrDequePopFront& popFront, FunctionContext& fctx);
-    void emitDequePopBack(const IrDequePopBack& popBack, FunctionContext& fctx);
-    // Queue<T> (see docs/language/0038-queues.md) - backed internally by
-    // Deque<T>'s own machinery, LLVM-identical to it (llvmType("Queue<T>")
-    // produces the exact same text llvmType("Deque<T>") does), so no
-    // isQueueType predicate exists anywhere: isDequeType's existing
-    // structural check already matches a Queue<T> header by construction.
-    // emitQueueNew/Enqueue/Dequeue are structurally identical to
-    // emitDequeNew/emitDequePushBack/emitDequePopFront (separate functions,
-    // not shared, per this codebase's "separate over shared" convention -
-    // mirrors emitStackPush/Pop's own identical relationship to
-    // emitListPush/Pop).
-    void emitQueueNew(const IrQueueNew& queueNew, FunctionContext& fctx);
-    void emitQueueEnqueue(const IrQueueEnqueue& enqueue, FunctionContext& fctx);
-    void emitQueueDequeue(const IrQueueDequeue& dequeue, FunctionContext& fctx);
-    // PriorityQueue<T> (see docs/language/0039-priority-queues.md) - a real
-    // binary heap over a List<T>-identical header. emitPriorityQueueNew is a
-    // direct copy of emitStackNew/emitListNew. emitPriorityQueuePush copies
-    // emitStackPush's own malloc-and-copy-loop verbatim, then sifts the
-    // newly appended element up toward the root. emitPriorityQueuePop moves
-    // the last element into the vacated root slot, shrinks the length, then
-    // sifts that element down. Both sift loops are hand-rolled
-    // alloca/load/store-counter LLVM basic blocks (no phi), the first real
-    // comparison-and-swap loops this backend has needed - every earlier
-    // collection's push/pop was a renamed copy or a pure-arithmetic
-    // shrink/grow, never a genuine reordering algorithm.
-    void emitPriorityQueueNew(const IrPriorityQueueNew& priorityQueueNew, FunctionContext& fctx);
-    void emitPriorityQueuePush(const IrPriorityQueuePush& priorityQueuePush, FunctionContext& fctx);
-    void emitPriorityQueuePop(const IrPriorityQueuePop& priorityQueuePop, FunctionContext& fctx);
-    // GEP+load at index 0 - the minimum always sits at the root by the heap
-    // invariant, so (unlike emitStackPeek) this needs no arithmetic at all.
-    void emitPriorityQueuePeek(const IrPriorityQueuePeek& priorityQueuePeek, FunctionContext& fctx);
+    // `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>` are all real, user-declared
+    // generic structs now, not compiler intrinsics (see docs/language/0006-generics.md's own
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up and
+    // std/collections.ax) - there is no emitDequeNew/emitDequePushFront/emitDequePushBack/
+    // emitDequePopFront/emitDequePopBack/emitQueueNew/emitQueueEnqueue/emitQueueDequeue/
+    // emitDequeCopyForPush/emitPriorityQueueNew/emitPriorityQueuePush/emitPriorityQueuePop/
+    // emitPriorityQueuePeek anymore - every one of those method calls now reaches its own real
+    // Axea-source method via the general struct method dispatch (an ordinary IrCall), including
+    // PriorityQueue<T>'s own hand-rolled sift-up/sift-down loops (see
+    // docs/language/0039-priority-queues.md), which are ordinary `loop`/`if` Axea source now,
+    // not hand-emitted LLVM basic blocks.
     void emitBranch(const IrBranch& branch, FunctionContext& fctx);
     // `while`/`loop`. See docs/language/0028-loops.md: loop-carried
     // variables become alloca/load/store (not phi), re-read at the top of

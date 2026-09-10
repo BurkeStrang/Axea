@@ -144,6 +144,9 @@ Token Lexer::nextToken()
             return makeToken(TokenKind::Plus, start, startLine, startColumn);
         case '*': return makeToken(TokenKind::Star, start, startLine, startColumn);
         case '/': return makeToken(TokenKind::Slash, start, startLine, startColumn);
+        // "&" - address-of only (see docs/language/0019-unsafe.md); this language has no
+        // bitwise/logical-and operator, so '&' was unclaimed, same reasoning as '|' just below.
+        case '&': return makeToken(TokenKind::Ampersand, start, startLine, startColumn);
         case '(': return makeToken(TokenKind::LeftParen, start, startLine, startColumn);
         case ')': return makeToken(TokenKind::RightParen, start, startLine, startColumn);
         case '{': return makeToken(TokenKind::LeftBrace, start, startLine, startColumn);
@@ -307,7 +310,7 @@ Token Lexer::lexIdentifierOrKeyword()
         {"trait", TokenKind::Trait},   {"impl", TokenKind::Impl},
         {"enum", TokenKind::Enum},     {"match", TokenKind::Match},
         {"module", TokenKind::Module}, {"use", TokenKind::Use},
-        {"fn", TokenKind::Fn}};
+        {"fn", TokenKind::Fn},         {"unsafe", TokenKind::Unsafe}};
 
     if (const auto it = keywords.find(token.text); it != keywords.end())
     {

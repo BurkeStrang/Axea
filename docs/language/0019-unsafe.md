@@ -162,13 +162,16 @@ other value kind.
     checking an `UnsafeBlockExpr`'s body and restored after - the same shape as any other scoped
     checker flag in this codebase. `DerefExpr`/pointer-arithmetic checking consults this flag and
     raises the new diagnostic (see Diagnostics) when false.
--   **Interpreter:** represents a `*T` as a small tagged handle - a `shared_ptr<Value>` cell (an
-    already-existing pattern: struct fields are already interpreter-side `shared_ptr`-backed for
-    aliasing) plus an element offset, since the interpreter has no real flat address space to
-    point into. `malloc`/`free` are hand-implemented against a simple interpreter-side arena (one
+-   **Interpreter:** represents a `*T` as a `PointerInstance` - a `shared_ptr<vector<Value>>`
+    arena plus an integer offset, since the interpreter has no real flat address space to point
+    into. `malloc`/`free` are hand-implemented against a fresh, appropriately-sized arena (one
     `std::vector<Value>` per allocation), the same "fake the real C runtime call the interpreter
     can't literally execute" pattern `extern c`'s existing small hand-implemented allowlist in
-    `Interpreter.cpp` already uses.
+    `Interpreter.cpp` already uses. `&name` (Milestone 2, address-of a local) reuses this exact
+    same shape rather than a second representation: it boxes the named local into a
+    **single-element** arena and points a `PointerInstance` at it with `offset` always `0` - every
+    existing deref/assign/pointer-arithmetic/bounds-check code path already handles it unmodified,
+    including getting "arithmetic past a singleton is a runtime error" for free.
 -   **LlvmIrEmitter:** `*T` lowers to a literal LLVM `T*` (or `i8*` for an untyped pointer);
     `&expr`/`*expr`/pointer arithmetic lower to literal `getelementptr`/`load`/`store` IR - the
     only new LLVM constructs this doc introduces, since every existing allocation was previously

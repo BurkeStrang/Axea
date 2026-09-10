@@ -1,7 +1,68 @@
 # `Queue<T>`: `Stack<T>`'s Own Pattern, Backed by `Deque<T>` Instead of `List<T>`
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0038-queues.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`Queue<T>` is no longer a compiler intrinsic. Following `List<T>`/`Stack<T>`/`Deque<T>`'s own
+ports (`docs/language/0033-lists.md`/`0035-stacks.md`/`0037-deques.md`'s own "2026 Update"
+sections), `Queue<T>` is now a real, user-declared generic struct with a generic inherent `impl`
+block, living in `std/collections.ax`, **composed directly on top of the real `Deque<T>`** —
+this document's own title already called this port out in advance ("`Stack<T>`'s Own Pattern"),
+and the port itself follows that pattern to the letter: `Stack<T>` composed over `List<T>`,
+`Queue<T>` composes over `Deque<T>`, for the identical reason and with the identical tradeoff.
+
+```ax
+struct Queue<T>
+{
+    items: Deque<T>
+}
+```
+
+Every prerequisite this port needed (user-defined generics, generic inherent `impl`, general
+struct method dispatch, `sizeof<T>()`, generic top-level functions) was already in place, and —
+per this document's own "Motivation" section — `Queue<T>` never had `isQueueExpr`/collision
+machinery to retire in the first place (`enqueue`/`dequeue` were always unique method names), so
+this port's `IrGenerator` share is strictly smaller than every earlier collection's.
+
+```ax
+use collections
+
+jobs: Queue<i32> = collections.newQueue<i32>()
+jobs.enqueue(job1)
+jobs.enqueue(job2)
+job = jobs.dequeue()      // job1 - classic FIFO, unchanged
+count = jobs.length()      // was: jobs.length
+```
+
+**What changed and why:**
+
+- **Construction**: `Queue<i32>()` call-style sugar → `collections.newQueue<i32>()`, an ordinary
+  (generic) function call - identical reasoning to every earlier port's own construction change.
+- **`.length` is now a method, `.length()`, not a bare field.** The one genuine API difference
+  from `Deque<T>`'s own port, mirroring `Stack<T>.length()`'s own precedent exactly: `Deque<T>`
+  owns its `length` field directly, so `deque.length` stays a bare field read. `Queue<T>`
+  composes over an internal `items: Deque<T>` field instead, and this language has no
+  computed-property/field-delegation syntax to expose `self.items.length` as a bare `q.length` -
+  so it's an ordinary method, `length(self) -> i32 { return self.items.length }`.
+- **`enqueue`/`dequeue` need no syntax change** - they were already ordinary method calls, now
+  reaching `Queue<T>`'s own real `impl` block (which just forwards to `self.items`'s own
+  `push_back`/`pop_front`) via the general struct method dispatch, rather than the retired
+  `IrQueueEnqueue`/`IrQueueDequeue` intrinsic instructions.
+- **This document's own "no `isQueueType` predicate exists anywhere" observation (`Design`
+  section) is now doubly true** - not only was there never a `TypeKind`-level predicate needed,
+  there is no `IrGenerator`-level disambiguation resolver needed either, since `enqueue`/
+  `dequeue` reach the general struct method dispatch unconditionally, the same way every other
+  real struct's own uniquely-named methods do.
+- `dequeue()` still has no bounds check on an empty queue in the interpreter beyond `Deque<T>`'s
+  own pointer-arena bounds check (`docs/language/0019-unsafe.md`) - no dedicated "dequeue on an
+  empty Queue" message, matching `Deque<T>`'s own identical port decision.
+- See `examples/queue.ax` for a worked example (verified both interpreted and compiled, `-O0`
+  and `-O1`); everything below this section documents the *original compiler-intrinsic design*
+  (now retired) for historical context.
 
 ---
 

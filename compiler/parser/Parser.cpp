@@ -95,6 +95,14 @@ std::string Parser::parseTypeName()
 
 std::string Parser::parseTypeNameAtom()
 {
+    if (match(TokenKind::Star))
+    {
+        // `*T` (see docs/language/0019-unsafe.md) - a full recursive parseTypeNameAtom() call
+        // (not parseTypeName(), so a pointer never itself absorbs a top-level '|' union - `*T | U`
+        // parses as `(*T) | U`), so `**T` parses for free via plain recursion.
+        return "*" + parseTypeNameAtom();
+    }
+
     if (match(TokenKind::LeftBracket))
     {
         // A full recursive parseTypeName() call, not a single Identifier
@@ -138,25 +146,25 @@ std::string Parser::parseTypeNameAtom()
 
     const auto& name = expect(TokenKind::Identifier, "expected type name");
 
-    // "slice<elem>" (docs/language/0032-slices.md) / "List<elem>"
-    // (docs/language/0033-lists.md) / "Set<elem>" (docs/language/0034-maps-and-sets.md)
-    // / "Stack<elem>" (docs/language/0035-stacks.md) / "LinkedList<elem>"
-    // (docs/language/0036-linked-lists.md) / "Deque<elem>"
-    // (docs/language/0037-deques.md) / "Queue<elem>" (docs/language/0038-queues.md)
-    // / "PriorityQueue<elem>" (docs/language/0039-priority-queues.md) /
+    // "slice<elem>" (docs/language/0032-slices.md) / "Set<elem>" (docs/language/0034-maps-and-sets.md)
+    // / "LinkedList<elem>" (docs/language/0036-linked-lists.md) /
     // "SortedSet<elem>" (docs/language/0041-sorted-sets.md)
     // - all reuse the existing Less/Greater tokens (no lexer changes needed:
     // '<'/'>' only mean this here because we're in type position, never
-    // expression position).
-    if ((name.text == "slice" || name.text == "List" || name.text == "Set" ||
-         name.text == "Stack" || name.text == "LinkedList" || name.text == "Deque" ||
-         name.text == "Queue" || name.text == "PriorityQueue" || name.text == "SortedSet" ||
-         name.text == "Optional" || name.text == "Shared") &&
+    // expression position). "List<elem>"/"Stack<elem>"/"Deque<elem>"/"Queue<elem>"/
+    // "PriorityQueue<elem>" are deliberately NOT here (see docs/language/0006-generics.md's own
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up) - all five are real,
+    // user-declared generic structs now (std/collections.ax), reached via the ordinary generic
+    // fallback below like any other.
+    if ((name.text == "slice" || name.text == "Set" ||
+         name.text == "LinkedList" ||
+         name.text == "SortedSet" || name.text == "Optional" ||
+         name.text == "Shared") &&
         match(TokenKind::Less))
     {
         const std::string elementType = parseTypeName();
         expect(TokenKind::Greater,
-               "expected '>' after slice/List/Set/Stack/LinkedList/Deque/Queue/PriorityQueue/"
+               "expected '>' after slice/Set/LinkedList/"
                "SortedSet/Optional/Shared element type");
         return name.text + "<" + elementType + ">";
     }
@@ -261,6 +269,18 @@ std::unique_ptr<Stmt> Parser::parseItem()
         return parseEnumDecl();
     }
 
+    // `name<T, U>(...)` (see docs/language/0006-generics.md's own List<T> port follow-up) -
+    // unambiguously a generic function declaration: no other top-level statement shape starts
+    // with `Identifier '<'` in this grammar (an assignment target requires '='/':' immediately
+    // after the name; a generic struct-literal reference like `Box<i32>{...}` only ever appears
+    // on the *right-hand side* of an assignment, never as the first token of a top-level item).
+    if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::Less)
+    {
+        auto decl = parseFunctionDecl();
+        static_cast<FunctionDecl&>(*decl).isPublic = isPublic;
+        return decl;
+    }
+
     if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::LeftParen)
     {
         if (looksLikeFunctionDecl())
@@ -295,6 +315,17 @@ std::unique_ptr<Stmt> Parser::parseItem()
     if (current().kind == TokenKind::Write && peek().kind == TokenKind::LeftParen)
     {
         auto expr = parseExpression();
+        return std::make_unique<ExprStmt>(std::move(expr));
+    }
+
+    // `unsafe { ... }` at the top level (see docs/language/0019-unsafe.md), kept for its side
+    // effect exactly like a bare top-level call just above - parseAssignment's own unconditional
+    // `expect(Identifier)` fallback has no path for any keyword-led statement (bare top-level
+    // `if`/`loop`/`while` have this identical, pre-existing gap too, but fixing those is out of
+    // scope here - only `unsafe` is required by this milestone).
+    if (current().kind == TokenKind::Unsafe)
+    {
+        auto expr = parseUnsafeExpr();
         return std::make_unique<ExprStmt>(std::move(expr));
     }
 
@@ -351,6 +382,29 @@ bool Parser::looksLikeGenericStructLiteral() const
     return peek(offset).kind == TokenKind::LeftBrace;
 }
 
+bool Parser::looksLikeGenericCall() const
+{
+    // Identical scan to looksLikeGenericStructLiteral, checking for '(' instead of '{' once the
+    // brackets balance back to zero - `name<Type>(args)` (see docs/language/0006-generics.md's
+    // own List<T> port follow-up), an explicit call-site type argument to a generic top-level
+    // function.
+    std::size_t offset = 2;
+    int depth = 1;
+    while (depth > 0)
+    {
+        switch (peek(offset).kind)
+        {
+            case TokenKind::Less: ++depth; break;
+            case TokenKind::Greater: --depth; break;
+            case TokenKind::Identifier:
+            case TokenKind::Comma: break;
+            default: return false;
+        }
+        ++offset;
+    }
+    return peek(offset).kind == TokenKind::LeftParen;
+}
+
 Param Parser::parseParam()
 {
     std::optional<Capability> capability;
@@ -378,6 +432,22 @@ Param Parser::parseParam()
 std::unique_ptr<Stmt> Parser::parseFunctionDecl()
 {
     const auto& name = expect(TokenKind::Identifier, "expected function name");
+
+    // `name<T, U>(...)` (see docs/language/0006-generics.md's own List<T> port follow-up) -
+    // identical shape to struct/impl's own type-param list. Explicit type arguments only at
+    // call sites (see CallExpr::typeArgument) - no inference, matching every other generic
+    // feature this session.
+    std::vector<std::string> typeParams;
+    if (match(TokenKind::Less))
+    {
+        typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        while (match(TokenKind::Comma))
+        {
+            typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        }
+        expect(TokenKind::Greater, "expected '>' after function type parameters");
+    }
+
     expect(TokenKind::LeftParen, "expected '(' after function name");
 
     std::vector<Param> params;
@@ -419,8 +489,10 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
         body = parseBlock();
     }
 
-    return std::make_unique<FunctionDecl>(
+    auto decl = std::make_unique<FunctionDecl>(
         name.text, std::move(params), returnType, std::move(body));
+    decl->typeParams = std::move(typeParams);
+    return decl;
 }
 
 std::unique_ptr<Expr> Parser::parseClosureExpr()
@@ -482,7 +554,8 @@ Param Parser::parseSelfAwareParam(const std::string& selfType)
     return parseParam();
 }
 
-std::unique_ptr<FunctionDecl> Parser::parseImplMethod(const std::string& typeName)
+std::unique_ptr<FunctionDecl> Parser::parseImplMethod(const std::string& typeName,
+                                                       const std::string& selfType)
 {
     const auto& name = expect(TokenKind::Identifier, "expected method name");
     expect(TokenKind::LeftParen, "expected '(' after method name");
@@ -490,14 +563,14 @@ std::unique_ptr<FunctionDecl> Parser::parseImplMethod(const std::string& typeNam
     std::vector<Param> params;
     if (current().kind != TokenKind::RightParen)
     {
-        params.push_back(parseSelfAwareParam(typeName));
+        params.push_back(parseSelfAwareParam(selfType));
         while (match(TokenKind::Comma))
         {
             if (current().kind == TokenKind::RightParen)
             {
                 break;
             }
-            params.push_back(parseSelfAwareParam(typeName));
+            params.push_back(parseSelfAwareParam(selfType));
         }
     }
     expect(TokenKind::RightParen, "expected ')' after parameters");
@@ -578,18 +651,88 @@ std::unique_ptr<Stmt> Parser::parseTraitDecl()
 std::unique_ptr<Stmt> Parser::parseImplDecl()
 {
     advance(); // 'impl'
-    const auto& traitName = expect(TokenKind::Identifier, "expected trait name after 'impl'");
-    expect(TokenKind::For, "expected 'for' after trait name in impl block");
-    const auto& typeName = expect(TokenKind::Identifier, "expected type name after 'for'");
-    expect(TokenKind::LeftBrace, "expected '{' after impl header");
+
+    // `impl<T, U> Name<T, U> { ... }` (see docs/language/0006-generics.md) - identical shape to
+    // struct's own type-param list (parseStructDecl), parsed before the first identifier so it's
+    // available regardless of which branch (inherent vs. trait) follows.
+    std::vector<std::string> typeParams;
+    if (match(TokenKind::Less))
+    {
+        typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        while (match(TokenKind::Comma))
+        {
+            typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        }
+        expect(TokenKind::Greater, "expected '>' after impl type parameters");
+    }
+
+    const auto& firstName = expect(TokenKind::Identifier, "expected name after 'impl'");
 
     auto decl = std::make_unique<ImplDecl>();
-    decl->traitName = traitName.text;
-    decl->typeName = typeName.text;
+    decl->typeParams = typeParams;
+
+    if (match(TokenKind::For))
+    {
+        // Existing trait-impl path: `impl TraitName for TypeName { ... }` - the identifier
+        // already parsed was the trait name.
+        const auto& typeName = expect(TokenKind::Identifier, "expected type name after 'for'");
+        decl->traitName = firstName.text;
+        decl->typeName = typeName.text;
+    }
+    else
+    {
+        // New inherent-impl path: `impl TypeName { ... }` / `impl<T> TypeName<T> { ... }` - no
+        // trait, so `traitName` stays empty (the "" sentinel, already safe everywhere it's
+        // checked - see TypeChecker's own registerSignatures). The identifier already parsed
+        // *is* the type name; if the impl itself is generic, the type's own re-stated
+        // `<T, ...>` must follow, textually matching the impl's own list - this makes `self`'s
+        // type text `Box<T>`, which GenericMonomorphizer's existing whole-token substitution
+        // then rewrites to `Box$i32` per instantiation like any other type-text field.
+        decl->typeName = firstName.text;
+        if (!typeParams.empty())
+        {
+            expect(TokenKind::Less, "expected '<' restating impl type parameters after type name");
+            for (std::size_t i = 0; i < typeParams.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    expect(TokenKind::Comma, "expected ',' between type name's type parameters");
+                }
+                const auto& restated =
+                    expect(TokenKind::Identifier, "expected type parameter name");
+                if (restated.text != typeParams[i])
+                {
+                    throw std::runtime_error(
+                        "type name's type parameter '" + restated.text +
+                        "' does not match impl's own type parameter '" + typeParams[i] + "'");
+                }
+            }
+            expect(TokenKind::Greater, "expected '>' after type name's type parameters");
+        }
+    }
+
+    expect(TokenKind::LeftBrace, "expected '{' after impl header");
+
+    // Inside a generic impl, `self`'s own type text is the bracket-syntax `Name<T, ...>` (not
+    // the bare name) - see this function's own comment above.
+    std::string selfType = decl->typeName;
+    if (!typeParams.empty())
+    {
+        selfType += "<";
+        for (std::size_t i = 0; i < typeParams.size(); ++i)
+        {
+            if (i > 0)
+            {
+                selfType += ", ";
+            }
+            selfType += typeParams[i];
+        }
+        selfType += ">";
+    }
 
     while (current().kind != TokenKind::RightBrace)
     {
-        decl->methods.push_back(parseImplMethod(typeName.text));
+        decl->methods.push_back(parseImplMethod(decl->typeName, selfType));
     }
     expect(TokenKind::RightBrace, "expected '}' after impl body");
 
@@ -1026,6 +1169,11 @@ std::unique_ptr<Expr> Parser::parseBlock()
                 statements.push_back(std::make_unique<IndexAssignStmt>(
                     std::move(index->object), std::move(index->index), std::move(value)));
             }
+            else if (auto* deref = dynamic_cast<DerefExpr*>(expr.get()))
+            {
+                statements.push_back(std::make_unique<DerefAssignStmt>(
+                    std::move(deref->operand), std::move(value)));
+            }
             else
             {
                 throw std::runtime_error("invalid assignment target");
@@ -1090,6 +1238,13 @@ std::unique_ptr<Expr> Parser::parseLoopExpr()
     return std::make_unique<LoopExpr>(std::move(body));
 }
 
+std::unique_ptr<Expr> Parser::parseUnsafeExpr()
+{
+    expect(TokenKind::Unsafe, "expected 'unsafe'");
+    auto body = parseBlock();
+    return std::make_unique<UnsafeBlockExpr>(std::move(body));
+}
+
 std::vector<std::pair<std::string, std::unique_ptr<Expr>>> Parser::parseStructLiteralFields()
 {
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields;
@@ -1123,6 +1278,23 @@ std::unique_ptr<Expr> Parser::parseExpression(int minPrecedence, bool allowStruc
     {
         const int currentPrecedence = precedence(current().kind);
         if (currentPrecedence < minPrecedence)
+        {
+            break;
+        }
+
+        // This grammar has no statement terminator, so a new statement beginning with '*' (a
+        // dereference, see docs/language/0019-unsafe.md) directly under a completed statement -
+        // e.g. "total = 2\n*buf = 1" - would otherwise be silently swallowed as "total = 2 * buf"
+        // (an ordinary multiplication continuing onto the next line), leaving a dangling "= 1"
+        // that fails to parse. '*' is the only operator token this language has ever given a
+        // *prefix* meaning to, so it's the only one that needs this guard: stop treating Star as
+        // infix multiplication the moment it starts on a later source line than the operand
+        // already parsed - parseBlock's own statement loop then picks it up fresh as a new
+        // dereference-led statement, exactly as intended. A deliberate multiplication spanning a
+        // line break remains legal as long as the operator itself, not just its right operand,
+        // stays on the same line as the left operand (e.g. "total = 2 *\n  buf" is unaffected).
+        if (current().kind == TokenKind::Star && index_ > 0 &&
+            current().line != tokens_[index_ - 1].line)
         {
             break;
         }
@@ -1708,6 +1880,41 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
         return parseMatchExpr();
     }
 
+    if (current().kind == TokenKind::Unsafe)
+    {
+        return parseUnsafeExpr();
+    }
+
+    // `*ptr` (see docs/language/0019-unsafe.md) - a prefix dereference, unambiguous here: this
+    // whole function is only ever reached at a position expecting a brand-new expression to
+    // start, never mid-expression (parseExpression's own binary-operator loop is the only place
+    // Star is ever read as infix multiplication, and only *after* parsePostfix has already
+    // returned a complete left operand - see that loop's own comment). The operand is parsed via
+    // parsePostfix (not parsePrimary alone), so postfix operations bind *tighter* than this
+    // prefix deref, matching C's own precedence: `*obj.field` parses as `*(obj.field)`, and
+    // `*ptr + 1` parses as `(*ptr) + 1` since the enclosing parseExpression loop only reads the
+    // next `+` as infix once this whole primary has already been returned. `*(ptr + 1)` needs no
+    // special grammar here either - the existing parenthesized-primary branch just above already
+    // handles it.
+    if (current().kind == TokenKind::Star)
+    {
+        advance();
+        return std::make_unique<DerefExpr>(parsePostfix(allowStructLiteral));
+    }
+
+    // `&name` (see docs/language/0019-unsafe.md) - unambiguous for the identical reason '*' is
+    // just above: '&' has never been given infix meaning anywhere in this grammar (no bitwise/
+    // logical-and operator exists), so precedence(TokenKind::Ampersand) is never consulted at all
+    // and no Star-style newline-boundary guard is needed. Operand parsed via parsePostfix, same
+    // as DerefExpr, so `&x.field`/`&arr[i]` still parse (as AddressOfExpr wrapping a FieldExpr/
+    // IndexExpr) - TypeChecker, not the parser, rejects anything but a bare NameExpr operand this
+    // phase.
+    if (current().kind == TokenKind::Ampersand)
+    {
+        advance();
+        return std::make_unique<AddressOfExpr>(parsePostfix(allowStructLiteral));
+    }
+
     // `write(...)` (see docs/language/Axea_Printing_Formatting.md) - "write"
     // is already the `TokenKind::Write` keyword (a parameter capability
     // prefix, e.g. `write user: User`), so it never reaches the ordinary
@@ -1727,30 +1934,11 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
 
     if (current().kind == TokenKind::Identifier)
     {
-        // `List<elem>()` construction (docs/language/0033-lists.md) - special-
-        // cased on the literal identifier "List", the same trick `slice`
-        // already uses in parseTypeName to sidestep the general
-        // generic-vs-comparison-operator ambiguity `<`/`>` would otherwise
-        // create in expression position. Checked before the general
-        // Identifier-then-'(' call branch below, since "List" followed by
-        // '<' would not match that branch's `peek() == LeftParen` check
-        // anyway - listed first here purely for readability.
-        if (current().text == "List" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'List'");
-            // A full recursive parseTypeName() call, not a single Identifier
-            // token - the element type can itself be a nested generic shape
-            // (e.g. `List<List<i32>>()`, `List<Map<i32,i32>>()`), which a
-            // single token can't parse (see docs/language/0034-maps-and-sets.md's
-            // generic-K/V rewrite).
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after List element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'List<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - List<elem>() takes no arguments this phase");
-            return std::make_unique<ListNewExpr>(elementType);
-        }
+        // `List<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T> port follow-up) - List<T> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newList<T>()` generic top-level function (reached through the ordinary
+        // `looksLikeGenericCall()` branch above) rather than call-style `List<elem>()` sugar.
 
         // `Set<elem>()` construction - same trick as List<elem>() above (see
         // docs/language/0034-maps-and-sets.md).
@@ -1766,19 +1954,10 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<SetNewExpr>(elementType);
         }
 
-        // `Stack<elem>()` construction - same trick as List<elem>() above
-        // (see docs/language/0035-stacks.md).
-        if (current().text == "Stack" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'Stack'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after Stack element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'Stack<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - Stack<elem>() takes no arguments this phase");
-            return std::make_unique<StackNewExpr>(elementType);
-        }
+        // `Stack<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - Stack<T> is a
+        // real, user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newStack<T>()` generic top-level function.
 
         // `LinkedList<elem>()` construction - same trick as List<elem>()
         // above (see docs/language/0036-linked-lists.md).
@@ -1794,51 +1973,22 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<LinkedListNewExpr>(elementType);
         }
 
-        // `Deque<elem>()` construction - same trick as List<elem>() above
-        // (see docs/language/0037-deques.md).
-        if (current().text == "Deque" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'Deque'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after Deque element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'Deque<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - Deque<elem>() takes no arguments this phase");
-            return std::make_unique<DequeNewExpr>(elementType);
-        }
+        // `Deque<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) -
+        // Deque<T> is a real, user-declared generic struct now (std/collections.ax), constructed
+        // via its own `newDeque<T>()` generic top-level function.
 
-        // `Queue<elem>()` construction - same trick as List<elem>() above
-        // (see docs/language/0038-queues.md).
-        if (current().text == "Queue" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'Queue'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after Queue element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'Queue<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - Queue<elem>() takes no arguments this phase");
-            return std::make_unique<QueueNewExpr>(elementType);
-        }
+        // `Queue<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port
+        // follow-up) - Queue<T> is a real, user-declared generic struct now
+        // (std/collections.ax), constructed via its own `newQueue<T>()` generic top-level
+        // function.
 
-        // `PriorityQueue<elem>()` construction - same trick as List<elem>()
-        // above (see docs/language/0039-priority-queues.md). The parser
-        // accepts any element type syntactically here (mirrors
-        // MapNewExpr/SetNewExpr's own "parser stays general" convention) -
-        // only TypeChecker enforces i32-only, with a clear error, rather
-        // than the parser silently discarding what was actually written.
-        if (current().text == "PriorityQueue" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'PriorityQueue'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after PriorityQueue element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'PriorityQueue<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - PriorityQueue<elem>() takes no arguments this phase");
-            return std::make_unique<PriorityQueueNewExpr>(elementType);
-        }
+        // `PriorityQueue<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
+        // PriorityQueue<T> port follow-up) - PriorityQueue<T> is a real, user-declared generic
+        // struct now (std/collections.ax), constructed via its own `newPriorityQueue<T>()`
+        // generic top-level function.
 
         // `SortedSet<elem>()` construction - same trick as Set<elem>()
         // above (see docs/language/0041-sorted-sets.md).
@@ -1963,6 +2113,20 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<BufferNewExpr>();
         }
 
+        // `sizeof<TypeName>()` - a builtin, not a real callable function, recognized by literal
+        // text like "Buffer"/"Map" above (see docs/language/0006-generics.md's own List<T> port
+        // follow-up) - always exactly one type argument, empty parens.
+        if (current().text == "sizeof" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'sizeof'");
+            const std::string typeName = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after sizeof's type argument");
+            expect(TokenKind::LeftParen, "expected '(' after 'sizeof<Type>'");
+            expect(TokenKind::RightParen, "expected ')' - sizeof<Type>() takes no arguments");
+            return std::make_unique<SizeOfExpr>(typeName);
+        }
+
         // `Map<key,value>()` construction - the one two-type-argument
         // constructor here (mirrors parseTypeName's own Map<key,value> shape).
         if (current().text == "Map" && peek().kind == TokenKind::Less)
@@ -1994,6 +2158,24 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             expect(TokenKind::RightParen,
                    "expected ')' - SortedMap<key,value>() takes no arguments this phase");
             return std::make_unique<SortedMapNewExpr>(keyType, valueType);
+        }
+
+        // `name<Type>(args)` (see docs/language/0006-generics.md's own List<T> port follow-up) -
+        // an explicit call-site type argument to a generic top-level function. Checked before
+        // the plain-call branch just below (which only matches `Identifier '('` directly) and
+        // before the generic-struct-literal branch further below (which shares the same
+        // `Identifier '<'` prefix, disambiguated only by what follows the balanced '>').
+        if (peek().kind == TokenKind::Less && looksLikeGenericCall())
+        {
+            const auto& name = advance();
+            advance(); // '<'
+            const std::string typeArgument = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after call's type argument");
+            expect(TokenKind::LeftParen, "expected '(' after function name");
+            auto args = parseArgumentList();
+            expect(TokenKind::RightParen, "expected ')' after arguments");
+
+            return std::make_unique<CallExpr>(name.text, std::move(args), typeArgument);
         }
 
         if (peek().kind == TokenKind::LeftParen)

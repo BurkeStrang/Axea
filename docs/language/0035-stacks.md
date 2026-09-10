@@ -1,7 +1,70 @@
 # `Stack<T>`: A Thin, Type-Distinct Wrapper Over `List<T>`'s Own Machinery
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0035-stacks.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`Stack<T>` is no longer a compiler intrinsic. Following `List<T>`'s own port
+(`docs/language/0033-lists.md`'s own "2026 Update"), `Stack<T>` is now a real, user-declared
+generic struct with a generic inherent `impl` block, living in `std/collections.ax`, **composed
+directly on top of the real `List<T>`** rather than reimplementing its own `malloc`/growth logic:
+
+```ax
+struct Stack<T>
+{
+    items: List<T>
+}
+```
+
+Every prerequisite `List<T>`'s own port needed (user-defined generics, generic inherent `impl`,
+general struct method dispatch, `sizeof<T>()`, generic top-level functions) was already in place,
+so this port needed **zero new language features** - genuinely the cheapest of the two ports.
+
+```ax
+use collections
+
+s: Stack<i32> = collections.newStack<i32>()
+s.push(4)
+s.push(5)
+top = s.peek()
+last = s.pop()
+count = s.length()    // was: s.length (see below - the one real API change)
+```
+
+**What changed and why:**
+
+- **Construction**: `Stack<i32>()` call-style sugar → `collections.newStack<i32>()`, an ordinary
+  (generic) function call - identical reasoning to `List<T>`'s own construction change.
+- **`.length` is now a method, `.length()`, not a bare field.** This is the one genuine API
+  difference from `List<T>`'s own port: `List<T>` owns its `length` field directly, so
+  `list.length` stays a bare field read. `Stack<T>` composes over an internal `items: List<T>`
+  field instead, and this language has no computed-property/field-delegation syntax to expose
+  `self.items.length` as a bare `s.length` - so it's an ordinary method,
+  `length(self) -> i32 { return self.items.length }`.
+- **`push`/`pop`/`peek` need no syntax change** - they were already ordinary method calls, now
+  reaching `Stack<T>`'s own real `impl` block (which just forwards to `self.items`'s own
+  `push`/`pop`/`get`) via the general struct method dispatch, rather than the retired
+  `IrStackPush`/`IrStackPop`/`IrStackPeek` intrinsic instructions.
+- **The old `List<T>`-vs-`Stack<T>` method-name collision this document spends its own "Design"
+  section on (`isStackExpr`, mirroring `isSetExpr`) no longer exists** - both are ordinary struct
+  method calls now, resolved by `objectInfo.structType` like any other struct, not by a
+  best-effort name-collision resolver. `isStackExpr` was deleted outright once `PriorityQueue<T>`
+  became the only remaining `push`/`pop`/`peek` name-sharer.
+- **The `peek()`-aliases-`pop()`-doesn't `RegionChecker` distinction this document's own
+  "Motivation" section describes no longer applies either** - the general struct method dispatch
+  treats every struct method's return value as freshly `Owned`, regardless of which method was
+  called or whether `self` itself is borrowed. A real, accepted behavior change (mirroring
+  `List<T>`'s own port): a struct value read via a borrowed `Stack<T>` parameter's `.peek()` is no
+  longer flagged as a borrow leak.
+- `pop`/`peek` still have no bounds check on an empty stack in the interpreter beyond `List<T>`'s
+  own pointer-arena bounds check (`docs/language/0019-unsafe.md`) - no dedicated "pop/peek on an
+  empty Stack" message, matching `List<T>`'s own identical port decision.
+- See `examples/stack.ax` for a worked example (verified both interpreted and compiled, `-O0` and
+  `-O1`); everything below this section documents the *original compiler-intrinsic design* (now
+  retired) for historical context.
 
 ---
 

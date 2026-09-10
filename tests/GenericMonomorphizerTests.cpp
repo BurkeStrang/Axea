@@ -123,9 +123,128 @@ TEST("GenericMonomorphizer rejects an unknown generic struct name")
 
 TEST("GenericMonomorphizer leaves a built-in generic collection type completely untouched")
 {
-    auto program = monomorphize("numbers = List<i32>()");
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> are no longer built-in (see
+    // docs/language/0006-generics.md's own port follow-up) - they're real, user-declared generic
+    // structs now (std/collections.ax), so this uses LinkedList<T> instead, one of the remaining
+    // intrinsic collections.
+    auto program = monomorphize("numbers = LinkedList<i32>()");
 
-    // No "List"-named StructDecl should ever be synthesized - List<T> is a compiler intrinsic,
-    // never StructDecl-backed.
-    EXPECT_TRUE(findStruct(program, "List$i32") == nullptr);
+    // No "LinkedList"-named StructDecl should ever be synthesized - LinkedList<T> is a
+    // compiler intrinsic, never StructDecl-backed.
+    EXPECT_TRUE(findStruct(program, "LinkedList$i32") == nullptr);
+}
+
+namespace
+{
+    const FunctionDecl* findFunction(const Program& program, const std::string& name)
+    {
+        for (const auto& item : program.items)
+        {
+            if (const auto* f = dynamic_cast<const FunctionDecl*>(item.get()); f && f->name == name)
+            {
+                return f;
+            }
+        }
+        return nullptr;
+    }
+} // namespace
+
+TEST("GenericMonomorphizer synthesizes a mangled method for a generic impl's own instantiation, "
+     "self and return type both substituted")
+{
+    auto program = monomorphize("struct Box<T> { value: T } "
+                                "impl<T> Box<T> { get(self) -> T { return self.value } } "
+                                "b = Box<i32> { value: 5 } "
+                                "x = b.get()");
+
+    const auto* method = findFunction(program, "Box$i32.get");
+    EXPECT_TRUE(method != nullptr);
+    EXPECT_EQ(method->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(method->params[0].name, "self");
+    EXPECT_EQ(method->params[0].type, "Box$i32");
+    EXPECT_TRUE(method->returnType.has_value());
+    EXPECT_EQ(*method->returnType, "i32");
+}
+
+TEST("GenericMonomorphizer synthesizes independent methods for two different concrete "
+     "instantiations of the same generic impl")
+{
+    auto program = monomorphize("struct Box<T> { value: T } "
+                                "impl<T> Box<T> { get(self) -> T { return self.value } } "
+                                "a = Box<i32> { value: 1 } "
+                                "x = a.get() "
+                                "b = Box<bool> { value: true } "
+                                "y = b.get()");
+
+    const auto* intMethod = findFunction(program, "Box$i32.get");
+    const auto* boolMethod = findFunction(program, "Box$bool.get");
+    EXPECT_TRUE(intMethod != nullptr);
+    EXPECT_TRUE(boolMethod != nullptr);
+    EXPECT_EQ(*intMethod->returnType, "i32");
+    EXPECT_EQ(*boolMethod->returnType, "bool");
+}
+
+TEST("GenericMonomorphizer correctly rewrites a generic method's own body when it constructs "
+     "another instance of its own generic struct")
+{
+    auto program = monomorphize(
+        "struct Box<T> { value: T } "
+        "impl<T> Box<T> { wrap(self) -> Box<T> { return Box<T> { value: self.value } } } "
+        "b = Box<i32> { value: 5 } "
+        "w = b.wrap()");
+
+    const auto* method = findFunction(program, "Box$i32.wrap");
+    EXPECT_TRUE(method != nullptr);
+    EXPECT_EQ(*method->returnType, "Box$i32");
+
+    const auto* block = dynamic_cast<const BlockExpr*>(method->body.get());
+    EXPECT_TRUE(block != nullptr);
+    const auto* returnStmt = dynamic_cast<const ReturnStmt*>(block->statements.at(0).get());
+    EXPECT_TRUE(returnStmt != nullptr);
+    const auto* structLiteral = dynamic_cast<const StructLiteralExpr*>(returnStmt->value.get());
+    EXPECT_TRUE(structLiteral != nullptr);
+    EXPECT_EQ(structLiteral->typeName, "Box$i32");
+}
+
+TEST("GenericMonomorphizer synthesizes a mangled clone of a generic top-level function per "
+     "explicit call-site type argument, rewriting the call site's own callee")
+{
+    auto program = monomorphize("identity<T>(x: T) -> T { return x } "
+                                "a = identity<i32>(42)");
+
+    const auto* clone = findFunction(program, "identity$i32");
+    EXPECT_TRUE(clone != nullptr);
+    EXPECT_EQ(clone->params[0].type, "i32");
+    EXPECT_TRUE(clone->returnType.has_value());
+    EXPECT_EQ(*clone->returnType, "i32");
+
+    const AssignmentStmt* assignment = nullptr;
+    for (const auto& item : program.items)
+    {
+        if (const auto* a = dynamic_cast<const AssignmentStmt*>(item.get()); a && a->name == "a")
+        {
+            assignment = a;
+        }
+    }
+    EXPECT_TRUE(assignment != nullptr);
+    const auto* call = dynamic_cast<const CallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->callee, "identity$i32");
+    EXPECT_TRUE(call->typeArgument.empty());
+}
+
+TEST("GenericMonomorphizer synthesizes independent clones for two different concrete call-site "
+     "type arguments to the same generic top-level function")
+{
+    auto program = monomorphize("identity<T>(x: T) -> T { return x } "
+                                "a = identity<i32>(1) "
+                                "b = identity<bool>(true)");
+
+    EXPECT_TRUE(findFunction(program, "identity$i32") != nullptr);
+    EXPECT_TRUE(findFunction(program, "identity$bool") != nullptr);
+}
+
+TEST("GenericMonomorphizer rejects a call site naming an unknown generic function")
+{
+    EXPECT_THROWS(monomorphize("a = ghost<i32>(1)"));
 }

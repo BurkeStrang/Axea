@@ -1,23 +1,28 @@
+use collections
+
 build() -> Deque<i32>
 {
-    numbers = Deque<i32>()
-    numbers.push_back(10)
-    numbers.push_back(20)
-    numbers.push_front(5)
+    numbers: Deque<i32> = collections.newDeque<i32>()
+    p1 = numbers.push_back(10)
+    p2 = numbers.push_back(20)
+    p3 = numbers.push_front(5)
     return numbers
 }
 
 setFirst(numbers: Deque<i32>)
 {
-    numbers[0] = 99
+    s = numbers.set(0, 99)
 }
 
-sumWithForIn(numbers: Deque<i32>) -> i32
+sumExplicit(numbers: Deque<i32>) -> i32
 {
     total = 0
-    for value in numbers
+    i = 0
+    loop
     {
-        total = total + value
+        if i >= numbers.length { break }
+        total = total + numbers.get(i)
+        i = i + 1
     }
     return total
 }
@@ -34,13 +39,13 @@ drain(numbers: Deque<i32>) -> i32
 
 numbers = build()
 lengthAfterBuild = numbers.length
-middle = numbers[1]
+middle = numbers.get(1)
 front = numbers.pop_front()
 back = numbers.pop_back()
 lengthAfterPops = numbers.length
 called = setFirst(numbers)
-afterSetFirst = numbers[0]
-forSum = sumWithForIn(numbers)
+afterSetFirst = numbers.get(0)
+forSum = sumExplicit(numbers)
 total = drain(numbers)
 lengthAfterDrain = numbers.length
 

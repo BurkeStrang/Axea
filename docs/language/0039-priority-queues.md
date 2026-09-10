@@ -1,7 +1,94 @@
 # `PriorityQueue<T>`: A Real Binary Heap, the First Collection That Needs an Actual Algorithm
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0039-priority-queues.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`PriorityQueue<T>` is no longer a compiler intrinsic. Following `List<T>`/`Stack<T>`/`Deque<T>`/
+`Queue<T>`'s own ports (`docs/language/0033-lists.md`/`0035-stacks.md`/`0037-deques.md`/
+`0038-queues.md`'s own "2026 Update" sections), `PriorityQueue<T>` is now a real, user-declared
+generic struct with a generic inherent `impl` block, living in `std/collections.ax`, **composed
+directly on top of the real `List<T>`** — the same pattern `Stack<T>` used, since `push`/`pop`/
+`peek` were `Stack<T>`'s own method names before this port, and `PriorityQueue<T>` was the sole
+remaining user of them once `Stack<T>` itself became real.
+
+```ax
+struct PriorityQueue<T>
+{
+    items: List<T>
+}
+```
+
+Unlike every earlier collection in this series, `push`/`pop` here can't be thin forwarding calls
+onto `self.items`'s own methods — a binary heap's sift-up/sift-down is a genuine algorithm, and
+this port's one real risk factor (confirmed via research before implementing) was whether `<`
+generalizes correctly to a generic `T` post-monomorphization. It does, with no new language
+feature needed: `TypeChecker`'s `Less`/`LessEqual`/`Greater`/`GreaterEqual` checking already calls
+the same shared `requireOrdered`/`isOrderableKind` path every plain `x < y` in the language uses,
+and `GenericMonomorphizer` substitutes `T` to a concrete type *before* `TypeChecker`/
+`LlvmIrEmitter` ever see the cloned method body — so an ordinary `if self.items.get(i) <
+self.items.get(parent) { ... }` inside `impl<T> PriorityQueue<T>` just works, going through the
+exact same `icmp`/`fcmp`/`@axea.less.str` infrastructure `SortedMap<K,V>`/`SortedSet<T>` already
+share.
+
+```ax
+use collections
+
+q: PriorityQueue<i32> = collections.newPriorityQueue<i32>()
+q.push(30)
+q.push(10)
+smallest = q.peek()   // 10 - doesn't remove
+first = q.pop()       // 10 - removes, always the smallest element present
+count = q.length()    // was: q.length
+```
+
+**What changed and why:**
+
+- **Construction**: `PriorityQueue<i32>()` call-style sugar →
+  `collections.newPriorityQueue<i32>()`, an ordinary (generic) function call - identical reasoning
+  to every earlier port's own construction change.
+- **`.length` is now a method, `.length()`, not a bare field** - mirrors `Stack<T>.length()`'s own
+  precedent exactly, for the identical reason: `PriorityQueue<T>` composes over an internal
+  `items: List<T>` field, and this language has no computed-property/field-delegation syntax to
+  expose `self.items.length` as a bare `q.length`.
+- **`push`/`pop`/`peek` need no syntax change** - they were already ordinary method calls, now
+  reaching `PriorityQueue<T>`'s own real `impl` block (hand-written sift-up/sift-down, composed
+  over `self.items`'s own `push`/`pop`/`get`/`set`) via the general struct method dispatch, rather
+  than the retired `IrPriorityQueuePush`/`IrPriorityQueuePop`/`IrPriorityQueuePeek` intrinsic
+  instructions. `IrGenerator`'s own `isPriorityQueueExpr` disambiguation resolver (needed because
+  `push`/`pop`/`peek` collided with `Stack<T>`'s own method names, back when `Stack<T>` was still
+  intrinsic too) is now fully deleted, mirroring exactly what happened to `isStackExpr` during
+  `Stack<T>`'s own retirement.
+- **Two accepted, honest tradeoffs, not silently swept under the rug:**
+  1. **The "`T` must be orderable" restriction below is no longer enforced eagerly** at
+     `PriorityQueue<elem>` type-resolution time, with the dedicated error message this document
+     originally described. `PriorityQueue<bool>` now parses/resolves fine as an ordinary generic
+     struct reference — the failure instead surfaces from within the monomorphized `push`/sift
+     body's own `<` comparison (a generic "comparison requires two orderable values" error, not
+     the original dedicated message) — but it still surfaces immediately, at compile time, on any
+     `PriorityQueue<bool>` reference, since `GenericMonomorphizer` eagerly clones every `impl`
+     method the moment a struct instantiation is referenced, not lazily per call. Same tradeoff
+     every earlier port in this series already accepted for its own retired dedicated checks.
+  2. **`.peek()` on an empty queue no longer throws**, unlike `.push()`/`.pop()` (both still
+     correctly inherit `List<T>`'s own established bounds behavior - `pop()` calls
+     `self.items.pop()`, which throws on empty via `List<T>`'s own `length - 1` trick, *before*
+     touching the popped queue's own root). `Stack<T>.peek()` reads index `length - 1`, which
+     naturally lands out of bounds (and throws) on an empty stack; a heap's root is *always* index
+     0 regardless of length, so `PriorityQueue<T>.peek()`'s `self.items.get(0)` stays in-bounds
+     even when empty, reading whatever value happens to sit in `List<T>`'s own eagerly-allocated
+     1-slot buffer instead of throwing. A genuine, narrow behavioral gap from the retired
+     intrinsic.
+- A real, previously-undiscovered compiler bug was found and fixed while implementing this
+  port's sift loops (a mutation inside an `if`/`else` branch was silently lost in compiled code,
+  never reconciled back into the enclosing scope - see `docs/language/0021-axea-ir.md`'s own
+  "2026 Update" section for the full story), unrelated to `PriorityQueue<T>` specifically but
+  directly blocking its design until fixed.
+- See `examples/priority_queue.ax` for a worked example (verified both interpreted and compiled,
+  `-O0` and `-O1`, for `i32`/`char`/`str` element types); everything below this section documents
+  the *original compiler-intrinsic design* (now retired) for historical context.
 
 ---
 

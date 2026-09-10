@@ -294,3 +294,223 @@ TEST("ModuleLoader prefers a module in the entry file's own directory over a sam
     interpreter.run(merged);
     EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 25);
 }
+
+TEST("ModuleLoader resolves a bare unqualified call to a used module's own public function, with "
+     "no qualification and no special keyword needed")
+{
+    TempDir dir;
+    dir.write("math_utils.ax",
+              "module math_utils\n"
+              "pub square(x: i32) -> i32 { return x * x }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use math_utils\n"
+                                           "y = square(5)\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 25);
+}
+
+TEST("ModuleLoader resolves a bare unqualified call to a used module's own public GENERIC "
+     "function - the rewrite happens before monomorphizeGenerics runs, so "
+     "GenericMonomorphizer's own exact-match lookup sees the already-qualified callee")
+{
+    TempDir dir;
+    dir.write("boxing.ax",
+              "module boxing\n"
+              "struct Box<T> { value: T }\n"
+              "pub makeBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+    const std::string mainPath =
+        dir.write("main.ax",
+                  "use boxing\n"
+                  "b: Box<i32> = makeBox<i32>(7)\n"
+                  "y = b.value\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 7);
+}
+
+TEST("ModuleLoader lets a local, entry-file-declared function silently shadow a same-named "
+     "public function from a used module - no error, the local one wins")
+{
+    TempDir dir;
+    dir.write("math_utils.ax",
+              "module math_utils\n"
+              "pub square(x: i32) -> i32 { return x * x }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use math_utils\n"
+                                           "square() -> i32 { return 999 }\n"
+                                           "y = square()\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 999);
+}
+
+TEST("ModuleLoader allows two used modules to both export the same bare public function name "
+     "with no error, as long as that bare name is never actually called unqualified")
+{
+    TempDir dir;
+    dir.write("mod_a.ax", "module mod_a\npub frobnicate() -> i32 { return 1 }\n");
+    dir.write("mod_b.ax", "module mod_b\npub frobnicate() -> i32 { return 2 }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use mod_a\n"
+                                           "use mod_b\n"
+                                           "y = mod_a.frobnicate()\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 1);
+}
+
+TEST("ModuleLoader throws a clear, both-modules-named error when a bare name colliding across "
+     "two used modules IS actually called unqualified")
+{
+    TempDir dir;
+    dir.write("mod_a.ax", "module mod_a\npub frobnicate() -> i32 { return 1 }\n");
+    dir.write("mod_b.ax", "module mod_b\npub frobnicate() -> i32 { return 2 }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use mod_a\n"
+                                           "use mod_b\n"
+                                           "y = frobnicate()\n");
+
+    EXPECT_THROWS(loadProgram(mainPath));
+}
+
+TEST("ModuleLoader leaves a qualified call and a genuinely unknown bare call both untouched - "
+     "the unqualified-call resolver never masks a real 'unknown function' error")
+{
+    TempDir dir;
+    dir.write("math_utils.ax",
+              "module math_utils\n"
+              "pub square(x: i32) -> i32 { return x * x }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use math_utils\n"
+                                           "y = totallyUnknownFunction()\n");
+
+    Program merged = loadProgram(mainPath);
+    TypeChecker typeChecker;
+    EXPECT_THROWS(typeChecker.check(merged));
+}
+
+TEST("ModuleLoader resolves TypeName<T>(args) construction sugar to a used module's own "
+     "conventionally-named 'new' + TypeName constructor")
+{
+    TempDir dir;
+    dir.write("boxing.ax",
+              "module boxing\n"
+              "struct Box<T> { value: T }\n"
+              "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use boxing\n"
+                                           "b = Box<i32>(7)\n"
+                                           "y = b.value\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 7);
+}
+
+TEST("ModuleLoader resolves non-generic TypeName(args) construction sugar the same way")
+{
+    TempDir dir;
+    dir.write("points.ax",
+              "module points\n"
+              "struct Point { x: i32  y: i32 }\n"
+              "pub newPoint(x: i32, y: i32) -> Point { return Point { x: x, y: y } }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use points\n"
+                                           "p = Point(3, 4)\n"
+                                           "y = p.x + p.y\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 7);
+}
+
+TEST("ModuleLoader resolves TypeName<T>() construction sugar for a purely local struct + local "
+     "constructor, with no used module (and no 'use' declaration) at all")
+{
+    TempDir dir;
+    const std::string mainPath =
+        dir.write("main.ax",
+                  "struct Box<T> { value: T }\n"
+                  "newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
+                  "b = Box<i32>(7)\n"
+                  "y = b.value\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 7);
+}
+
+TEST("ModuleLoader leaves TypeName<T>() construction sugar untouched when no matching "
+     "'new' + TypeName constructor exists anywhere - the ordinary downstream error surfaces "
+     "unchanged")
+{
+    TempDir dir;
+    const std::string mainPath =
+        dir.write("main.ax", "struct Box<T> { value: T }\n"
+                             "b = Box<i32>(7)\n");
+
+    EXPECT_THROWS(loadProgram(mainPath));
+}
+
+TEST("ModuleLoader throws an ambiguous-constructor error when two used modules both provide a "
+     "matching 'new' + TypeName constructor for the same struct-shaped bare call")
+{
+    TempDir dir;
+    dir.write("mod_a.ax", "module mod_a\n"
+                          "struct Box<T> { value: T }\n"
+                          "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+    dir.write("mod_b.ax", "module mod_b\n"
+                          "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+    const std::string mainPath = dir.write("main.ax",
+                                           "use mod_a\n"
+                                           "use mod_b\n"
+                                           "b = Box<i32>(7)\n");
+
+    EXPECT_THROWS(loadProgram(mainPath));
+}
+
+TEST("ModuleLoader lets a real function literally sharing a struct's own bare name win over "
+     "the constructor-sugar fallback")
+{
+    TempDir dir;
+    const std::string mainPath =
+        dir.write("main.ax",
+                  "struct Box<T> { value: T }\n"
+                  "newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
+                  "Box<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
+                  "b = Box<i32>(7)\n"
+                  "y = b.value\n");
+
+    Program merged = loadProgram(mainPath);
+    checkAll(merged);
+
+    Interpreter interpreter;
+    interpreter.run(merged);
+    EXPECT_EQ(std::get<std::int64_t>(interpreter.variables().at("y")), 7);
+}

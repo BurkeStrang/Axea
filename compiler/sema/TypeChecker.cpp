@@ -131,7 +131,12 @@ namespace
     // identical, both allowed.
     bool isFfiSafeType(const Type& type)
     {
-        return type == kI32 || type == kBool || type == kStr || type.kind == TypeKind::CStr;
+        // i64 and *T (see docs/language/0019-unsafe.md) widen this for malloc/free-shaped
+        // externs (`extern c malloc(size: i64) -> *T`) - a raw pointer is exactly as FFI-safe as
+        // cstr's own bare i8* (same representation, one level of indirection deeper), and a real
+        // C `size_t` parameter needs 64 bits.
+        return type == kI32 || type == kI64 || type == kBool || type == kStr ||
+               type.kind == TypeKind::CStr || type.kind == TypeKind::Pointer;
     }
 
     // Types with a well-defined text representation this phase (see
@@ -166,12 +171,7 @@ namespace
             case TypeKind::Struct:
             case TypeKind::Array:
             case TypeKind::Slice:
-            case TypeKind::List:
-            case TypeKind::Stack:
             case TypeKind::LinkedList:
-            case TypeKind::Deque:
-            case TypeKind::Queue:
-            case TypeKind::PriorityQueue:
             case TypeKind::Map:
             case TypeKind::Set:
             case TypeKind::SortedMap:
@@ -202,13 +202,11 @@ namespace
 
     bool isIndexable(const Type& type)
     {
-        // Deque<T> (see docs/language/0037-deques.md) joins Array/Slice/List
-        // here - unlike Stack<T>/LinkedList<T>, its growable-array-with-a-
-        // start-offset representation genuinely supports O(1) random access,
-        // so `[i]`/`[i]=`/`for`-in all work through this exact same shared
-        // path with zero further IndexExpr/IndexAssignStmt-specific code.
-        return type.kind == TypeKind::Array || type.kind == TypeKind::Slice ||
-               type.kind == TypeKind::List || type.kind == TypeKind::Deque;
+        // List<T>/Deque<T> are deliberately NOT here (see docs/language/0006-generics.md's own
+        // List<T>/Stack<T>/Deque<T> port follow-up) - both are real, user-declared generic
+        // structs now (std/collections.ax), reached via `.get(i)`/`.set(i, v)` methods (general
+        // struct dispatch), not `[]` sugar - and neither supports `for`-in anymore either.
+        return type.kind == TypeKind::Array || type.kind == TypeKind::Slice;
     }
 
     // slice<T> is deliberately scoped to function parameters only this phase
@@ -226,23 +224,14 @@ namespace
         }
     }
 
-    // Unlike slice<T>, List<T> is a real owned heap value (like struct/array)
-    // and may freely be a parameter, return type, or local declared type -
-    // it's only rejected as a struct field type this phase, purely to keep
-    // this pass's surface area bounded, not for any deeper architectural
-    // reason (see docs/language/0033-lists.md).
-    void rejectListAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::List)
-        {
-            throw std::runtime_error(
-                "List<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // List<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T> port follow-up) - it may freely be a struct
+    // field type too, like any other struct, so the restriction this phase's own intrinsic
+    // implementation used to need no longer applies; no rejectListAsFieldType left here.
 
     // Same "kept restricted purely to bound this pass's surface area, not
-    // for any deeper architectural reason" rationale as
-    // rejectListAsFieldType above - see docs/language/0034-maps-and-sets.md.
+    // for any deeper architectural reason" rationale slice<T>/List<T> used to share above -
+    // see docs/language/0034-maps-and-sets.md.
     void rejectMapOrSetAsFieldType(const Type& type)
     {
         if (type.kind == TypeKind::Map || type.kind == TypeKind::Set)
@@ -252,15 +241,9 @@ namespace
         }
     }
 
-    // Same rationale again - see docs/language/0035-stacks.md.
-    void rejectStackAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::Stack)
-        {
-            throw std::runtime_error(
-                "Stack<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // Stack<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - it may freely be a
+    // struct field type too, like any other struct; no rejectStackAsFieldType left here.
 
     // Same rationale again - see docs/language/0036-linked-lists.md.
     void rejectLinkedListAsFieldType(const Type& type)
@@ -272,35 +255,20 @@ namespace
         }
     }
 
-    // Same rationale again - see docs/language/0037-deques.md.
-    void rejectDequeAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::Deque)
-        {
-            throw std::runtime_error(
-                "Deque<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // Deque<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - it may
+    // freely be a struct field type too, like any other struct; no rejectDequeAsFieldType left
+    // here.
 
-    // Same rationale again - see docs/language/0038-queues.md.
-    void rejectQueueAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::Queue)
-        {
-            throw std::runtime_error(
-                "Queue<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // Queue<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up) -
+    // it may freely be a struct field type too, like any other struct; no
+    // rejectQueueAsFieldType left here.
 
-    // Same rationale again - see docs/language/0039-priority-queues.md.
-    void rejectPriorityQueueAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::PriorityQueue)
-        {
-            throw std::runtime_error(
-                "PriorityQueue<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // PriorityQueue<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>
+    // port follow-up) - it may freely be a struct field type too, like any other struct; no
+    // rejectPriorityQueueAsFieldType left here.
 
     // Same rationale again - see docs/language/0040-sorted-maps.md.
     void rejectSortedMapAsFieldType(const Type& type)
@@ -482,12 +450,7 @@ std::string typeName(const Type& type)
         case TypeKind::Shared: return "Shared<" + type.elementTypeName + ">";
         case TypeKind::Result:
             return "Result<" + type.elementTypeName + "," + type.valueTypeName + ">";
-        case TypeKind::List: return "List<" + type.elementTypeName + ">";
-        case TypeKind::Stack: return "Stack<" + type.elementTypeName + ">";
         case TypeKind::LinkedList: return "LinkedList<" + type.elementTypeName + ">";
-        case TypeKind::Deque: return "Deque<" + type.elementTypeName + ">";
-        case TypeKind::Queue: return "Queue<" + type.elementTypeName + ">";
-        case TypeKind::PriorityQueue: return "PriorityQueue<" + type.elementTypeName + ">";
         case TypeKind::Map: return "Map<" + type.elementTypeName + "," + type.valueTypeName + ">";
         case TypeKind::Set: return "Set<" + type.elementTypeName + ">";
         case TypeKind::SortedMap:
@@ -496,6 +459,7 @@ std::string typeName(const Type& type)
         case TypeKind::OwnedString: return "String";
         case TypeKind::Buffer: return "Buffer";
         case TypeKind::CStr: return "cstr";
+        case TypeKind::Pointer: return "*" + type.elementTypeName;
         default: return "<unsupported type>";
     }
 }
@@ -738,6 +702,16 @@ Type TypeChecker::resolveType(const std::string& name) const
         {"unit", TypeKind::Unit},
     };
 
+    // "*T" - the canonical form Parser::parseTypeNameAtom always produces (see
+    // docs/language/0019-unsafe.md). A full recursive resolveType() call, not a single token, so
+    // "**T" resolves for free via plain recursion, mirroring every other single-type-parameter
+    // kind's own "store the canonical resolved string" convention (see arrayLikeType below).
+    if (!name.empty() && name.front() == '*')
+    {
+        const Type pointeeType = resolveType(name.substr(1));
+        return arrayLikeType(TypeKind::Pointer, typeName(pointeeType));
+    }
+
     // "[elem;N]" - the canonical (no-spaces) form Parser::parseTypeName
     // always produces (see docs/language/0031-arrays.md).
     if (!name.empty() && name.front() == '[')
@@ -816,25 +790,16 @@ Type TypeChecker::resolveType(const std::string& name) const
         return result;
     }
 
-    // "List<elem>" - the canonical form Parser::parseTypeName always
-    // produces (see docs/language/0033-lists.md).
-    if (name.starts_with("List<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(5, name.size() - 6);
-        const Type elementType = resolveType(elementName);
-        return arrayLikeType(TypeKind::List, typeName(elementType));
-    }
+    // "List<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own List<T> port follow-up) - it's a real, user-declared
+    // generic struct now (std/collections.ax); by the time this runs, GenericMonomorphizer has
+    // already rewritten any concrete "List<i32>" reference to its own mangled struct name
+    // ("List$i32"), resolved by the ordinary struct lookup further down like any other.
 
-    // "Stack<elem>" - a LIFO collection backed internally by List<T>'s own
-    // machinery (see docs/language/0035-stacks.md) - same one-level element
-    // restriction as List<elem> above, for the same reason (and extended to
-    // also reject a nested Stack<Stack<T>>, for symmetry).
-    if (name.starts_with("Stack<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(6, name.size() - 7);
-        const Type elementType = resolveType(elementName);
-        return arrayLikeType(TypeKind::Stack, typeName(elementType));
-    }
+    // "Stack<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - it's a real,
+    // user-declared generic struct now (std/collections.ax), resolved by the ordinary struct
+    // lookup further down like any other, same as List<T> just above.
 
     // "LinkedList<elem>" - a doubly linked, node-based collection (see
     // docs/language/0036-linked-lists.md) - same one-level element
@@ -846,51 +811,28 @@ Type TypeChecker::resolveType(const std::string& name) const
         return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
     }
 
-    // "Deque<elem>" - a growable array with a `start` offset, supporting
-    // real O(1) indexing (see docs/language/0037-deques.md) - same
-    // one-level element restriction as List<elem>/Stack<elem>/
-    // LinkedList<elem> above, for the same reason.
-    if (name.starts_with("Deque<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(6, name.size() - 7);
-        const Type elementType = resolveType(elementName);
-        return arrayLikeType(TypeKind::Deque, typeName(elementType));
-    }
+    // "Deque<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - it's a
+    // real, user-declared generic struct now (std/collections.ax), resolved by the ordinary
+    // struct lookup further down like any other, same as List<T>/Stack<T> above.
 
-    // "Queue<elem>" - a FIFO collection backed internally by Deque<T>'s own
-    // machinery (see docs/language/0038-queues.md) - same one-level element
-    // restriction as List<elem>/Stack<elem>/LinkedList<elem>/Deque<elem>
-    // above, for the same reason.
-    if (name.starts_with("Queue<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(6, name.size() - 7);
-        const Type elementType = resolveType(elementName);
-        return arrayLikeType(TypeKind::Queue, typeName(elementType));
-    }
+    // "Queue<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up) -
+    // it's a real, user-declared generic struct now (std/collections.ax), resolved by the
+    // ordinary struct lookup further down like any other, same as List<T>/Stack<T>/Deque<T>
+    // above.
 
-    // "PriorityQueue<elem>" - a real binary heap (see
-    // docs/language/0039-priority-queues.md). Unlike List/Stack/LinkedList/
-    // Deque/Queue above, this is a real *semantic* restriction, not a
-    // structural nesting-depth one - only types isOrderableKind above
-    // accepts (i32, char) have a real total order in this language today.
-    // Mirrors how Set<T>/Map<K,V> below call isHashable rather than a
-    // structural check, for the identical reason: "some types don't
-    // qualify, and the reason is domain-specific, not nesting depth."
-    if (name.starts_with("PriorityQueue<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(14, name.size() - 15);
-        const Type elementType = resolveType(elementName);
-        if (!isOrderableKind(elementType.kind))
-        {
-            throw std::runtime_error(
-                "PriorityQueue<T> requires an orderable element type (i32, i64, f64, char, or str "
-                "only in "
-                "this phase - no other type is comparable yet), found PriorityQueue<" +
-                typeName(elementType) + ">");
-        }
-
-        return arrayLikeType(TypeKind::PriorityQueue, typeName(elementType));
-    }
+    // "PriorityQueue<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>
+    // port follow-up) - it's a real, user-declared generic struct now (std/collections.ax),
+    // resolved by the ordinary struct lookup further down like any other. The "T must be
+    // orderable" restriction this branch used to enforce eagerly, with a dedicated error
+    // message, is no longer enforced at construction time - PriorityQueue<bool> now parses/
+    // resolves fine as an ordinary generic struct reference; the failure instead surfaces from
+    // within the monomorphized push/sift body's own `<` comparison (a generic "comparison
+    // requires two orderable values" error, not this dedicated one) - still at compile time, on
+    // any PriorityQueue<bool> reference (GenericMonomorphizer eagerly clones every impl method
+    // the moment a struct instantiation is referenced, not lazily per call).
 
     // "Set<elem>" - the canonical form Parser::parseTypeName always produces
     // (see docs/language/0034-maps-and-sets.md's generic rewrite, modeled on
@@ -1083,15 +1025,12 @@ bool TypeChecker::isHashable(const Type& type,
         case TypeKind::Bool:
         case TypeKind::String: return true;
 
-        // Array/List/Stack all store their element type as a canonical,
-        // re-resolvable string (see docs/language/0052-optional.md's own
-        // follow-up, which moved these off their old flat elementKind
-        // representation onto Map/Set's). Stack<T> is hashable under the
-        // same rule as List<T> - it's backed by the identical mechanism
-        // (see docs/language/0035-stacks.md).
+        // Array stores its element type as a canonical, re-resolvable string (see
+        // docs/language/0052-optional.md's own follow-up, which moved these off their old flat
+        // elementKind representation onto Map/Set's). List<T>/Stack<T> are real structs now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - hashable via
+        // the ordinary TypeKind::Struct case below, like any other struct.
         case TypeKind::Array:
-        case TypeKind::List:
-        case TypeKind::Stack:
         {
             const Type element = resolveType(type.elementTypeName);
             return isHashable(element, visitedStructs);
@@ -1131,6 +1070,15 @@ void TypeChecker::registerSignatures(const Program& program)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
+            // A generic top-level function template (see docs/language/0006-generics.md's own
+            // List<T> port follow-up) is never itself registered - mirrors StructDecl/ImplDecl's
+            // own identical typeParams.empty() guard just below/above. Only GenericMonomorphizer's
+            // synthesized, concrete-per-call-site clones (plain FunctionDecl items with an empty
+            // typeParams of their own) are - picked up by this same branch, on their own.
+            if (!function->typeParams.empty())
+            {
+                continue;
+            }
             // "print"/"write" are reserved builtin names (see
             // docs/language/Axea_Printing_Formatting.md) - a real Axea
             // function with either name would otherwise be permanently
@@ -1188,16 +1136,25 @@ void TypeChecker::registerSignatures(const Program& program)
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {
-            // Each method is already a real FunctionDecl with a mangled,
-            // permanently call-syntax-unreachable name (see ImplDecl's
-            // own comment) - folded straight into functions_ exactly
-            // like a top-level FunctionDecl, no reserved-name or
-            // extern-collision check needed (those only guard against a
-            // *user-typed* identifier colliding with a builtin/extern,
-            // which a mangled '.'-containing name can never do).
-            for (const auto& method : implDecl->methods)
+            // A generic impl template (see docs/language/0006-generics.md) is never itself
+            // registered - only GenericMonomorphizer's own synthesized, fully concrete methods
+            // (plain top-level FunctionDecl items, picked up by the ordinary FunctionDecl
+            // branch above) are - mirrors the identical typeParams.empty() guard for StructDecl
+            // just above. Registering the raw template's own methods would make `self`'s
+            // unsubstituted type text ("Box<T>") fail every later resolveType call.
+            if (implDecl->typeParams.empty())
             {
-                functions_[method->name] = method.get();
+                // Each method is already a real FunctionDecl with a mangled,
+                // permanently call-syntax-unreachable name (see ImplDecl's
+                // own comment) - folded straight into functions_ exactly
+                // like a top-level FunctionDecl, no reserved-name or
+                // extern-collision check needed (those only guard against a
+                // *user-typed* identifier colliding with a builtin/extern,
+                // which a mangled '.'-containing name can never do).
+                for (const auto& method : implDecl->methods)
+                {
+                    functions_[method->name] = method.get();
+                }
             }
         }
     }
@@ -1236,11 +1193,39 @@ void TypeChecker::registerSignatures(const Program& program)
     // type" a bare resolveType(self's type) would otherwise throw first.
     for (const auto& item : program.items)
     {
-        if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get());
-            implDecl && !structs_.contains(implDecl->typeName))
+        const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get());
+        if (!implDecl)
         {
-            throw std::runtime_error("impl target '" + implDecl->typeName +
-                                     "' is not a known struct");
+            continue;
+        }
+        if (implDecl->typeParams.empty())
+        {
+            if (!structs_.contains(implDecl->typeName))
+            {
+                throw std::runtime_error("impl target '" + implDecl->typeName +
+                                         "' is not a known struct");
+            }
+            continue;
+        }
+        // Generic inherent impl (see docs/language/0006-generics.md) - the target is a generic
+        // struct template, never itself registered in structs_ (mirrors StructDecl's own
+        // typeParams-non-empty exclusion just above). Validated directly against program.items
+        // instead, checking arity so a mismatched `impl<T, U> Box<T> { ... }` is caught here
+        // rather than silently mis-monomorphizing later.
+        const bool targetsKnownGenericStruct = std::any_of(
+            program.items.begin(),
+            program.items.end(),
+            [&](const auto& other)
+            {
+                const auto* candidate = dynamic_cast<const StructDecl*>(other.get());
+                return candidate && candidate->name == implDecl->typeName &&
+                       candidate->typeParams.size() == implDecl->typeParams.size();
+            });
+        if (!targetsKnownGenericStruct)
+        {
+            throw std::runtime_error(
+                "impl target '" + implDecl->typeName + "' is not a known generic struct with " +
+                std::to_string(implDecl->typeParams.size()) + " type parameter(s)");
         }
     }
 
@@ -1272,7 +1257,7 @@ void TypeChecker::registerSignatures(const Program& program)
                 throw std::runtime_error(
                     "extern function '" + externDecl->name +
                     "' has an unsupported parameter type: " + typeName(paramType) +
-                    " (only i32, bool, str, and cstr are FFI-safe)");
+                    " (only i32, i64, bool, str, cstr, and *T are FFI-safe)");
             }
         }
         if (externDecl->returnType)
@@ -1283,7 +1268,7 @@ void TypeChecker::registerSignatures(const Program& program)
                 throw std::runtime_error(
                     "extern function '" + externDecl->name +
                     "' has an unsupported return type: " + typeName(returnType) +
-                    " (only i32, bool, str, cstr, or no return type/unit "
+                    " (only i32, i64, bool, str, cstr, *T, or no return type/unit "
                     "are FFI-safe)");
             }
         }
@@ -1294,13 +1279,8 @@ void TypeChecker::registerSignatures(const Program& program)
         {
             const Type fieldType = resolveType(field.type);
             rejectSliceOutsideParameter(fieldType, "a struct field type");
-            rejectListAsFieldType(fieldType);
             rejectMapOrSetAsFieldType(fieldType);
-            rejectStackAsFieldType(fieldType);
             rejectLinkedListAsFieldType(fieldType);
-            rejectDequeAsFieldType(fieldType);
-            rejectQueueAsFieldType(fieldType);
-            rejectPriorityQueueAsFieldType(fieldType);
             rejectSortedMapAsFieldType(fieldType);
             rejectSortedSetAsFieldType(fieldType);
             rejectOwnedStringAsFieldType(fieldType);
@@ -1381,18 +1361,35 @@ void TypeChecker::check(const Program& program)
     TypeEnv globalEnv;
     for (const auto& item : program.items)
     {
+        insideUnsafe_ = false; // see insideUnsafe_'s own comment - every top-level item starts
+                               // fresh, regardless of what a previous one left it as
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            checkFunction(*function);
+            // A generic top-level function template's own body is never checked directly
+            // (mirrors ImplDecl's identical guard just below) - a bare type-parameter reference
+            // in it would fail resolveType. Only GenericMonomorphizer's synthesized, concrete
+            // clones are checked, each an ordinary FunctionDecl with an empty typeParams.
+            if (function->typeParams.empty())
+            {
+                checkFunction(*function);
+            }
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {
-            // Each method is checked exactly like a top-level function -
-            // `self`'s type already resolved to a real struct name by the
-            // parser, so checkFunction needs no impl-awareness at all.
-            for (const auto& method : implDecl->methods)
+            // A generic impl template's own methods are never checked directly (mirrors
+            // registerSignatures's identical guard) - `self`'s unsubstituted type text
+            // ("Box<T>") would fail resolveType. Only GenericMonomorphizer's synthesized,
+            // concrete clones are checked, and those arrive as ordinary top-level FunctionDecl
+            // items, already handled by the branch above.
+            if (implDecl->typeParams.empty())
             {
-                checkFunction(*method);
+                // Each method is checked exactly like a top-level function -
+                // `self`'s type already resolved to a real struct name by the
+                // parser, so checkFunction needs no impl-awareness at all.
+                for (const auto& method : implDecl->methods)
+                {
+                    checkFunction(*method);
+                }
             }
         }
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
@@ -1415,6 +1412,7 @@ void TypeChecker::checkFunction(const FunctionDecl& function)
     // Modules (see docs/language/0066-modules.md) - see currentFunctionModule_'s own comment.
     const auto dot = function.name.rfind('.');
     currentFunctionModule_ = dot != std::string::npos ? function.name.substr(0, dot) : "";
+    insideUnsafe_ = false; // see insideUnsafe_'s own comment - every function body starts fresh
 
     TypeEnv env; // no parent: functions don't see top-level globals
     for (const auto& param : function.params)
@@ -1453,11 +1451,24 @@ bool TypeChecker::definitelyReturns(const BlockExpr& block) const
             {
                 return true;
             }
+            // `unsafe { return x }` (see docs/language/0019-unsafe.md) - unlike `if`, there's
+            // only one branch, so this definitely returns iff its own body does, no
+            // branch-merging needed.
+            if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(exprStmt->expr.get());
+                unsafeBlock &&
+                definitelyReturns(static_cast<const BlockExpr&>(*unsafeBlock->body)))
+            {
+                return true;
+            }
         }
     }
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(block.result.get()))
     {
         return definitelyReturnsBranch(*ifExpr);
+    }
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(block.result.get()))
+    {
+        return definitelyReturns(static_cast<const BlockExpr&>(*unsafeBlock->body));
     }
     return false;
 }
@@ -1750,6 +1761,29 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         return;
     }
 
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        const Type pointerType =
+            checkExpr(*derefAssign->pointer, env, expectedReturnType, currentLoopBreakTypes);
+        if (pointerType.kind != TypeKind::Pointer)
+        {
+            throw std::runtime_error("'*' requires a pointer type, got " + typeName(pointerType));
+        }
+        if (!insideUnsafe_)
+        {
+            throw std::runtime_error("dereferencing a raw pointer requires an 'unsafe' block");
+        }
+        const Type pointeeType = resolveType(pointerType.elementTypeName);
+        const Type valueType =
+            checkExpr(*derefAssign->value, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(valueType == pointeeType))
+        {
+            throw std::runtime_error("pointer dereference assignment expects " +
+                                     typeName(pointeeType) + ", got " + typeName(valueType));
+        }
+        return;
+    }
+
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         const Type targetType =
@@ -1921,17 +1955,11 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  "' (did you mean 'length', 'bytes', or 'capacity'?)");
     }
 
-    // Stack<T> isn't indexable either - LIFO access only, via push/pop/peek,
-    // no `[i]` (see docs/language/0035-stacks.md).
-    if (objectType.kind == TypeKind::Stack)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // Stack<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - its own `.length`
+    // is an ordinary method (`s.length()`), not a bare field, since it delegates to an internal
+    // `items: List<T>` field with no computed-property syntax to expose that through a bare
+    // field read; reached via general struct method dispatch, not here.
 
     // LinkedList<T> isn't indexable either - node-based, front/back access
     // only, no `[i]` (see docs/language/0036-linked-lists.md).
@@ -1945,35 +1973,18 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  "' (did you mean 'length'?)");
     }
 
-    // Queue<T> deliberately isn't indexable either, even though it's backed
-    // by Deque<T>'s own (indexable) representation - "communicate intent"
-    // (see docs/language/0029-collections.md's Guiding Principle and
-    // docs/language/0038-queues.md), the same restriction Stack<T> already
-    // accepts despite being LLVM-identical to indexable List<T>.
-    if (objectType.kind == TypeKind::Queue)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // Queue<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up) -
+    // its own `.length` is an ordinary method (`q.length()`), not a bare field, since it
+    // delegates to an internal `items: Deque<T>` field with no computed-property syntax to
+    // expose that through a bare field read (the identical reasoning Stack<T>.length() already
+    // established); reached via general struct method dispatch, not here.
 
-    // PriorityQueue<T> isn't indexable either - a heap's internal array
-    // order isn't even a meaningful order to expose, so "communicate
-    // intent" (see docs/language/0038-queues.md's own identical framing for
-    // Queue<T>, and docs/language/0039-priority-queues.md) applies here at
-    // least as strongly.
-    if (objectType.kind == TypeKind::PriorityQueue)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // PriorityQueue<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>
+    // port follow-up) - its own `.length` is an ordinary method (`q.length()`), not a bare
+    // field, mirroring Stack<T>/Queue<T>'s own identical composed-collection precedent; reached
+    // via general struct method dispatch, not here.
 
     // Shared<T> auto-derefs to T's own fields (see the move-semantics RFC's own "opaque wrapper,
     // transparent field/method access" design) - re-resolve to the wrapped type and fall through
@@ -2132,6 +2143,56 @@ Type TypeChecker::checkExpr(const Expr& expr,
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
         return checkBlock(*block, env, expectedReturnType, currentLoopBreakTypes);
+    }
+
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        // `insideUnsafe_` is a plain member field with manual save/restore here (not a threaded
+        // parameter like currentLoopBreakTypes) - this is the *only* place its value ever
+        // changes, so a local save/restore is sufficient to handle nesting correctly
+        // (`unsafe { unsafe { ... } }`) with zero changes to any other checkExpr/checkStmt/
+        // checkBlock call site. checkFunction resets it to false at the start of every function
+        // body, so it can never leak from one function into an unrelated one either.
+        const bool wasInsideUnsafe = insideUnsafe_;
+        insideUnsafe_ = true;
+        const Type result = checkBlock(static_cast<const BlockExpr&>(*unsafeBlock->body), env,
+                                       expectedReturnType, currentLoopBreakTypes);
+        insideUnsafe_ = wasInsideUnsafe;
+        return result;
+    }
+
+    if (const auto* addressOf = dynamic_cast<const AddressOfExpr*>(&expr))
+    {
+        const auto* name = dynamic_cast<const NameExpr*>(addressOf->operand.get());
+        if (!name)
+        {
+            throw std::runtime_error(
+                "'&' can only be applied to a local variable this phase (struct fields, array/"
+                "collection elements, and dereferenced pointers are not yet supported)");
+        }
+        if (insideClosureBody_)
+        {
+            throw std::runtime_error("'&' is not yet supported inside a closure body");
+        }
+        const Type operandType = env.get(name->name); // throws "undefined variable" if unbound
+        // No insideUnsafe_ check - unlike DerefExpr just below, taking an address is always
+        // safe (see docs/language/0019-unsafe.md's own stated design).
+        return arrayLikeType(TypeKind::Pointer, typeName(operandType));
+    }
+
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        const Type pointerType =
+            checkExpr(*deref->operand, env, expectedReturnType, currentLoopBreakTypes);
+        if (pointerType.kind != TypeKind::Pointer)
+        {
+            throw std::runtime_error("'*' requires a pointer type, got " + typeName(pointerType));
+        }
+        if (!insideUnsafe_)
+        {
+            throw std::runtime_error("dereferencing a raw pointer requires an 'unsafe' block");
+        }
+        return resolveType(pointerType.elementTypeName);
     }
 
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
@@ -2573,12 +2634,16 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // was purely a TypeChecker-level restriction, not a missing
         // runtime capability. Always returns a fresh, owned String, built
         // the same way interpolation builds one.
-        if (methodCall->method == "join")
+        // `objectType.kind != TypeKind::Struct` guards this (see
+        // docs/language/0006-generics.md's own List<T> port follow-up) so a real struct that
+        // happens to declare its own "join" method (unlikely, but not this check's business to
+        // rule out) falls through to the general struct method dispatch below instead of being
+        // permanently shadowed by this builtin - List<T> itself no longer defines "join" at all.
+        if (methodCall->method == "join" && objectType.kind != TypeKind::Struct)
         {
-            if (objectType.kind != TypeKind::Array && objectType.kind != TypeKind::List &&
-                objectType.kind != TypeKind::Slice)
+            if (objectType.kind != TypeKind::Array && objectType.kind != TypeKind::Slice)
             {
-                throw std::runtime_error("'join' requires an Array, List, or slice<T>, got " +
+                throw std::runtime_error("'join' requires an Array or slice<T>, got " +
                                          typeName(objectType));
             }
             const Type elementType = resolveType(objectType.elementTypeName);
@@ -2602,87 +2667,20 @@ Type TypeChecker::checkExpr(const Expr& expr,
             return simpleType(TypeKind::OwnedString);
         }
 
-        if (objectType.kind == TypeKind::List)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
+        // `List<T>` is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T> port follow-up) - there is no
+        // TypeKind::List-specific push/pop dispatch left here; `.push`/`.pop`/`.get`/`.set`
+        // reach it via the general struct method dispatch at the end of this if-chain.
 
-            if (methodCall->method == "push")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'push' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'push' expects " + typeName(elementType) + ", got " +
-                                             typeName(argType));
-                }
-                return kUnit;
-            }
+        // Stack<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - there is no
+        // TypeKind::Stack-specific push/pop/peek dispatch left here; `.push`/`.pop`/`.peek`/
+        // `.length()` reach it via the general struct method dispatch at the end of this
+        // if-chain.
 
-            if (methodCall->method == "pop")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'pop' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // Stack<T> (see docs/language/0035-stacks.md) - push/pop mirror
-        // List<T>'s own byte-for-byte; peek is the one new operation, same
-        // shape as pop (0 arguments, returns elementType) but - unlike pop -
-        // doesn't remove (see RegionChecker for why that distinction
-        // matters for struct-typed T).
-        if (objectType.kind == TypeKind::Stack)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "push")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'push' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'push' expects " + typeName(elementType) + ", got " +
-                                             typeName(argType));
-                }
-                return kUnit;
-            }
-
-            if (methodCall->method == "pop" || methodCall->method == "peek")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // LinkedList<T> (see docs/language/0036-linked-lists.md) - unlike
-        // Stack<T>'s push/pop (which reuse List<T>'s own method names),
-        // push_front/push_back/pop_front/pop_back are unique names nothing
-        // else uses, so there's no ambiguity to resolve downstream (see
-        // IrGenerator). No peek_front/peek_back this phase - every operation
+        // LinkedList<T> (see docs/language/0036-linked-lists.md) - push_front/push_back/
+        // pop_front/pop_back are unique names nothing else uses, so there's no ambiguity to
+        // resolve downstream (see IrGenerator). No peek_front/peek_back this phase - every operation
         // either adds or removes, never aliases, so RegionChecker needs no
         // exception clause for LinkedList<T> at all.
         if (objectType.kind == TypeKind::LinkedList)
@@ -2722,134 +2720,25 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      typeName(objectType));
         }
 
-        // Deque<T> (see docs/language/0037-deques.md) - push_front/push_back/
-        // pop_front/pop_back are the same method names LinkedList<T> uses
-        // (IrGenerator resolves the ambiguity via isDequeExpr), but the type
-        // checker itself already knows objectType.kind exactly, so there's
-        // no ambiguity here at all. `[i]`/`[i]=`/`for`-in are handled
-        // entirely by isIndexable's shared IndexExpr/IndexAssignStmt path -
-        // no MethodCallExpr involvement, and no RegionChecker aliasing
-        // exception either (pop_front/pop_back always remove).
-        if (objectType.kind == TypeKind::Deque)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
+        // Deque<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - there
+        // is no TypeKind::Deque-specific push_front/push_back/pop_front/pop_back dispatch left
+        // here; those, plus `.get(i)`/`.set(i, v)` (replacing `[i]`/`[i]=` - Deque<T> is no
+        // longer indexable, see isIndexable's own comment), reach it via the general struct
+        // method dispatch at the end of this if-chain.
 
-            if (methodCall->method == "push_front" || methodCall->method == "push_back")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(elementType) + ", got " + typeName(argType));
-                }
-                return kUnit;
-            }
+        // Queue<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port
+        // follow-up) - there is no TypeKind::Queue-specific `enqueue`/`dequeue` dispatch left
+        // here; both reach it via the general struct method dispatch earlier in this same
+        // if-chain.
 
-            if (methodCall->method == "pop_front" || methodCall->method == "pop_back")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // Queue<T> (see docs/language/0038-queues.md) - `enqueue`/`dequeue`
-        // are brand-new method names nothing else in the language uses, so
-        // (unlike Deque<T>'s own push_front/push_back/pop_front/pop_back)
-        // there's no ambiguity anywhere, not even in IrGenerator. No `[i]`
-        // (deliberately not indexable, "communicate intent" - see
-        // isIndexable's own doc comment), and no RegionChecker aliasing
-        // exception either (dequeue always removes).
-        if (objectType.kind == TypeKind::Queue)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "enqueue")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'enqueue' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'enqueue' expects " + typeName(elementType) +
-                                             ", got " + typeName(argType));
-                }
-                return kUnit;
-            }
-
-            if (methodCall->method == "dequeue")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'dequeue' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // PriorityQueue<T> (see docs/language/0039-priority-queues.md) -
-        // push/pop mirror Stack<T>'s own byte-for-byte; peek is Stack<T>.peek()'s
-        // own twin (0 arguments, returns elementType, doesn't remove) - the
-        // difference from Stack<T> is purely in *which* element push/pop/peek
-        // touch (the heap's minimum, not the top of a LIFO stack), not in
-        // their type-checking shape.
-        if (objectType.kind == TypeKind::PriorityQueue)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "push")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'push' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'push' expects " + typeName(elementType) + ", got " +
-                                             typeName(argType));
-                }
-                return kUnit;
-            }
-
-            if (methodCall->method == "pop" || methodCall->method == "peek")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
+        // PriorityQueue<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
+        // PriorityQueue<T> port follow-up) - there is no TypeKind::PriorityQueue-specific
+        // `push`/`pop`/`peek` dispatch left here; all three reach it via the general struct
+        // method dispatch earlier in this same if-chain (the same one Stack<T>'s own former
+        // push/pop/peek already reaches).
 
         // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
         // rewrite) - K/V are checked against their own resolved types
@@ -3129,6 +3018,33 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      typeName(objectType));
         }
 
+        // General method-call dispatch for struct types (see docs/language/0006-generics.md's
+        // own generic-methods follow-up) - looks up "TypeName.method" in functions_, the exact
+        // map ImplDecl's own registerSignatures loop already folds every method into (trait or
+        // inherent, concrete or a GenericMonomorphizer-synthesized generic-struct
+        // instantiation - all arrive here identically, since by this point functions_ only ever
+        // holds concrete, fully-typed FunctionDecls). `self` (the receiver, already
+        // type-checked above as `objectType`) is params[0] and is not part of
+        // methodCall->arguments, so only params[1:] are checked against it. A method with zero
+        // params (no `self` at all - a static/associated function, out of scope this phase) is
+        // deliberately excluded here and falls through to the catch-all below.
+        if (objectType.kind == TypeKind::Struct)
+        {
+            if (const auto it = functions_.find(objectType.structName + "." + methodCall->method);
+                it != functions_.end() && !it->second->params.empty())
+            {
+                const std::vector<Param> paramsWithoutSelf(it->second->params.begin() + 1,
+                                                            it->second->params.end());
+                return checkCallArguments(objectType.structName + "." + methodCall->method,
+                                          paramsWithoutSelf,
+                                          it->second->returnType,
+                                          methodCall->arguments,
+                                          env,
+                                          expectedReturnType,
+                                          currentLoopBreakTypes);
+            }
+        }
+
         throw std::runtime_error("no such method '" + methodCall->method + "' on " +
                                  typeName(objectType));
     }
@@ -3238,44 +3154,10 @@ Type TypeChecker::checkExpr(const Expr& expr,
                              static_cast<int>(arrayLiteral->elements.size()));
     }
 
-    if (const auto* listNew = dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        const Type elementType = resolveType(listNew->elementType);
-        return arrayLikeType(TypeKind::List, typeName(elementType));
-    }
-
-    if (const auto* stackNew = dynamic_cast<const StackNewExpr*>(&expr))
-    {
-        const Type elementType = resolveType(stackNew->elementType);
-        return arrayLikeType(TypeKind::Stack, typeName(elementType));
-    }
-
     if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
     {
         const Type elementType = resolveType(linkedListNew->elementType);
         return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
-    }
-
-    if (const auto* dequeNew = dynamic_cast<const DequeNewExpr*>(&expr))
-    {
-        const Type elementType = resolveType(dequeNew->elementType);
-        return arrayLikeType(TypeKind::Deque, typeName(elementType));
-    }
-
-    if (const auto* queueNew = dynamic_cast<const QueueNewExpr*>(&expr))
-    {
-        const Type elementType = resolveType(queueNew->elementType);
-        return arrayLikeType(TypeKind::Queue, typeName(elementType));
-    }
-
-    if (const auto* priorityQueueNew = dynamic_cast<const PriorityQueueNewExpr*>(&expr))
-    {
-        // Reuses resolveType's own i32-only enforcement for
-        // "PriorityQueue<elem>" - same "delegate to resolveType for real
-        // semantic validation" choice MapNewExpr/SetNewExpr make just below,
-        // not the List/Stack/Deque/Queue's own copy-pasted structural check
-        // (see docs/language/0039-priority-queues.md).
-        return resolveType("PriorityQueue<" + priorityQueueNew->elementType + ">");
     }
 
     if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
@@ -3296,8 +3178,8 @@ Type TypeChecker::checkExpr(const Expr& expr,
     if (const auto* sortedSetNew = dynamic_cast<const SortedSetNewExpr*>(&expr))
     {
         // Reuses resolveType's own orderability enforcement for
-        // "SortedSet<elem>" - same delegation PriorityQueueNewExpr/
-        // SortedMapNewExpr make above (see docs/language/0041-sorted-sets.md).
+        // "SortedSet<elem>" - same delegation SortedMapNewExpr makes above
+        // (see docs/language/0041-sorted-sets.md).
         return resolveType("SortedSet<" + sortedSetNew->elementType + ">");
     }
 
@@ -3343,8 +3225,8 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // deliberately - str/String are immutable, so this stays absent
         // from `isIndexable` itself (shared with IndexAssignStmt, which
         // must keep rejecting `s[i] = ...`), and str/String don't have an
-        // elementTypeName the Array/Slice/List/Deque branch below relies on
-        // for its own return type.
+        // elementTypeName the Array/Slice branch below relies on for its
+        // own return type.
         if (isStrCoercible(objectType))
         {
             const Type indexType =
@@ -3376,42 +3258,22 @@ Type TypeChecker::checkExpr(const Expr& expr,
 
     if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
     {
-        // Originally str-coercible-only (str or String); widened in
-        // docs/language/0050-collection-join-and-slicing.md to also accept
-        // an Array or List<T>, T restricted to isTextRepresentable
-        // (i32/bool/char/str/String - the same set print()/interpolation
-        // already established) - struct-typed T is deliberately out of
-        // scope this phase (see that document's own Design section for
-        // why: a bulk element copy would alias struct-typed elements with
-        // the source object, a RegionChecker question this phase doesn't
-        // take on). A str-coercible object always yields a fresh str; an
-        // Array/List object always yields a fresh List<T> - mirrors
-        // IndexExpr's own isIndexable dispatch, generalized one step
-        // further to a second, deliberately narrower object-type set.
+        // Originally str-coercible-only (str or String); briefly widened in
+        // docs/language/0050-collection-join-and-slicing.md to also accept an Array (result:
+        // a fresh List<T>) - narrowed back to str-coercible-only now that List<T> is a real,
+        // user-declared generic struct (see docs/language/0006-generics.md's own List<T> port
+        // follow-up): producing one requires a real `newList<T>()` call + a push loop, not just
+        // a type-checked bulk copy, and slicing shouldn't grow a hidden dependency on
+        // `std/collections.ax` being in scope. Array slicing may return once there's a real need
+        // for it, built on top of the actual `newList<T>()`/`.push` API rather than an internal
+        // shortcut.
         const Type objectType =
             checkExpr(*strSlice->object, env, expectedReturnType, currentLoopBreakTypes);
-        Type resultType;
-        if (isStrCoercible(objectType))
+        if (!isStrCoercible(objectType))
         {
-            resultType = kStr;
+            throw std::runtime_error("slicing requires str, got " + typeName(objectType));
         }
-        else if (objectType.kind == TypeKind::Array || objectType.kind == TypeKind::List)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-            if (!isTextRepresentable(elementType))
-            {
-                throw std::runtime_error(
-                    "slicing an Array/List requires i32/bool/char/str/String elements, found " +
-                    typeName(elementType));
-            }
-            resultType = arrayLikeType(TypeKind::List, objectType.elementTypeName);
-        }
-        else
-        {
-            throw std::runtime_error(
-                "slicing requires str, or an Array/List of i32/bool/char/str/String, got " +
-                typeName(objectType));
-        }
+        const Type resultType = kStr;
         if (strSlice->start)
         {
             const Type startType =
@@ -3444,6 +3306,25 @@ Type TypeChecker::checkExpr(const Expr& expr,
         {
             case TokenKind::Plus:
             case TokenKind::Minus:
+                // `ptr + i` / `ptr - i` (see docs/language/0019-unsafe.md) - element-scaled
+                // pointer arithmetic, legal only inside `unsafe { }`. Checked here rather than in
+                // a dedicated AST node: this reuses the existing BinaryExpr(Plus/Minus) shape
+                // verbatim, exactly like every other binary operator already does.
+                if (leftType.kind == TypeKind::Pointer)
+                {
+                    if (!insideUnsafe_)
+                    {
+                        throw std::runtime_error("pointer arithmetic requires an 'unsafe' block");
+                    }
+                    if (rightType.kind != TypeKind::I32 && rightType.kind != TypeKind::I64)
+                    {
+                        throw std::runtime_error(
+                            "pointer arithmetic offset must be i32 or i64, found " +
+                            typeName(rightType));
+                    }
+                    return leftType;
+                }
+                return requireInt(leftType, rightType);
             case TokenKind::Star:
             case TokenKind::Slash: return requireInt(leftType, rightType);
             case TokenKind::Less:
@@ -3475,6 +3356,19 @@ Type TypeChecker::checkExpr(const Expr& expr,
         const Type operandType =
             checkExpr(*cast->operand, env, expectedReturnType, currentLoopBreakTypes);
         const Type targetType = resolveType(cast->targetType);
+        // Pointer-to-pointer cast (see docs/language/0006-generics.md's own List<T> port
+        // follow-up) - a raw pointer reinterpretation, legal only inside `unsafe {}` (mirrors
+        // DerefExpr's own gating - creating/reading through a reinterpreted pointer is exactly
+        // as unchecked as any other raw-pointer operation). Unconditionally allowed between any
+        // two element types once inside unsafe - the whole point is reinterpreting bytes.
+        if (operandType.kind == TypeKind::Pointer && targetType.kind == TypeKind::Pointer)
+        {
+            if (!insideUnsafe_)
+            {
+                throw std::runtime_error("pointer cast requires an 'unsafe' block");
+            }
+            return targetType;
+        }
         if (!isNumericKind(operandType.kind) || !isNumericKind(targetType.kind))
         {
             throw std::runtime_error("'as' cast requires both sides to be i32, i64, or f64, "
@@ -3482,6 +3376,12 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      typeName(operandType) + " as " + typeName(targetType));
         }
         return targetType;
+    }
+
+    if (const auto* sizeOf = dynamic_cast<const SizeOfExpr*>(&expr))
+    {
+        resolveType(sizeOf->typeName); // validates the type exists; result unused otherwise
+        return kI64;
     }
 
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
@@ -3708,7 +3608,12 @@ Type TypeChecker::checkExpr(const Expr& expr,
         const Type expectedReturn =
             closureExpr->returnType ? resolveType(*closureExpr->returnType) : kUnit;
         const auto& block = static_cast<const BlockExpr&>(*closureExpr->body);
+        // `&name` inside a closure body is rejected (see insideClosureBody_'s own comment) -
+        // same manual save/restore shape insideUnsafe_ already uses, just gating a rejection.
+        const bool wasInsideClosureBody = insideClosureBody_;
+        insideClosureBody_ = true;
         checkBlock(block, closureEnv, &expectedReturn, nullptr);
+        insideClosureBody_ = wasInsideClosureBody;
         if (!(expectedReturn == kUnit) && !definitelyReturns(block))
         {
             throw std::runtime_error("closure does not return a value of type " +

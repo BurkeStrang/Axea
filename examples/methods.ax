@@ -1,0 +1,37 @@
+struct Counter
+{
+    value: i32
+}
+
+impl Counter
+{
+    increment(self)
+    {
+        self.value = self.value + 1
+    }
+}
+
+struct Box<T>
+{
+    value: T
+}
+
+impl<T> Box<T>
+{
+    get(self) -> T
+    {
+        return self.value
+    }
+}
+
+c = Counter { value: 0 }
+step1 = c.increment()
+step2 = c.increment()
+step3 = c.increment()
+print("counter = {c.value}")
+
+intBox = Box<i32> { value: 42 }
+print("intBox.get() = {intBox.get()}")
+
+boolBox = Box<bool> { value: true }
+print("boolBox.get() = {boolBox.get()}")

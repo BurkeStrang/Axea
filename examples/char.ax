@@ -1,3 +1,5 @@
+use collections
+
 struct Letter
 {
     value: char
@@ -15,11 +17,12 @@ isNotEqual = a != accented
 isLess = a < accented
 isGreaterOrEqual = accented >= a
 
-letters = List<char>()
+letters: List<char> = collections.newList<char>()
 appended1 = letters.push('a')
 appended2 = letters.push('é')
 appended3 = letters.push('🚀')
 letterCount = letters.length
+firstLetter = letters.get(0)
 
 print("first = {first}")
 print("a = {a}")
@@ -29,5 +32,5 @@ print("isEqual = {isEqual}")
 print("isNotEqual = {isNotEqual}")
 print("isLess = {isLess}")
 print("isGreaterOrEqual = {isGreaterOrEqual}")
-print("letters = {letters}")
+print("firstLetter = {firstLetter}")
 print("letterCount = {letterCount}")

@@ -1,7 +1,71 @@
 # `Deque<T>`: A Growable Array With a Start Offset — Real Indexing, No Ring-Buffer Wraparound
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0037-deques.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`Deque<T>` is no longer a compiler intrinsic. Following `List<T>`/`Stack<T>`'s own ports
+(`docs/language/0033-lists.md`/`0035-stacks.md`'s own "2026 Update" sections), `Deque<T>` is now
+a real, user-declared generic struct with a generic inherent `impl` block, living in
+`std/collections.ax`, built on the same prerequisites those two ports already established (user
+generics, generic inherent `impl`, general struct method dispatch, `sizeof<T>()`, generic
+top-level functions) — this port needed **zero new language features**.
+
+```ax
+use collections
+
+d: Deque<i32> = collections.newDeque<i32>()
+d.push_front(1)
+d.push_back(2)
+front = d.pop_front()   // 1
+back = d.pop_back()     // 2
+mid = d.get(0)           // was: d[0]
+count = d.length
+```
+
+**What changed and why:**
+
+- **Construction**: `Deque<i32>()` call-style sugar → `collections.newDeque<i32>()`, an ordinary
+  (generic) function call — identical reasoning to `List<T>`/`Stack<T>`'s own construction change.
+- **The real, accepted API loss — the one genuine tradeoff this port makes**: this document's
+  own "This unlocks real indexing 'for free'" section above describes `Deque<T>`'s real `[i]`/
+  `[i] =`/`for`-in support as its defining advantage over `LinkedList<T>`. A struct can never
+  participate in `TypeChecker::isIndexable` (hardcoded to specific `TypeKind`s) without
+  inventing operator overloading — out of scope, the exact same reasoning `List<T>`'s own port
+  already established. So `Deque<T>` loses `[i]`/`[i]=`/`for`-in too, replaced by `.get(i)`/
+  `.set(i, v)` (`push_front`/`push_back`/`pop_front`/`pop_back` need no syntax change, already
+  ordinary method calls).
+- **The `LinkedList<T>`-vs-`Deque<T>` method-name collision this document's own "The real
+  wrinkle" section describes no longer exists** — `push_front`/`push_back`/`pop_front`/
+  `pop_back` reach `Deque<T>`'s own real `impl` block via the general struct method dispatch,
+  not `IrGenerator`'s old `isDequeExpr` resolver (deleted outright once `LinkedList<T>` became
+  the sole remaining user of those method names — `Queue<T>`'s own `enqueue`/`dequeue` never
+  shared them in the first place).
+- **The `.length` field stays a bare field** (`d.length`, no parens) — `Deque<T>` owns it
+  directly, unlike `Stack<T>`'s own `.length()` method (which delegates to an internal `items`
+  field with no bare-field syntax to expose that through).
+- **Growth still reallocates to exactly `length + 1` on every push** — this port deliberately did
+  **not** add amortized doubling growth, keeping it a faithful translation of the original
+  intrinsic's own documented behavior (see this document's own "The design call, and why"
+  section) rather than a redesign. The **one** real improvement, mirroring `List<T>`'s own port:
+  the real Axea-source `push_front`/`push_back` actually `free()` the old buffer, fixing the
+  leak the original intrinsic's own compiled emission had (no `@free` call anywhere near it).
+- **Construction now eagerly allocates a genuine *zero*-element buffer** (`malloc(0 *
+  sizeof<T>())`), not a 1-element one the way `List<T>`'s own port needed — there is no null
+  pointer literal in Axea to represent "not yet allocated" (the same constraint `List<T>`'s port
+  hit), but unlike `List<T>.pop()` (which decrements length *before* reading, always landing
+  out of bounds on an empty list even with a 1-slot buffer), `Deque<T>.pop_front()` reads at
+  `self.start` *before* incrementing it — with an eager 1-slot buffer, an empty `pop_front()`
+  would silently read valid-but-uninitialized memory at index 0 instead of failing. A genuine
+  zero-element buffer closes that gap: any index, including 0, is immediately out of bounds,
+  restoring the same "interpreter throws, compiled backend has no check" contract every other
+  empty-collection operation in this codebase already has.
+- See `examples/deque.ax` for a worked example (verified both interpreted and compiled, `-O0`
+  and `-O1`); everything below this section documents the *original compiler-intrinsic design*
+  (now retired) for historical context.
 
 ---
 

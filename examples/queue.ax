@@ -1,35 +1,38 @@
+use collections
+
 build() -> Queue<i32>
 {
-    jobs = Queue<i32>()
-    jobs.enqueue(10)
-    jobs.enqueue(20)
-    jobs.enqueue(30)
+    jobs: Queue<i32> = collections.newQueue<i32>()
+    p1 = jobs.enqueue(10)
+    p2 = jobs.enqueue(20)
+    p3 = jobs.enqueue(30)
     return jobs
 }
 
 enqueueOne(jobs: Queue<i32>)
 {
-    jobs.enqueue(99)
+    p = jobs.enqueue(99)
 }
 
 drain(jobs: Queue<i32>) -> i32
 {
     total = 0
-    while jobs.length > 0
+    while jobs.length() > 0
     {
+        // todo: need to add support for +=
         total = total + jobs.dequeue()
     }
     return total
 }
 
 jobs = build()
-lengthAfterBuild = jobs.length
+lengthAfterBuild = jobs.length()
 first = jobs.dequeue()
-lengthAfterDequeue = jobs.length
+lengthAfterDequeue = jobs.length()
 called = enqueueOne(jobs)
-lengthAfterEnqueue = jobs.length
+lengthAfterEnqueue = jobs.length()
 total = drain(jobs)
-lengthAfterDrain = jobs.length
+lengthAfterDrain = jobs.length()
 
 print("lengthAfterBuild = {lengthAfterBuild}")
 print("first = {first}")

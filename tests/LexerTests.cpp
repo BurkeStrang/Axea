@@ -304,3 +304,30 @@ TEST("Lexer marks an unterminated triple-quoted string (a doubled but not triple
 
     EXPECT_EQ(tokens[0].kind, TokenKind::Invalid);
 }
+
+TEST("Lexer recognizes 'unsafe' as a keyword, not a plain identifier")
+{
+    Lexer lexer("unsafe");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Unsafe);
+}
+
+TEST("Lexer still lexes '*' as Star regardless of surrounding context - deref-vs-multiply is a "
+     "parser concern, not a lexer one")
+{
+    Lexer lexer("*ptr");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Star);
+    EXPECT_EQ(tokens[1].kind, TokenKind::Identifier);
+}
+
+TEST("Lexer lexes '&' as Ampersand")
+{
+    Lexer lexer("&x");
+    const auto tokens = lexer.lex();
+
+    EXPECT_EQ(tokens[0].kind, TokenKind::Ampersand);
+    EXPECT_EQ(tokens[1].kind, TokenKind::Identifier);
+}

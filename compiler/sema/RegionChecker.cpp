@@ -18,67 +18,18 @@ namespace
         return type.substr(1, type.find(';') - 1);
     }
 
-    bool isListTypeString(const std::string& type)
-    {
-        return type.starts_with("List<");
-    }
-
-    // "List<elem>" -> "elem" - the canonical form Parser::parseTypeName
-    // always produces (see docs/language/0033-lists.md). Mirrors
-    // arrayElementTypeName above.
-    std::string listElementTypeName(const std::string& type)
-    {
-        return type.substr(5, type.size() - 6);
-    }
-
-    bool isStackTypeString(const std::string& type)
-    {
-        return type.starts_with("Stack<");
-    }
-
-    // "Stack<elem>" -> "elem" - mirrors listElementTypeName above (see
-    // docs/language/0035-stacks.md).
-    std::string stackElementTypeName(const std::string& type)
-    {
-        return type.substr(6, type.size() - 7);
-    }
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> are real, user-declared generic
+    // structs now (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
+    // PriorityQueue<T> port follow-up) - a param's own mangled type name (e.g. "List$i32",
+    // "Stack$i32", "Deque$i32", "Queue$i32", "PriorityQueue$i32") is already caught by the
+    // ordinary `structs_.contains` check every struct param gets, so there is no
+    // isListTypeString/isStackTypeString/isDequeTypeString/isQueueTypeString/
+    // isPriorityQueueTypeString-style helper left here (unlike the still-intrinsic collections
+    // below).
 
     bool isLinkedListTypeString(const std::string& type)
     {
         return type.starts_with("LinkedList<");
-    }
-
-    bool isDequeTypeString(const std::string& type)
-    {
-        return type.starts_with("Deque<");
-    }
-
-    // "Deque<elem>" -> "elem" - mirrors listElementTypeName above (see
-    // docs/language/0037-deques.md). Needed (unlike LinkedList's own
-    // elementTypeName-less choice) because `[i]` on a struct-typed Deque
-    // aliases the container - IndexExpr's already-generic aliasing case
-    // reads this straight off objectInfo.elementStructType.
-    std::string dequeElementTypeName(const std::string& type)
-    {
-        return type.substr(6, type.size() - 7);
-    }
-
-    // No queueElementTypeName - unlike Deque<T>, Queue<T> has no `[i]`/peek,
-    // so there's no operation whose result could alias the container (see
-    // docs/language/0038-queues.md). Mirrors LinkedList<T>'s own identical
-    // choice for the identical reason.
-    bool isQueueTypeString(const std::string& type)
-    {
-        return type.starts_with("Queue<");
-    }
-
-    // No priorityQueueElementTypeName either, for the identical reason -
-    // PriorityQueue<T> has no `[i]`, and its `peek()` is only ever i32 this
-    // phase (see docs/language/0039-priority-queues.md), so elementStructType
-    // extraction would never have anything to populate anyway.
-    bool isPriorityQueueTypeString(const std::string& type)
-    {
-        return type.starts_with("PriorityQueue<");
     }
 
     bool isMapTypeString(const std::string& type)
@@ -241,7 +192,13 @@ void RegionChecker::registerDecls(const Program& program)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            functions_[function->name] = function;
+            // A generic top-level function template is never registered here (mirrors
+            // StructDecl's identical guard just below) - only GenericMonomorphizer's synthesized,
+            // concrete-per-call-site clones are.
+            if (function->typeParams.empty())
+            {
+                functions_[function->name] = function;
+            }
         }
         else if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
@@ -373,8 +330,6 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         }
         std::string elementStructType;
         const bool isArray = isArrayTypeString(param.type);
-        const bool isList = isListTypeString(param.type);
-        const bool isStack = isStackTypeString(param.type);
         const bool isMap = isMapTypeString(param.type);
         const bool isSet = isSetTypeString(param.type);
         // LinkedList<T> (see docs/language/0036-linked-lists.md) carries the
@@ -386,16 +341,11 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         // extraction to do here: MethodCallExpr's aliasing exception is never
         // consulted for LinkedList<T>.
         const bool isLinkedList = isLinkedListTypeString(param.type);
-        const bool isDeque = isDequeTypeString(param.type);
-        // Queue<T> (see docs/language/0038-queues.md) - same reasoning as
-        // LinkedList<T> above: `dequeue()` always removes, and there's no
-        // `[i]`/peek at all, so no elementStructType extraction is needed -
-        // the simplest region-checking story of any collection this session.
-        const bool isQueue = isQueueTypeString(param.type);
-        // PriorityQueue<T> (see docs/language/0039-priority-queues.md) - same
-        // reasoning as Queue<T> above: push/pop/peek's element is always i32
-        // this phase, so no elementStructType extraction is ever needed.
-        const bool isPriorityQueue = isPriorityQueueTypeString(param.type);
+        // Deque<T>/Queue<T>/PriorityQueue<T> are real, user-declared generic structs now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
+        // PriorityQueue<T> port follow-up) - a param's own mangled type name is already caught
+        // by the ordinary `structs_.contains` check above (structType), so there is no
+        // isDeque/isQueue/isPriorityQueue left here.
         const bool isSortedMap = isSortedMapTypeString(param.type);
         const bool isSortedSet = isSortedSetTypeString(param.type);
         const bool isString = isStringTypeString(param.type);
@@ -418,25 +368,6 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
                 elementStructType = elementName;
             }
         }
-        else if (isList)
-        {
-            const std::string elementName = listElementTypeName(param.type);
-            if (structs_.contains(elementName))
-            {
-                elementStructType = elementName;
-            }
-        }
-        else if (isStack)
-        {
-            // Same reasoning as List above - `.peek()` (unlike `.pop()`,
-            // which removes) can hand back a value aliasing the stack's own
-            // stored instance (see docs/language/0035-stacks.md).
-            const std::string elementName = stackElementTypeName(param.type);
-            if (structs_.contains(elementName))
-            {
-                elementStructType = elementName;
-            }
-        }
         else if (isMap)
         {
             // Only V (not K) - `.get()` is the only Map operation that can
@@ -449,21 +380,6 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
             if (structs_.contains(valueName))
             {
                 elementStructType = valueName;
-            }
-        }
-        else if (isDeque)
-        {
-            // Unlike LinkedList<T> above, Deque<T> genuinely needs this:
-            // `[i]` on a struct-typed Deque aliases the container exactly
-            // like List<T>[i] already does (see docs/language/0037-deques.md)
-            // - IndexExpr's own regionOfExpr case is already fully generic,
-            // so populating elementStructType here is the only wiring it
-            // needs; no MethodCallExpr exception required (push_front/
-            // push_back/pop_front/pop_back never alias).
-            const std::string elementName = dequeElementTypeName(param.type);
-            if (structs_.contains(elementName))
-            {
-                elementStructType = elementName;
             }
         }
         else if (isSortedMap)
@@ -488,8 +404,8 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         // 0043-buffer.md); a primitive parameter is always Owned regardless
         // of its read/write/take capability.
         const bool borrowed =
-            (!structType.empty() || isArray || isList || isStack || isLinkedList || isDeque ||
-             isQueue || isPriorityQueue || isMap || isSet || isSortedMap || isSortedSet ||
+            (!structType.empty() || isArray || isLinkedList ||
+             isMap || isSet || isSortedMap || isSortedSet ||
              isString || isBuffer || isShared || isClosure) &&
             capabilities[i] != Capability::Take;
         env.define(param.name,
@@ -673,17 +589,13 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", "", elementStructType};
     }
 
-    if (dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        // A brand-new list starts empty - nothing to alias yet, always Owned
-        // (see docs/language/0033-lists.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
     if (dynamic_cast<const MapNewExpr*>(&expr) || dynamic_cast<const SetNewExpr*>(&expr))
     {
-        // Same reasoning as ListNewExpr above - a brand-new Map/Set starts
-        // empty, always Owned (see docs/language/0034-maps-and-sets.md).
+        // A brand-new Map/Set starts empty - nothing to alias yet, always Owned (see
+        // docs/language/0034-maps-and-sets.md). List<T>'s own construction (a real,
+        // user-declared generic struct now - see docs/language/0006-generics.md's own List<T>
+        // port follow-up) is an ordinary CallExpr to `newList<T>()`, already Owned via the
+        // generic CallExpr case above - no ListNewExpr case needed here anymore.
         return RegionInfo{Region::Owned, "", ""};
     }
 
@@ -721,38 +633,10 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
-    if (dynamic_cast<const StackNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new stack starts empty, always
-        // Owned (see docs/language/0035-stacks.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
     if (dynamic_cast<const LinkedListNewExpr*>(&expr))
     {
         // Same reasoning again - a brand-new linked list starts empty,
         // always Owned (see docs/language/0036-linked-lists.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
-    if (dynamic_cast<const DequeNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new deque starts empty, always
-        // Owned (see docs/language/0037-deques.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
-    if (dynamic_cast<const QueueNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new queue starts empty, always
-        // Owned (see docs/language/0038-queues.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
-    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new heap starts empty, always Owned
-        // (see docs/language/0039-priority-queues.md).
         return RegionInfo{Region::Owned, "", ""};
     }
 
@@ -908,10 +792,49 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 
         const RegionInfo objectInfo =
             regionOfExpr(*methodCall->object, env, function, currentLoopBreakRegions);
-        // Move semantics: this whole branch is builtin collection/string/buffer methods only -
-        // real user-defined struct methods reach this checker as an ordinary CallExpr with a
-        // mangled "Type.method" callee (receiver as arguments[0]), handled by the CallExpr case
-        // above, not here. Inserting a struct/enum-typed value into a collection consumes it,
+
+        // General struct method dispatch (see docs/language/0006-generics.md's own
+        // generic-methods follow-up) - a real user-defined struct method call, resolved via
+        // `objectInfo.structType` (already computed above; every expression kind that can be
+        // struct-typed already populates this field, so no separate type-resolution is needed
+        // here). Mirrors the ordinary CallExpr case's own "consume any take-declared argument,
+        // propagate the callee's own struct-typed return" logic almost verbatim, just with
+        // `self` (methodCall->object, already evaluated as objectInfo above) consumed
+        // separately from the rest of `arguments` when the resolved method's own self param is
+        // itself take-declared.
+        if (!objectInfo.structType.empty())
+        {
+            if (const auto it = functions_.find(objectInfo.structType + "." + methodCall->method);
+                it != functions_.end() && !it->second->params.empty())
+            {
+                const auto capIt = capabilities_.find(it->second->name);
+                if (capIt != capabilities_.end() && !capIt->second.empty() &&
+                    capIt->second[0] == Capability::Take)
+                {
+                    consumeOwned(*methodCall->object, objectInfo, env, function);
+                }
+                for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
+                {
+                    const RegionInfo argInfo = regionOfExpr(
+                        *methodCall->arguments[i], env, function, currentLoopBreakRegions);
+                    if (capIt != capabilities_.end() && i + 1 < capIt->second.size() &&
+                        capIt->second[i + 1] == Capability::Take)
+                    {
+                        consumeOwned(*methodCall->arguments[i], argInfo, env, function);
+                    }
+                }
+                std::string structType;
+                if (it->second->returnType && (structs_.contains(*it->second->returnType) ||
+                                               enums_.contains(*it->second->returnType)))
+                {
+                    structType = *it->second->returnType;
+                }
+                return RegionInfo{Region::Owned, "", structType};
+            }
+        }
+
+        // Move semantics: this whole branch is builtin collection/string/buffer methods only.
+        // Inserting a struct/enum-typed value into a collection consumes it,
         // exactly like passing it to a `take` param - this is the fix for the collection-insert
         // UAF found this session (previously patched with a runtime retain; a compile-time move
         // error is strictly better). "set" is Map/SortedMap's own two-argument form (key, value) -
@@ -1327,6 +1250,14 @@ void RegionChecker::regionOfStmt(const Stmt& stmt,
         return;
     }
 
+    // Deliberately no DerefAssignStmt branch here (see docs/language/0019-unsafe.md) - a `*T`
+    // param is always Owned regardless of capability (it matches none of the isXTypeString
+    // helpers above, falling into this checker's own existing "a primitive parameter is always
+    // Owned" default), so there is no aliasing/escape analysis for this checker to perform on
+    // `*ptr = value` at all. A direct consequence: writing an already-moved struct/enum value
+    // through a raw pointer isn't caught this phase - consistent with, and required by, the
+    // design doc's own "no escape-analysis or aliasing reasoning inside unsafe" stance.
+
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         regionOfExpr(*incDec->target, env, function, currentLoopBreakRegions);
@@ -1371,7 +1302,13 @@ void RegionChecker::check(
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            checkFunction(*function, capabilities.at(function->name));
+            // A generic top-level function template is never checked here (mirrors
+            // TypeChecker's identical guard) - capabilities were never computed for its own
+            // unsubstituted name, only for each concrete monomorphized clone.
+            if (function->typeParams.empty())
+            {
+                checkFunction(*function, capabilities.at(function->name));
+            }
         }
         else if (const auto* implDecl = dynamic_cast<const ImplDecl*>(item.get()))
         {

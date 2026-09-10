@@ -2,6 +2,7 @@
 
 #include "generics/GenericMonomorphizer.hpp"
 #include "lexer/Lexer.hpp"
+#include "module/UnqualifiedCallResolver.hpp"
 #include "parser/Parser.hpp"
 
 #include <filesystem>
@@ -141,12 +142,19 @@ Program loadProgram(const std::string& rootPathText)
 
     Program rootProgram = parseFile(rootPath);
 
+    // Every module the entry file's own top-level `use` declarations name (see
+    // UnqualifiedCallResolver.hpp) - collected here, before `rootProgram` is consumed by
+    // `mergeModule` below, since only the entry file's own top-level items are directly visible
+    // at this point (a library module's own internal `use`s never contribute - matching this
+    // feature's entry-file-only scope).
+    std::vector<std::string> usedModules;
     std::vector<std::string> worklist;
     for (const auto& item : rootProgram.items)
     {
         if (const auto* useDecl = dynamic_cast<const UseDecl*>(item.get()))
         {
             worklist.push_back(useDecl->moduleName);
+            usedModules.push_back(useDecl->moduleName);
         }
     }
 
@@ -213,6 +221,16 @@ Program loadProgram(const std::string& rootPathText)
                                      searchedText + ")");
         }
     }
+
+    // `use ModuleName` unqualified-call resolution (see UnqualifiedCallResolver.hpp) - must run
+    // before monomorphizeGenerics below, so a bare generic call's own rewritten (now-qualified)
+    // callee is what GenericMonomorphizer's own functionTemplatesByName lookup sees.
+    resolveUnqualifiedCalls(merged, usedModules);
+    // `TypeName<T>(args)` construction sugar (see UnqualifiedCallResolver.hpp's own doc comment)
+    // - runs after the plain-function resolution above (so a real function sharing a struct's
+    // own bare name already wins) and, unlike it, unconditionally (a purely local struct +
+    // constructor needs no `use` at all).
+    resolveUnqualifiedConstructorCalls(merged, usedModules);
 
     // Generic struct instantiations (see docs/language/0006-generics.md) - runs once, here,
     // after every module is merged into one flat Program and before any later pass ever sees

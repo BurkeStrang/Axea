@@ -905,11 +905,25 @@ Environment::Environment(Environment* parent)
 
 void Environment::define(const std::string& name, Value value)
 {
+    // See boxedCellOf's own comment - a name already boxed in *this* scope (an edge case, not the
+    // usual path: the interpreter's own callers always route an address-taken name's first
+    // definition through defineBoxed instead of define) updates the box in place rather than
+    // silently shadowing it with an unrelated plain entry.
+    if (const auto it = boxedCells_.find(name); it != boxedCells_.end())
+    {
+        (*it->second)[0] = std::move(value);
+        return;
+    }
     values_[name] = std::move(value);
 }
 
 void Environment::assign(const std::string& name, Value value)
 {
+    if (const auto it = boxedCells_.find(name); it != boxedCells_.end())
+    {
+        (*it->second)[0] = std::move(value);
+        return;
+    }
     if (const auto it = values_.find(name); it != values_.end())
     {
         it->second = std::move(value);
@@ -925,6 +939,10 @@ void Environment::assign(const std::string& name, Value value)
 
 Value Environment::get(const std::string& name) const
 {
+    if (const auto it = boxedCells_.find(name); it != boxedCells_.end())
+    {
+        return (*it->second)[0];
+    }
     if (const auto it = values_.find(name); it != values_.end())
     {
         return it->second;
@@ -936,14 +954,37 @@ Value Environment::get(const std::string& name) const
     throw std::runtime_error("undefined variable: " + name);
 }
 
-const std::unordered_map<std::string, Value>& Environment::bindings() const
+void Environment::defineBoxed(const std::string& name, Value initialValue)
 {
-    return values_;
+    boxedCells_[name] = std::make_shared<std::vector<Value>>(1, std::move(initialValue));
+}
+
+std::shared_ptr<std::vector<Value>> Environment::boxedCellOf(const std::string& name) const
+{
+    if (const auto it = boxedCells_.find(name); it != boxedCells_.end())
+    {
+        return it->second;
+    }
+    if (parent_)
+    {
+        return parent_->boxedCellOf(name);
+    }
+    return nullptr;
+}
+
+std::unordered_map<std::string, Value> Environment::bindings() const
+{
+    std::unordered_map<std::string, Value> result = values_;
+    for (const auto& [name, cell] : boxedCells_)
+    {
+        result[name] = (*cell)[0];
+    }
+    return result;
 }
 
 bool Environment::contains(const std::string& name) const
 {
-    if (values_.contains(name))
+    if (values_.contains(name) || boxedCells_.contains(name))
     {
         return true;
     }
@@ -967,7 +1008,13 @@ void Interpreter::run(const Program& program)
     {
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
-            functions_[function->name] = function;
+            // A generic top-level function template is never registered here (mirrors
+            // StructDecl's identical guard just below) - only GenericMonomorphizer's synthesized,
+            // concrete-per-call-site clones are.
+            if (function->typeParams.empty())
+            {
+                functions_[function->name] = function;
+            }
         }
         else if (const auto* structDecl = dynamic_cast<const StructDecl*>(item.get()))
         {
@@ -1007,6 +1054,13 @@ void Interpreter::run(const Program& program)
         {
             // Modules (see docs/language/0066-modules.md) - see externModules_'s own comment.
             externModules_[externDecl->name] = externDecl->moduleName;
+            // `malloc`/`free` (see docs/language/0019-unsafe.md) - unlike every other extern,
+            // this milestone's hand-implemented "malloc" genuinely needs its own declared pointee
+            // type (this ExternDecl's own returnType, e.g. "*i32") to know how many arena
+            // elements a given byte count corresponds to (see axeaTypeByteSize) - a real, new
+            // need externModules_ never had, since no prior extern's own interpreter behavior
+            // depended on its declared signature.
+            externDecls_[externDecl->name] = externDecl;
         }
     }
 
@@ -1023,6 +1077,22 @@ void Interpreter::run(const Program& program)
         if (!owningModule.empty())
         {
             moduleNames_.insert(owningModule);
+        }
+    }
+
+    // `&name` (see docs/language/0019-unsafe.md) - a top-level `p = &x` needs this exact same
+    // treatment as a function-body local (see callFunction's own identical scan); top-level
+    // script statements execute through globalEnv_ directly, never through callFunction at all,
+    // so this scan must run here too.
+    for (const auto& item : program.items)
+    {
+        if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
+        {
+            collectAddressTakenNames(*assignment, currentAddressTakenNames_);
+        }
+        else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
+        {
+            collectAddressTakenNames(*exprStmt, currentAddressTakenNames_);
         }
     }
 
@@ -1090,6 +1160,14 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         {
             env.assign(assignment->name, std::move(value));
         }
+        else if (currentAddressTakenNames_.contains(assignment->name))
+        {
+            // `&name` (see docs/language/0019-unsafe.md) - a genuinely new binding whose address
+            // is taken somewhere in this function/top-level script gets a boxed cell instead of a
+            // plain value, so a PointerInstance can alias it (see AddressOfExpr's own evaluate
+            // case).
+            env.defineBoxed(assignment->name, std::move(value));
+        }
         else
         {
             env.define(assignment->name, std::move(value));
@@ -1153,6 +1231,24 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         }
         (*indexable->elements)[static_cast<std::size_t>(indexValue)] =
             evaluate(*indexAssign->value, env);
+        return;
+    }
+
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        const Value pointerValue = evaluate(*derefAssign->pointer, env);
+        const auto* pointer = std::get_if<std::shared_ptr<PointerInstance>>(&pointerValue);
+        if (!pointer)
+        {
+            throw std::runtime_error("'*' requires a pointer value");
+        }
+        auto& arena = *(*pointer)->arena;
+        const auto offset = (*pointer)->offset;
+        if (offset < 0 || static_cast<std::size_t>(offset) >= arena.size())
+        {
+            throw std::runtime_error("dereferenced pointer is out of bounds");
+        }
+        arena[static_cast<std::size_t>(offset)] = evaluate(*derefAssign->value, env);
         return;
     }
 
@@ -1359,6 +1455,44 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         }
     }
 
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        // `unsafe` is purely a TypeChecker-time gate (see docs/language/0019-unsafe.md) - the
+        // interpreter lowers it identically to a bare block.
+        return evaluate(*unsafeBlock->body, env);
+    }
+
+    if (const auto* addressOf = dynamic_cast<const AddressOfExpr*>(&expr))
+    {
+        // TypeChecker guarantees a NameExpr operand, already bound via defineBoxed by the time
+        // this runs (callFunction/run's own address-taken scan, computed before either ever
+        // evaluates a single statement, guarantees this).
+        const auto* name = static_cast<const NameExpr*>(addressOf->operand.get());
+        auto pointer = std::make_shared<PointerInstance>();
+        pointer->arena = env.boxedCellOf(name->name);
+        pointer->offset = 0;
+        // elementAxeaType left empty - only ever consulted by malloc's own byte-size math (see
+        // PointerInstance's own comment); a &-produced pointer never goes through malloc.
+        return Value{pointer};
+    }
+
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        const Value pointerValue = evaluate(*deref->operand, env);
+        const auto* pointer = std::get_if<std::shared_ptr<PointerInstance>>(&pointerValue);
+        if (!pointer)
+        {
+            throw std::runtime_error("'*' requires a pointer value");
+        }
+        const auto& arena = *(*pointer)->arena;
+        const auto offset = (*pointer)->offset;
+        if (offset < 0 || static_cast<std::size_t>(offset) >= arena.size())
+        {
+            throw std::runtime_error("dereferenced pointer is out of bounds");
+        }
+        return arena[static_cast<std::size_t>(offset)];
+    }
+
     if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
     {
         Environment blockEnv(&env);
@@ -1557,10 +1691,30 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // representation is already std::shared_ptr-backed, so
         // a second handle to the same instance is exactly what returning the same shared_ptr
         // gives; no separate refcount-bump logic is needed here the way the compiled backend's
-        // own IrRetain-based .clone() needs.
+        // own IrRetain-based .clone() needs. Shared<T> has no runtime representation of its own
+        // in this interpreter though (ShareExpr's own evaluate case just above is a pure no-op -
+        // see its comment) - a real user-declared `clone` method (e.g. List<T>'s own real,
+        // deep-copying one) is the only way to tell the two apart. A real, previously-
+        // undiscovered bug found while adding List<T>.clone(): this shortcut fired unconditionally
+        // for *any* struct's own method literally named "clone", silently bypassing the real
+        // method's own body entirely and returning the exact same shared_ptr as the receiver
+        // (making the "clone" alias its own source, the opposite of what a real clone method
+        // does) - harmless before now only because nothing had ever declared an ordinary struct
+        // method named "clone". Checks functions_ first and only takes this shortcut when no
+        // such method exists; otherwise falls through to the general struct method dispatch
+        // below, the same precedence every other builtin-collection method name in this file
+        // already establishes once a real struct method of that same name exists (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/.../PriorityQueue<T> port
+        // follow-up).
         if (methodCall->method == "clone")
         {
-            return objectValue;
+            const auto* structInstance = std::get_if<std::shared_ptr<StructInstance>>(&objectValue);
+            const bool hasRealCloneMethod =
+                structInstance && functions_.contains((*structInstance)->typeName + ".clone");
+            if (!hasRealCloneMethod)
+            {
+                return objectValue;
+            }
         }
 
         // `.parse<T>()` (see docs/language/0046-generic-methods.md and
@@ -2139,6 +2293,29 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             throw std::runtime_error("no such method: " + methodCall->method);
         }
 
+        // General method-call dispatch for struct types (see docs/language/0006-generics.md's
+        // own generic-methods follow-up) - the exact same three-line "look up TypeName.method
+        // in functions_, bind self, callFunction" shape already proven working in
+        // tryFormatStructWithDisplay (this file, Display's own bespoke dispatch), generalized
+        // here into the ordinary method-call path instead of staying duplicated. `self` is
+        // passed by shared_ptr - real aliasing, so a mutating method's effects are observed by
+        // the caller, matching this codebase's existing reference semantics for structs.
+        if (const auto* instance = std::get_if<std::shared_ptr<StructInstance>>(&objectValue))
+        {
+            if (const auto it = functions_.find((*instance)->typeName + "." + methodCall->method);
+                it != functions_.end() && !it->second->params.empty())
+            {
+                std::vector<Value> args;
+                args.reserve(methodCall->arguments.size() + 1);
+                args.push_back(Value{*instance});
+                for (const auto& argument : methodCall->arguments)
+                {
+                    args.push_back(evaluate(*argument, env));
+                }
+                return callFunction(*it->second, std::move(args));
+            }
+        }
+
         throw std::runtime_error("no such method '" + methodCall->method + "' on this value");
     }
 
@@ -2356,34 +2533,9 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return instance;
     }
 
-    if (dynamic_cast<const ListNewExpr*>(&expr))
-    {
-        return std::make_shared<ListInstance>();
-    }
-
     if (dynamic_cast<const LinkedListNewExpr*>(&expr))
     {
         return std::make_shared<LinkedListInstance>();
-    }
-
-    if (dynamic_cast<const DequeNewExpr*>(&expr))
-    {
-        return std::make_shared<DequeInstance>();
-    }
-
-    if (dynamic_cast<const QueueNewExpr*>(&expr))
-    {
-        return std::make_shared<QueueInstance>();
-    }
-
-    if (dynamic_cast<const PriorityQueueNewExpr*>(&expr))
-    {
-        return std::make_shared<PriorityQueueInstance>();
-    }
-
-    if (dynamic_cast<const StackNewExpr*>(&expr))
-    {
-        return std::make_shared<StackInstance>();
     }
 
     if (dynamic_cast<const MapNewExpr*>(&expr))
@@ -2539,12 +2691,26 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             // checking only `left` is enough (mirrors ValueLess's own
             // "check one side" reasoning below).
             case TokenKind::Plus:
+                // `ptr + i` (see docs/language/0019-unsafe.md) - a new PointerInstance sharing
+                // the same arena (a cheap shared_ptr copy), offset adjusted.
+                if (const auto* lp = std::get_if<std::shared_ptr<PointerInstance>>(&left))
+                {
+                    auto result = std::make_shared<PointerInstance>(**lp);
+                    result->offset += asInt(right);
+                    return Value{result};
+                }
                 if (const auto* lf = std::get_if<double>(&left))
                 {
                     return *lf + std::get<double>(right);
                 }
                 return asInt(left) + asInt(right);
             case TokenKind::Minus:
+                if (const auto* lp = std::get_if<std::shared_ptr<PointerInstance>>(&left))
+                {
+                    auto result = std::make_shared<PointerInstance>(**lp);
+                    result->offset -= asInt(right);
+                    return Value{result};
+                }
                 if (const auto* lf = std::get_if<double>(&left))
                 {
                     return *lf - std::get<double>(right);
@@ -2603,6 +2769,34 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
     if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
     {
         const Value operand = evaluate(*cast->operand, env);
+        // Pointer-to-pointer cast (see docs/language/0006-generics.md's own List<T> port
+        // follow-up) - reinterprets the arena at the new element type. Only meaningful (and only
+        // ever exercised by this feature's own generated code) for a cast performed immediately
+        // after `malloc`, before any read/write through the old type: rebuilds a fresh arena
+        // sized to fit the same *total byte count* in the new element type, filled with default
+        // values - not a general "reinterpret live data" cast (there is no byte-level storage to
+        // actually reinterpret in this interpreter's typed-Value arena model).
+        if (const auto* pointer = std::get_if<std::shared_ptr<PointerInstance>>(&operand))
+        {
+            // `cast->targetType` is the full "*ElementType" text (leading star included, e.g.
+            // "*i32") - PointerInstance::elementAxeaType and axeaTypeByteSize both expect the
+            // bare element name, matching malloc's own identical `substr(1)` convention just
+            // above.
+            const std::string newElementType = cast->targetType.substr(1);
+            const int oldElementSize = axeaTypeByteSize((*pointer)->elementAxeaType);
+            const int newElementSize = axeaTypeByteSize(newElementType);
+            const std::int64_t totalBytes =
+                static_cast<std::int64_t>((*pointer)->arena->size()) * oldElementSize;
+            const std::int64_t newCount = totalBytes / newElementSize;
+            auto newArena = std::make_shared<std::vector<Value>>(
+                static_cast<std::size_t>(newCount), defaultValueForType(newElementType));
+            auto newPointer = std::make_shared<PointerInstance>();
+            newPointer->arena = newArena;
+            newPointer->elementAxeaType = newElementType;
+            newPointer->offset =
+                ((*pointer)->offset * oldElementSize) / std::max(newElementSize, 1);
+            return Value{newPointer};
+        }
         if (cast->targetType == "f64")
         {
             if (const auto* f = std::get_if<double>(&operand))
@@ -2617,6 +2811,11 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
             return static_cast<std::int64_t>(*f);
         }
         return asInt(operand);
+    }
+
+    if (const auto* sizeOf = dynamic_cast<const SizeOfExpr*>(&expr))
+    {
+        return static_cast<std::int64_t>(axeaTypeByteSize(sizeOf->typeName));
     }
 
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
@@ -2871,6 +3070,16 @@ void Interpreter::collectReferencedNames(const Expr& expr, std::unordered_set<st
         collectReferencedNames(*field->object, names);
         return;
     }
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        collectReferencedNames(*unsafeBlock->body, names);
+        return;
+    }
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        collectReferencedNames(*deref->operand, names);
+        return;
+    }
     if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
     {
         for (const auto& [fieldName, valueExpr] : literal->fields)
@@ -3015,6 +3224,12 @@ void Interpreter::collectReferencedNames(const Stmt& stmt, std::unordered_set<st
         collectReferencedNames(*indexAssign->value, names);
         return;
     }
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        collectReferencedNames(*derefAssign->pointer, names);
+        collectReferencedNames(*derefAssign->value, names);
+        return;
+    }
     if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
     {
         collectReferencedNames(*incDec->target, names);
@@ -3031,6 +3246,224 @@ void Interpreter::collectReferencedNames(const Stmt& stmt, std::unordered_set<st
         if (breakStmt->value)
         {
             collectReferencedNames(*breakStmt->value, names);
+        }
+        return;
+    }
+    // ContinueStmt: nothing to collect.
+}
+
+void Interpreter::collectAddressTakenNames(const Expr& expr, std::unordered_set<std::string>& names)
+{
+    if (const auto* addressOf = dynamic_cast<const AddressOfExpr*>(&expr))
+    {
+        // TypeChecker already guarantees the operand is a NameExpr by the time this runs.
+        names.insert(static_cast<const NameExpr*>(addressOf->operand.get())->name);
+        return; // NameExpr itself has no further sub-expressions to recurse into.
+    }
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
+    {
+        collectAddressTakenNames(*binary->left, names);
+        collectAddressTakenNames(*binary->right, names);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        collectAddressTakenNames(*cast->operand, names);
+        return;
+    }
+    if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
+    {
+        collectAddressTakenNames(*someExpr->value, names);
+        return;
+    }
+    if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))
+    {
+        collectAddressTakenNames(*okExpr->value, names);
+        return;
+    }
+    if (const auto* errExpr = dynamic_cast<const ErrExpr*>(&expr))
+    {
+        collectAddressTakenNames(*errExpr->value, names);
+        return;
+    }
+    if (const auto* tryExpr = dynamic_cast<const TryExpr*>(&expr))
+    {
+        collectAddressTakenNames(*tryExpr->operand, names);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
+    {
+        collectAddressTakenNames(*field->object, names);
+        return;
+    }
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        collectAddressTakenNames(*unsafeBlock->body, names);
+        return;
+    }
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        collectAddressTakenNames(*deref->operand, names);
+        return;
+    }
+    if (const auto* literal = dynamic_cast<const StructLiteralExpr*>(&expr))
+    {
+        for (const auto& [fieldName, valueExpr] : literal->fields)
+        {
+            collectAddressTakenNames(*valueExpr, names);
+        }
+        return;
+    }
+    if (const auto* arrayLiteral = dynamic_cast<const ArrayLiteralExpr*>(&expr))
+    {
+        for (const auto& element : arrayLiteral->elements)
+        {
+            collectAddressTakenNames(*element, names);
+        }
+        return;
+    }
+    if (const auto* index = dynamic_cast<const IndexExpr*>(&expr))
+    {
+        collectAddressTakenNames(*index->object, names);
+        collectAddressTakenNames(*index->index, names);
+        return;
+    }
+    if (const auto* interpolated = dynamic_cast<const InterpolatedStringExpr*>(&expr))
+    {
+        for (const auto& piece : interpolated->pieces)
+        {
+            if (piece.expr)
+            {
+                collectAddressTakenNames(*piece.expr, names);
+            }
+        }
+        return;
+    }
+    if (const auto* strSlice = dynamic_cast<const StrSliceExpr*>(&expr))
+    {
+        collectAddressTakenNames(*strSlice->object, names);
+        if (strSlice->start)
+        {
+            collectAddressTakenNames(*strSlice->start, names);
+        }
+        if (strSlice->end)
+        {
+            collectAddressTakenNames(*strSlice->end, names);
+        }
+        return;
+    }
+    if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
+    {
+        collectAddressTakenNames(*ifExpr->condition, names);
+        collectAddressTakenNames(*ifExpr->thenBranch, names);
+        collectAddressTakenNames(*ifExpr->elseBranch, names);
+        return;
+    }
+    if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+    {
+        collectAddressTakenNames(*matchExpr->scrutinee, names);
+        for (const auto& arm : matchExpr->arms)
+        {
+            collectAddressTakenNames(*arm.body, names);
+        }
+        return;
+    }
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(&expr))
+    {
+        collectAddressTakenNames(*loopExpr->body, names);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+    {
+        for (const auto& statement : block->statements)
+        {
+            collectAddressTakenNames(*statement, names);
+        }
+        if (block->result)
+        {
+            collectAddressTakenNames(*block->result, names);
+        }
+        return;
+    }
+    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
+    {
+        for (const auto& argument : call->arguments)
+        {
+            collectAddressTakenNames(*argument, names);
+        }
+        return;
+    }
+    if (const auto* methodCall = dynamic_cast<const MethodCallExpr*>(&expr))
+    {
+        collectAddressTakenNames(*methodCall->object, names);
+        for (const auto& argument : methodCall->arguments)
+        {
+            collectAddressTakenNames(*argument, names);
+        }
+        return;
+    }
+    // ClosureExpr: deliberately not recursed into - '&' is rejected inside a closure body by
+    // TypeChecker's own insideClosureBody_ guard, so there is nothing to find in there.
+
+    // NameExpr (bare, not '&'-wrapped), IntegerExpr, Int64Expr, FloatExpr, BoolExpr, StringExpr,
+    // CharExpr: no address-of to collect.
+}
+
+void Interpreter::collectAddressTakenNames(const Stmt& stmt, std::unordered_set<std::string>& names)
+{
+    if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*assignment->value, names);
+        return;
+    }
+    if (const auto* returnStmt = dynamic_cast<const ReturnStmt*>(&stmt))
+    {
+        if (returnStmt->value)
+        {
+            collectAddressTakenNames(*returnStmt->value, names);
+        }
+        return;
+    }
+    if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*exprStmt->expr, names);
+        return;
+    }
+    if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*fieldAssign->object, names);
+        collectAddressTakenNames(*fieldAssign->value, names);
+        return;
+    }
+    if (const auto* indexAssign = dynamic_cast<const IndexAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*indexAssign->object, names);
+        collectAddressTakenNames(*indexAssign->index, names);
+        collectAddressTakenNames(*indexAssign->value, names);
+        return;
+    }
+    if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*derefAssign->pointer, names);
+        collectAddressTakenNames(*derefAssign->value, names);
+        return;
+    }
+    if (const auto* incDec = dynamic_cast<const IncDecStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*incDec->target, names);
+        return;
+    }
+    if (const auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt))
+    {
+        collectAddressTakenNames(*whileStmt->condition, names);
+        collectAddressTakenNames(*whileStmt->body, names);
+        return;
+    }
+    if (const auto* breakStmt = dynamic_cast<const BreakStmt*>(&stmt))
+    {
+        if (breakStmt->value)
+        {
+            collectAddressTakenNames(*breakStmt->value, names);
         }
         return;
     }
@@ -3102,10 +3535,29 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
         throw std::runtime_error("wrong number of arguments to " + decl.name);
     }
 
+    // `&name` (see docs/language/0019-unsafe.md) - save the caller's own set (mirrors
+    // TypeChecker::insideUnsafe_'s exact save/restore shape, just triggered by this call
+    // boundary instead of an unsafe-block boundary), install this function's own, restored
+    // before every return point below. ReturnSignal is always caught inside this same function
+    // (never propagates further), so a plain restore at each exit point is sufficient - no RAII
+    // guard needed, matching this codebase's existing simple save/restore convention (a genuine
+    // runtime error escaping uncaught aborts the whole interpretation regardless, exactly like
+    // the precedent this mirrors).
+    const std::unordered_set<std::string> callerAddressTakenNames = currentAddressTakenNames_;
+    currentAddressTakenNames_.clear();
+    collectAddressTakenNames(*decl.body, currentAddressTakenNames_);
+
     Environment env; // no parent: no closures over globals or other calls' locals
     for (std::size_t i = 0; i < decl.params.size(); ++i)
     {
-        env.define(decl.params[i].name, std::move(args[i]));
+        if (currentAddressTakenNames_.contains(decl.params[i].name))
+        {
+            env.defineBoxed(decl.params[i].name, std::move(args[i]));
+        }
+        else
+        {
+            env.define(decl.params[i].name, std::move(args[i]));
+        }
     }
 
     // Deliberately not the generic BlockExpr evaluation (which would return
@@ -3128,6 +3580,7 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
     }
     catch (ReturnSignal& signal)
     {
+        currentAddressTakenNames_ = callerAddressTakenNames;
         // Implicit union wrapping (see docs/language/0065-unions.md) - `return 5` from a
         // function declared `-> i32 | str` needs no wrapper syntax.
         if (decl.returnType)
@@ -3136,6 +3589,7 @@ Value Interpreter::callFunction(const FunctionDecl& decl, std::vector<Value> arg
         }
         return std::move(signal.value);
     }
+    currentAddressTakenNames_ = callerAddressTakenNames;
     return Value{std::monostate{}};
 }
 
@@ -3161,6 +3615,54 @@ Interpreter::tryFormatStructWithDisplay(const std::shared_ptr<StructInstance>& i
     args.push_back(Value{buffer});
     callFunction(*it->second, std::move(args));
     return buffer->data;
+}
+
+int Interpreter::axeaTypeByteSize(const std::string& axeaTypeName) const
+{
+    if (axeaTypeName == "i32" || axeaTypeName == "bool" || axeaTypeName == "char")
+    {
+        return 4;
+    }
+    if (axeaTypeName == "i64" || axeaTypeName == "f64")
+    {
+        return 8;
+    }
+    // A struct's own byte size (see docs/language/0006-generics.md's own List<T> port follow-up,
+    // consulted by sizeof<T>() and by pointer-to-pointer casts recomputing an arena's own element
+    // count) - the sum of each field's own byte size, recursively (a nested struct field is sized
+    // by the same recursive call, not just defaulted to 8 like the pointer/unknown fallback
+    // below).
+    if (const auto it = structs_.find(axeaTypeName); it != structs_.end())
+    {
+        int total = 0;
+        for (const auto& field : it->second->fields)
+        {
+            total += axeaTypeByteSize(field.type);
+        }
+        return total;
+    }
+    // A pointer-typed or otherwise not-yet-enumerated element defaults to a 64-bit address
+    // width - getting this wrong only affects arena sizing (malloc's own byte-count contract is
+    // entirely the programmer's responsibility, matching real C - see
+    // docs/language/0019-unsafe.md's own Semantics section).
+    return 8;
+}
+
+Value Interpreter::defaultValueForType(const std::string& axeaTypeName)
+{
+    if (axeaTypeName == "f64")
+    {
+        return Value{double{0.0}};
+    }
+    if (axeaTypeName == "bool")
+    {
+        return Value{false};
+    }
+    if (axeaTypeName == "char")
+    {
+        return Value{char32_t{0}};
+    }
+    return Value{std::int64_t{0}}; // i32/i64/anything else not yet enumerated
 }
 
 Value Interpreter::callExtern(const std::string& name, const std::vector<Value>& args)
@@ -3198,12 +3700,58 @@ Value Interpreter::callExtern(const std::string& name, const std::vector<Value>&
         const std::int64_t value = asInt(args.front());
         return value < 0 ? -value : value;
     }
+    // "malloc"/"free" (see docs/language/0019-unsafe.md) - unlike puts/abs above, these need the
+    // calling extern's own *declared* return type to know the pointee type (see
+    // PointerInstance's own comment on why "*T" is otherwise unconstrained).
+    if (name == "malloc")
+    {
+        if (args.size() != 1)
+        {
+            throw std::runtime_error("extern 'malloc' expects 1 argument");
+        }
+        const auto declIt = externDecls_.find(name);
+        if (declIt == externDecls_.end() || !declIt->second->returnType ||
+            declIt->second->returnType->empty() || declIt->second->returnType->front() != '*')
+        {
+            throw std::runtime_error(
+                "extern 'malloc' must declare a pointer return type (e.g. '-> *i32') to be "
+                "callable from interpreted code");
+        }
+        const std::string pointeeType = declIt->second->returnType->substr(1);
+        const std::int64_t byteCount = asInt(args.front());
+        const std::int64_t elementCount = byteCount / axeaTypeByteSize(pointeeType);
+        auto arena = std::make_shared<std::vector<Value>>(
+            static_cast<std::size_t>(elementCount), defaultValueForType(pointeeType));
+        auto pointer = std::make_shared<PointerInstance>();
+        pointer->arena = arena;
+        pointer->elementAxeaType = pointeeType;
+        pointer->offset = 0;
+        return Value{pointer};
+    }
+    if (name == "free")
+    {
+        if (args.size() != 1)
+        {
+            throw std::runtime_error("extern 'free' expects 1 argument");
+        }
+        if (!std::holds_alternative<std::shared_ptr<PointerInstance>>(args.front()))
+        {
+            throw std::runtime_error("extern 'free' expects a pointer argument");
+        }
+        // A deliberate no-op at the interpreter layer (see docs/language/0048-ffi.md's own
+        // puts/abs precedent for "match observable behavior, not literal implementation") - the
+        // arena is a std::shared_ptr, already reclaimed by ordinary C++ refcounting once every
+        // PointerInstance referencing it goes out of scope. Unlike the compiled backend, which
+        // really calls libc free() and can really dangle/double-free, there is no real address
+        // space here for either to be observable.
+        return Value{std::monostate{}};
+    }
     throw std::runtime_error("extern function '" + name +
                              "' has no interpreter implementation - only a small allowlist of "
                              "well-known libc functions is hand-implemented this phase");
 }
 
-const std::unordered_map<std::string, Value>& Interpreter::variables() const
+std::unordered_map<std::string, Value> Interpreter::variables() const
 {
     return globalEnv_.bindings();
 }

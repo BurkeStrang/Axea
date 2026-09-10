@@ -161,6 +161,25 @@ struct IndexAssignStmt final : Stmt
     std::unique_ptr<Expr> value;
 };
 
+// `*ptr = value` (see docs/language/0019-unsafe.md) - `pointer` is the DerefExpr's own former
+// `operand` (Parser::parseBlock rewrites a parsed `DerefExpr` immediately followed by '=' into
+// this node, exactly like FieldExpr/IndexExpr are rewritten into FieldAssignStmt/IndexAssignStmt
+// today), legal only lexically inside an `unsafe { }` block. Deliberately NOT wired into
+// CapabilityChecker's write-capability-raising inference (see that file's own comment at its
+// stmt-walking dispatch) - `*T` does not participate in the existing safe-reference capability
+// model at all.
+struct DerefAssignStmt final : Stmt
+{
+    DerefAssignStmt(std::unique_ptr<Expr> pointer, std::unique_ptr<Expr> value)
+        : pointer(std::move(pointer)),
+          value(std::move(value))
+    {
+    }
+
+    std::unique_ptr<Expr> pointer;
+    std::unique_ptr<Expr> value;
+};
+
 // `target++` / `target--`, statement-only. `target` is a NameExpr or a
 // FieldExpr (validated by the parser at construction).
 struct IncDecStmt final : Stmt
@@ -236,6 +255,11 @@ struct FunctionDecl final : Stmt
     // Set by Parser::parseItem, not by parseFunctionDecl itself - `pub` is consumed one level up,
     // before dispatching to whichever kind of declaration follows it.
     bool isPublic = false;
+    // `name<T, U>(...)` (see docs/language/0006-generics.md's own List<T> port follow-up) - empty
+    // for every ordinary, non-generic function. Mirrors StructDecl/ImplDecl's own typeParams:
+    // the raw template is never itself registered/checked/compiled - only
+    // GenericMonomorphizer's synthesized, concrete-per-call-site clones are.
+    std::vector<std::string> typeParams;
 };
 
 // `trait Name { format(self, buf: Buffer)  ... }` (see
@@ -274,9 +298,15 @@ struct TraitDecl final : Stmt
 // loop.
 struct ImplDecl final : Stmt
 {
-    std::string traitName;
+    std::string traitName; // empty for an inherent impl (no trait, no `for`) - see parseImplDecl
     std::string typeName;
     std::vector<std::unique_ptr<FunctionDecl>> methods;
+    // `impl<T, U> Name<T, U> { ... }` (see docs/language/0006-generics.md) - empty for a
+    // non-generic impl. GenericMonomorphizer clones/substitutes this block's methods per
+    // concrete instantiation of the matching generic struct, the same way it already clones
+    // StructDecl fields; every other pass skips an ImplDecl with non-empty typeParams, mirroring
+    // how StructDecl's own generic templates are left untouched pre-monomorphization.
+    std::vector<std::string> typeParams;
 };
 
 // `extern c name(params) [-> returnType]` (see docs/language/0048-ffi.md) -

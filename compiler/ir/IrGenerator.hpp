@@ -59,38 +59,25 @@ public:
     void defineIsSet(const std::string& name, bool isSet);
     std::optional<bool> findIsSet(const std::string& name) const;
 
-    // Same reasoning as defineIsSet/findIsSet above, but for List<T> vs
-    // Stack<T> (true = Stack, false = List) - needed only to disambiguate
-    // `.push`/`.pop`, the two method names List<T> and Stack<T> share (see
-    // docs/language/0035-stacks.md and IrGenerator::isStackExpr). A separate
-    // map, not a reuse of isSetKinds_ above: a name is never simultaneously
-    // a candidate for both disambiguations.
-    void defineIsStack(const std::string& name, bool isStack);
-    std::optional<bool> findIsStack(const std::string& name) const;
+    // List<T>, Stack<T>, and PriorityQueue<T> are all real, user-declared generic structs now
+    // (see docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port
+    // follow-up) - there is no defineIsStack/findIsStack/defineIsPriorityQueue/
+    // findIsPriorityQueue left here; `push`/`pop`/`peek` are reached via the general struct
+    // method dispatch now, with no remaining disambiguation resolver needed at all.
 
-    // Same reasoning again, for LinkedList<T> vs Deque<T> (true = Deque,
-    // false = LinkedList) - needed only to disambiguate push_front/
-    // push_back/pop_front/pop_back, the method names LinkedList<T> and
-    // Deque<T> share (see docs/language/0037-deques.md and
-    // IrGenerator::isDequeExpr). A separate map again, for the same reason
-    // isStackKinds_ isn't folded into isSetKinds_.
-    void defineIsDeque(const std::string& name, bool isDeque);
-    std::optional<bool> findIsDeque(const std::string& name) const;
-
-    // Same reasoning again, for List<T>/Stack<T> vs PriorityQueue<T> (true =
-    // PriorityQueue) - needed only to disambiguate push/pop/peek, the method
-    // names PriorityQueue<T> shares with List<T>/Stack<T> (see
-    // docs/language/0039-priority-queues.md and
-    // IrGenerator::isPriorityQueueExpr). A separate map again, for the same
-    // reason isStackKinds_ isn't folded into isSetKinds_.
-    void defineIsPriorityQueue(const std::string& name, bool isPriorityQueue);
-    std::optional<bool> findIsPriorityQueue(const std::string& name) const;
+    // `push_front`/`push_back`/`pop_front`/`pop_back` no longer need a disambiguation resolver
+    // at all - Deque<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up), reached
+    // via the general struct method dispatch, so LinkedList<T> (docs/language/0036-linked-lists.md)
+    // is the sole remaining collection using those method names - there is no
+    // defineIsQueue/findIsQueue left here (Queue<T> itself was never part of this ambiguity: its
+    // own `enqueue`/`dequeue` method names are unique, needing no resolver of their own either).
 
     // Same reasoning again, for Map<K,V>/Set<T> vs SortedMap<K,V> (true =
     // SortedMap) - needed only to disambiguate set/get/contains/remove, the
     // method names SortedMap<K,V> shares with Map<K,V>/Set<T> (see
     // docs/language/0040-sorted-maps.md and IrGenerator::isSortedMapExpr).
-    // A separate map again, for the same reason isStackKinds_ isn't folded
+    // A separate map again, for the same reason isSortedMapKinds_ isn't folded
     // into isSetKinds_.
     void defineIsSortedMap(const std::string& name, bool isSortedMap);
     std::optional<bool> findIsSortedMap(const std::string& name) const;
@@ -133,9 +120,6 @@ private:
     std::unordered_map<std::string, int> registers_;
     std::unordered_map<std::string, int> arrayLengths_;
     std::unordered_map<std::string, bool> isSetKinds_;
-    std::unordered_map<std::string, bool> isStackKinds_;
-    std::unordered_map<std::string, bool> isDequeKinds_;
-    std::unordered_map<std::string, bool> isPriorityQueueKinds_;
     std::unordered_map<std::string, bool> isSortedMapKinds_;
     std::unordered_map<std::string, bool> isSortedSetKinds_;
     std::unordered_map<std::string, bool> isBufferKinds_;
@@ -210,6 +194,18 @@ private:
         // exactly the set of struct/enum-typed bindings live at that exact source position. See
         // IrGenerator::emitReturn, the one consumer.
         std::vector<std::vector<int>*>* liveScopeStack = nullptr;
+        // `&name` (see docs/language/0019-unsafe.md) - every local/param name whose address is
+        // taken anywhere in this function's own body (or, for the top-level Context built by
+        // generate(), anywhere in the top-level script) - computed once, up front, by
+        // collectAddressTakenNames, and consulted by readLocal/defineOrAssignLocal to decide
+        // whether a name needs a real IrAlloca-backed stack slot (loaded/stored via IrDeref/
+        // IrDerefAssign) instead of the ordinary pure-SSA IrScope register-rebinding every other
+        // local uses. A pointer to one stack object owned by the enclosing generateFunction/
+        // generate() call, shared by pointer identity across nested Context copies exactly like
+        // `registerCount`/`liveScopeStack` already are. Null for generateClosureTrampoline/
+        // generateFunctionRefTrampoline - `&name` is not supported inside a closure body this
+        // phase (see TypeChecker's own insideClosureBody_ guard), so there is nothing to compute.
+        const std::unordered_set<std::string>* addressTakenNames = nullptr;
     };
 
     void registerStructs(const Program& program);
@@ -309,6 +305,23 @@ private:
     // TypeChecker already rejects break/continue outside a loop).
     std::vector<std::pair<int, int>> currentLoopCarriedDiff(IrScope& scope) const;
 
+    // Corrects docs/language/0021-axea-ir.md's own originally-documented "Bug 2" limitation
+    // ("not full dataflow merging (no phi nodes)... the code after [the branches] never sees
+    // their hypothetical mutations") - accurate when that doc was written (this IR was only ever
+    // printed for `ax ir`, never executed), but wrong now that this same IR drives real LLVM
+    // codegen: a name reassigned inside an if/match-arm/`?`/`.unwrap_or` branch (barrier-scoped,
+    // so the mutation never reaches `scope` on its own - see IrScope::assign's own comment) must
+    // still be visible to code after the branch, exactly like a loop-carried variable already is.
+    // Diffs `scope`'s own pre-branch snapshot against `thenScope`'s/`elseScope`'s own
+    // (barrier-oblivious) snapshots; for every name either branch rebound to a different
+    // register, allocates a fresh destination register, records
+    // (thenReg, elseReg, destReg) onto `branch.carriedMerges` for LlvmIrEmitter::emitBranch to
+    // reconcile via a real phi (mirroring thenValue/elseValue/dest's own identical mechanism,
+    // just generalized past the branch-expression's own result), and reassigns `scope` itself so
+    // subsequent code reads the merged value. A name neither branch touches needs no entry.
+    void mergeBranchScopes(IrScope& scope, const IrScope& thenScope, const IrScope& elseScope,
+                           IrBranch& branch, Context& ctx);
+
     int emit(Context& ctx, std::unique_ptr<IrInst> inst);
     void emitVoid(Context& ctx, std::unique_ptr<IrInst> inst);
     int freshRegister(Context& ctx);
@@ -391,54 +404,26 @@ private:
     std::optional<bool>
     isSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
-    // Best-effort resolution of whether a List/Stack-typed expression is
-    // specifically a Stack (true) or a List (false) - nullopt if it can't be
-    // determined. Needed only for `.push`/`.pop`, the two method names
-    // List<T> and Stack<T> share (`.peek` is unambiguous on its own - List
-    // has no peek - so it never needs this). A sibling resolver, not a
-    // generalization of isSetExpr itself, per this codebase's "each pass
-    // re-derives independently" convention - same best-effort shape:
-    // ListNewExpr/StackNewExpr literal, a List/Stack-typed function
-    // parameter, a call to a function with that return type, or a name
-    // already recorded in scope's parallel isStack map (populated by
-    // lowerStmt's AssignmentStmt case). See docs/language/0035-stacks.md.
-    std::optional<bool>
-    isStackExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+    // List<T>, Stack<T>, and PriorityQueue<T> are all real, user-declared generic structs now
+    // (see docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port
+    // follow-up) - there is no isStackExpr/isPriorityQueueExpr left here; `push`/`pop`/`peek`
+    // are reached via the general struct method dispatch, with no remaining disambiguation
+    // resolver needed at all.
 
-    // Best-effort resolution of whether a LinkedList/Deque-typed expression
-    // is specifically a Deque (true) or a LinkedList (false) - nullopt if it
-    // can't be determined. Needed only for push_front/push_back/pop_front/
-    // pop_back, the method names LinkedList<T> and Deque<T> share (see
-    // docs/language/0037-deques.md). A sibling resolver again, mirroring
-    // isStackExpr's exact shape: LinkedListNewExpr/DequeNewExpr literal, a
-    // LinkedList/Deque-typed function parameter, a call to a function with
-    // that return type, or a name already recorded in scope's parallel
-    // isDeque map (populated by lowerStmt's AssignmentStmt case).
-    std::optional<bool>
-    isDequeExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
-
-    // Best-effort resolution of whether a List/Stack/PriorityQueue-typed
-    // expression is specifically a PriorityQueue (true) or not (false) -
-    // nullopt if it can't be determined. Needed for push/pop/peek, the
-    // three method names PriorityQueue<T> shares with List<T>/Stack<T> (see
-    // docs/language/0039-priority-queues.md) - the first three-way
-    // collision in this codebase. A sibling resolver again, not a
-    // generalization of isStackExpr - checked *before* isStackExpr at every
-    // call site that needs it, mirroring isStackExpr's exact shape: a
-    // literal PriorityQueueNewExpr vs. StackNewExpr/ListNewExpr, a
-    // PriorityQueue-typed function parameter (vs. Stack/List), a call to a
-    // function with that return type, or a name already recorded in scope's
-    // parallel isPriorityQueue map.
-    std::optional<bool>
-    isPriorityQueueExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+    // `push_front`/`push_back`/`pop_front`/`pop_back` need no disambiguation resolver at all
+    // anymore - Deque<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up), reached
+    // via the general struct method dispatch, so LinkedList<T> is the sole remaining collection
+    // using those method names - there is no isQueueExpr left here (Queue<T> itself was never
+    // part of this ambiguity: its own `enqueue`/`dequeue` method names are unique).
 
     // Best-effort resolution of whether a Map/Set/SortedMap-typed expression
     // is specifically a SortedMap (true) or not (false) - nullopt if it
     // can't be determined. Needed for set/get/contains/remove, the method
     // names SortedMap<K,V> shares with Map<K,V> (set/get/contains/remove)
     // and Set<T> (contains/remove) - see docs/language/0040-sorted-maps.md.
-    // A sibling resolver again, mirroring isStackExpr/isPriorityQueueExpr's
-    // exact shape: a literal SortedMapNewExpr vs. MapNewExpr/SetNewExpr, a
+    // A sibling resolver again, mirroring isSetExpr's exact shape: a literal
+    // SortedMapNewExpr vs. MapNewExpr/SetNewExpr, a
     // SortedMap-typed function parameter (vs. Map/Set), a call to a
     // function with that return type, or a name already recorded in
     // scope's parallel isSortedMap map.
@@ -461,7 +446,7 @@ private:
     // Buffer shares with String (see docs/language/0043-buffer.md);
     // "append_line"/"clear"/"reserve"/"finish" are all unique names nothing
     // else uses, so they need no resolver. A sibling resolver again,
-    // mirroring isStackExpr's exact shape.
+    // mirroring isSetExpr's exact shape.
     std::optional<bool>
     isBufferExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
@@ -515,6 +500,24 @@ private:
     // CapabilityChecker::collectReferencedNames's own comment for why this is safe).
     static void collectReferencedNames(const Expr& expr, std::unordered_set<std::string>& names);
     static void collectReferencedNames(const Stmt& stmt, std::unordered_set<std::string>& names);
+    // `&name` (see docs/language/0019-unsafe.md) - collects every NameExpr wrapped directly in an
+    // AddressOfExpr anywhere in `expr`'s own subtree (own, separate implementation from the
+    // Interpreter's identical walker - this codebase's established "each pass reimplements what
+    // it needs" convention, same as collectReferencedNames above). Deliberately does not recurse
+    // into a ClosureExpr's own body - `&name` inside a closure is rejected outright by
+    // TypeChecker's own insideClosureBody_ guard, so there's nothing to find in there.
+    static void collectAddressTakenNames(const Expr& expr, std::unordered_set<std::string>& names);
+    static void collectAddressTakenNames(const Stmt& stmt, std::unordered_set<std::string>& names);
+    // Consults ctx.addressTakenNames - a bare IrScope::find for an ordinary local, or an IrDeref
+    // off the name's own alloca'd slot register for an address-taken one. Used everywhere a plain
+    // local is read (NameExpr, IncDecStmt).
+    int readLocal(const std::string& name, IrScope& scope, Context& ctx);
+    // Consults ctx.addressTakenNames - an ordinary IrScope::define/assign for a plain local, or an
+    // IrAlloca (first definition)/IrDerefAssign (reassignment) off the name's own slot for an
+    // address-taken one. Used everywhere a plain local is written (AssignmentStmt, IncDecStmt,
+    // generateFunction's own per-param loop).
+    void defineOrAssignLocal(const std::string& name, int value, bool forceDefine, IrScope& scope,
+                             Context& ctx);
     // If `declaredTypeName` is a union and `valueReg`'s own resolved simple type (via
     // simpleTypeOfExpr on `valueExpr`) is one of its alternatives, emits an IrStructNew wrapping
     // `valueReg` into that alternative's own tagged variant and returns the new register;

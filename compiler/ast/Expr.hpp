@@ -94,6 +94,60 @@ struct CastExpr final : Expr
     std::string targetType;
 };
 
+// `*ptrExpr` (see docs/language/0019-unsafe.md) - dereferences a raw pointer, legal only
+// lexically inside an `unsafe { }` block (checked by TypeChecker's own insideUnsafe flag, not
+// here - this node is built unconditionally by the parser regardless of context, exactly like
+// FieldExpr/IndexExpr are). `operand`'s own checked type must be `*T` for some T; this
+// expression's own type is T. Also used, via a matching Parser::parseBlock dynamic_cast branch
+// (mirroring FieldAssignStmt/IndexAssignStmt's own precedent), as an assignment target -
+// producing a DerefAssignStmt (Stmt.hpp) rather than reusing this node when `*ptr = value` is
+// seen, the same "shared read shape, distinct write statement" split every other assignable
+// expression kind (FieldExpr/IndexExpr) already has.
+struct DerefExpr final : Expr
+{
+    explicit DerefExpr(std::unique_ptr<Expr> operand)
+        : operand(std::move(operand))
+    {
+    }
+
+    std::unique_ptr<Expr> operand;
+};
+
+// `&name` (see docs/language/0019-unsafe.md) - takes the address of an existing local variable,
+// producing a `*T`. Legal unconditionally, *outside* unsafe too (creating a pointer is safe; only
+// using one isn't) - unlike DerefExpr, TypeChecker's checkExpr case for this node never consults
+// insideUnsafe_. `operand` is built unconditionally by the parser for any primary expression
+// following `&` (mirrors DerefExpr's own "parser permissive, checker restrictive" split); this
+// phase, TypeChecker rejects anything but a NameExpr operand (struct fields/array elements/a
+// dereferenced pointer, and anything inside a closure body, are all deferred - see
+// docs/language/0019-unsafe.md's own Type Rules section for the eventual full scope).
+struct AddressOfExpr final : Expr
+{
+    explicit AddressOfExpr(std::unique_ptr<Expr> operand)
+        : operand(std::move(operand))
+    {
+    }
+
+    std::unique_ptr<Expr> operand;
+};
+
+// `unsafe { ... }` (see docs/language/0019-unsafe.md) - a plain block expression, like `if`/
+// `loop` bodies already are, under a new leading keyword. `body` is always a BlockExpr (built by
+// Parser::parseBlock verbatim, the same "reuse the existing block-expression shape" convention
+// LoopExpr's own body already uses). Purely a checking-time gate: TypeChecker sets its own
+// insideUnsafe flag true while checking `body` and restores it after; every other pass
+// (Interpreter, IrGenerator, LlvmIrEmitter) lowers this identically to a bare block, since
+// `unsafe` emits no different code than the equivalent operation would if the check didn't exist.
+struct UnsafeBlockExpr final : Expr
+{
+    explicit UnsafeBlockExpr(std::unique_ptr<Expr> body)
+        : body(std::move(body))
+    {
+    }
+
+    std::unique_ptr<Expr> body; // always a BlockExpr
+};
+
 // `Some(value)` (see docs/language/0052-optional.md) - wraps `value` into a
 // present `Optional<T>`; T is synthesized bottom-up from `value`'s own
 // checked type (unlike NoneExpr below, never needs surrounding context).
@@ -333,14 +387,23 @@ struct LoopExpr final : Expr
 
 struct CallExpr final : Expr
 {
-    CallExpr(std::string callee, std::vector<std::unique_ptr<Expr>> arguments)
+    CallExpr(std::string callee,
+             std::vector<std::unique_ptr<Expr>> arguments,
+             std::string typeArgument = "")
         : callee(std::move(callee)),
-          arguments(std::move(arguments))
+          arguments(std::move(arguments)),
+          typeArgument(std::move(typeArgument))
     {
     }
 
     std::string callee;
     std::vector<std::unique_ptr<Expr>> arguments;
+    // `name<Type>(args)` (see docs/language/0006-generics.md's own List<T> port follow-up,
+    // mirrors MethodCallExpr::typeArgument) - empty for an ordinary call; non-empty only for an
+    // explicit call-site type argument to a generic top-level function. One type argument is
+    // enough for this phase's own single-type-param needs (matches `.parse<T>()`'s own "ship the
+    // concrete use case" precedent).
+    std::string typeArgument;
 };
 
 struct FieldExpr final : Expr
@@ -423,19 +486,6 @@ struct StrSliceExpr final : Expr
     std::unique_ptr<Expr> end;   // null => the object's own runtime length
 };
 
-// `List<elem>()` - always empty parens this phase (construction only, no
-// initial elements). `elementType` is a single identifier, same one-level
-// restriction arrays/slices already have. See docs/language/0033-lists.md.
-struct ListNewExpr final : Expr
-{
-    explicit ListNewExpr(std::string elementType)
-        : elementType(std::move(elementType))
-    {
-    }
-
-    std::string elementType;
-};
-
 // `object.method(args)` - e.g. `list.push(x)`, `list.pop()`. Distinct from
 // FieldExpr (`object.field`, no parens): parsePostfix decides which based on
 // whether '(' follows the identifier after '.'. "push"/"pop" are the only
@@ -472,7 +522,7 @@ struct MethodCallExpr final : Expr
 
 // `Map<key,value>()` - always empty parens (construction only, no initial
 // entries). The parser accepts any type syntactically here (mirrors
-// ListNewExpr/parseTypeName's own "parser stays general" convention) - only
+// SetNewExpr/parseTypeName's own "parser stays general" convention) - only
 // TypeChecker rejects anything but i32/i32 this phase, with a clear error
 // (see docs/language/0034-maps-and-sets.md), rather than the parser silently
 // discarding what was actually written.
@@ -516,23 +566,9 @@ struct SetNewExpr final : Expr
     std::string elementType;
 };
 
-// `Stack<elem>()` - always empty parens (construction only). A LIFO
-// collection backed internally by List<T>'s own machinery (see
-// docs/language/0035-stacks.md) - fielded identically to ListNewExpr, same
-// one-level element-type restriction.
-struct StackNewExpr final : Expr
-{
-    explicit StackNewExpr(std::string elementType)
-        : elementType(std::move(elementType))
-    {
-    }
-
-    std::string elementType;
-};
-
 // `LinkedList<elem>()` - always empty parens (construction only). A doubly
 // linked, node-based collection (see docs/language/0036-linked-lists.md) -
-// fielded identically to ListNewExpr/StackNewExpr, same one-level
+// fielded identically to SetNewExpr, same one-level
 // element-type restriction.
 struct LinkedListNewExpr final : Expr
 {
@@ -544,37 +580,9 @@ struct LinkedListNewExpr final : Expr
     std::string elementType;
 };
 
-// `Deque<elem>()` - always empty parens (construction only). A growable
-// array with a `start` offset (see docs/language/0037-deques.md) - fielded
-// identically to ListNewExpr/StackNewExpr/LinkedListNewExpr, same one-level
-// element-type restriction.
-struct DequeNewExpr final : Expr
-{
-    explicit DequeNewExpr(std::string elementType)
-        : elementType(std::move(elementType))
-    {
-    }
-
-    std::string elementType;
-};
-
-// `Queue<elem>()` - always empty parens (construction only). A FIFO
-// collection backed internally by Deque<T>'s own machinery (see
-// docs/language/0038-queues.md) - fielded identically to DequeNewExpr, same
-// one-level element-type restriction.
-struct QueueNewExpr final : Expr
-{
-    explicit QueueNewExpr(std::string elementType)
-        : elementType(std::move(elementType))
-    {
-    }
-
-    std::string elementType;
-};
-
 // `PriorityQueue<elem>()` - always empty parens (construction only). A real
 // binary heap (see docs/language/0039-priority-queues.md) - fielded
-// identically to StackNewExpr; `elementType` is restricted to `i32` by
+// identically to SetNewExpr; `elementType` is restricted to `i32` by
 // TypeChecker (the only orderable type in this language today), not by the
 // parser here.
 struct PriorityQueueNewExpr final : Expr
@@ -623,9 +631,24 @@ struct StringNewExpr final : Expr
 // `Buffer()` - always empty parens (construction only, no arguments and no
 // generic type parameter - see docs/language/0043-buffer.md). Axea's own
 // mutable, amortized-growth text-construction type; fielded identically to
-// every zero-argument collection constructor (ListNewExpr, SetNewExpr,
+// every zero-argument collection constructor (SetNewExpr, LinkedListNewExpr,
 // ...) despite Buffer itself not being generic, since - unlike
 // StringNewExpr - it takes no value to copy either.
 struct BufferNewExpr final : Expr
 {
+};
+
+// `sizeof<TypeName>()` - a builtin, not a real callable function (recognized by literal text,
+// like "String"/"Buffer" are - see docs/language/0006-generics.md's own List<T> port follow-up),
+// returning `typeName`'s byte size as `i64`. `typeName` may be a primitive, a struct, or -
+// post-monomorphization - a mangled generic instantiation ("Box$i32"); GenericMonomorphizer
+// substitutes a bare type-parameter reference here exactly like MethodCallExpr::typeArgument.
+struct SizeOfExpr final : Expr
+{
+    explicit SizeOfExpr(std::string typeName)
+        : typeName(std::move(typeName))
+    {
+    }
+
+    std::string typeName;
 };

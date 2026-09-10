@@ -41,6 +41,9 @@ private:
     // snapshot/restore mechanism anywhere and doesn't need one here). Only called with
     // current() == Identifier and peek() == Less already confirmed.
     bool looksLikeGenericStructLiteral() const;
+    // Identical scan, checking for '(' instead of '{' at the end - see
+    // looksLikeGenericStructLiteral's own comment.
+    bool looksLikeGenericCall() const;
     std::unique_ptr<Stmt> parseFunctionDecl();
     // `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure literal,
     // same (params, optional return type, body) shape as parseFunctionDecl, as an expression.
@@ -74,7 +77,8 @@ private:
     // parseFunctionDecl (params/optional return type/body), except the
     // name is mangled to `typeName + "." + methodName` and the first
     // param may be a bare `self`.
-    std::unique_ptr<FunctionDecl> parseImplMethod(const std::string& typeName);
+    std::unique_ptr<FunctionDecl> parseImplMethod(const std::string& typeName,
+                                                   const std::string& selfType);
     // `enum Name { Variant(T1, T2)  Other  ... }` (see docs/language/0064-enums.md) - variants
     // are whitespace-separated (no commas between them, same convention struct fields already
     // use), each optionally followed by a parenthesized, comma-separated positional payload
@@ -119,6 +123,7 @@ private:
     std::unique_ptr<Expr> parseBlock();
     std::unique_ptr<Expr> parseIfExpr();
     std::unique_ptr<Expr> parseLoopExpr();
+    std::unique_ptr<Expr> parseUnsafeExpr();
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> parseStructLiteralFields();
 
     std::unique_ptr<Expr> parseExpression(int minPrecedence = 0, bool allowStructLiteral = true);

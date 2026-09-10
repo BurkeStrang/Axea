@@ -157,6 +157,17 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     {
         return "void";
     }
+    if (!axeaTypeName.empty() && axeaTypeName.front() == '*')
+    {
+        // `*T` (see docs/language/0019-unsafe.md) - a bare LLVM pointer, one level deeper than
+        // llvmType(T)'s own representation. Note: for a struct pointee (already itself
+        // represented as "%StructName*" - see this backend's own by-reference struct
+        // convention), this produces "%StructName**" - a genuinely correct double-pointer, but
+        // this milestone's own codegen helpers (isPointerType/pointerElementType below) only
+        // recognize a *primitive*-pointee pointer; a struct-pointee `*T` type-checks fine (any
+        // concrete T) but its deref/arithmetic codegen is untested and out of scope this phase.
+        return llvmType(axeaTypeName.substr(1)) + "*";
+    }
     if (!axeaTypeName.empty() && axeaTypeName.front() == '[')
     {
         // "[elem;N]" - the canonical, no-spaces form Parser::parseTypeName
@@ -266,16 +277,13 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     }
     if (axeaTypeName.starts_with("Stack<"))
     {
-        // "Stack<elem>" - a LIFO collection backed internally by List<T>'s
-        // own machinery (see docs/language/0035-stacks.md), so this
-        // produces the *exact same text* the List<elem> branch above would
-        // - genuinely the same LLVM type, not merely a similarly-shaped one.
-        // The distinction between List<T> and Stack<T> lives entirely at
-        // the Axea/IR level (TypeKind::Stack, IrStackNew/Push/Pop/Peek);
-        // nothing downstream of a bare LLVM type string needs to (or can)
-        // tell them apart, which is exactly why isListType's own existing
-        // checks (`.length`, top-level printing) already handle a Stack<T>
-        // value correctly with no changes at all.
+        // Vestigial: `Stack<T>` is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up and
+        // std/collections.ax) - a monomorphized instance reaches this function under its own
+        // mangled struct name, never as raw "Stack<...>" text, so this branch is believed
+        // unreachable in practice. Left in place (matching the identical "List<" branch just
+        // above, kept unchanged through List<T>'s own port) rather than deleted outright, since
+        // proving a negative here isn't worth the risk for a few harmless lines.
         const std::string elementName = axeaTypeName.substr(6, axeaTypeName.size() - 7);
         return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
@@ -337,41 +345,37 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
     }
     if (axeaTypeName.starts_with("Deque<"))
     {
-        // Deque<T> (see docs/language/0037-deques.md): a pointer to a small
-        // anonymous 3-field heap header {count, start, data} - no named
-        // type or monomorphization registration needed at all (unlike
-        // Map/Set/LinkedList above): its third field is a plain T*, not a
-        // self-referential entry pointer, so it can stay fully anonymous
-        // exactly like List<T>'s own 2-field header does.
+        // Vestigial: `Deque<T>` is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up and
+        // std/collections.ax) - a monomorphized instance reaches this function under its own
+        // mangled struct name, never as raw "Deque<...>" text, so this branch is believed
+        // unreachable in practice. Left in place (matching the identical "List<"/"Stack<"
+        // branches above, kept unchanged through those ports) rather than deleted outright,
+        // since proving a negative here isn't worth the risk for a few harmless lines.
         const std::string elementName = axeaTypeName.substr(6, axeaTypeName.size() - 7);
         return "{i32, i32, " + llvmType(elementName) + "*}*";
     }
     if (axeaTypeName.starts_with("Queue<"))
     {
-        // Queue<T> (see docs/language/0038-queues.md) - a FIFO collection
-        // backed internally by Deque<T>'s own machinery, so this produces
-        // the *exact same text* the Deque<elem> branch above would -
-        // genuinely the same LLVM type, not merely a similarly-shaped one
-        // (mirrors Stack<T>/List<T>'s own identical relationship). The
-        // distinction between Deque<T> and Queue<T> lives entirely at the
-        // Axea/IR level; isDequeType's own existing structural check already
+        // Queue<T> (see docs/language/0038-queues.md) - a FIFO collection using the same
+        // growable-array-with-a-start-offset header shape the retired Deque<T> intrinsic used to
+        // ("{i32, i32, " + llvmType(elementName) + "*}*") - genuinely the same LLVM type, not
+        // merely a similarly-shaped one. isDequeType's own existing structural check already
         // handles a Queue<T> value correctly with no changes at all.
         const std::string elementName = axeaTypeName.substr(6, axeaTypeName.size() - 7);
         return "{i32, i32, " + llvmType(elementName) + "*}*";
     }
     if (axeaTypeName.starts_with("PriorityQueue<"))
     {
-        // PriorityQueue<T> (see docs/language/0039-priority-queues.md): a
-        // real binary heap, but stored in the *exact same* three-field
-        // header List<T>/Stack<T> already use - "{i32, " +
-        // llvmType(elementName) + "*, i32}*" - genuinely the same LLVM
-        // type, not merely similarly shaped. The heap-vs-list/stack
-        // distinction lives entirely at the Axea/IR level
-        // (TypeKind::PriorityQueue, IrPriorityQueueNew/Push/Pop/Peek);
-        // isListType's own existing structural check already handles a
-        // PriorityQueue<T> value correctly for `.length` and top-level
-        // printing, no new predicate needed - the same free ride Stack<T>
-        // got before it.
+        // Vestigial, same reasoning as "Deque<"/"Queue<" just above: `PriorityQueue<T>` is a
+        // real, user-declared generic struct now (see docs/language/0006-generics.md's own
+        // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up and
+        // std/collections.ax), reaching this function under its own mangled struct name in
+        // practice, not raw "PriorityQueue<...>" text - left in place rather than deleted
+        // outright. Its header shape happens to be byte-identical to List<T>'s own
+        // ("{i32, " + llvmType(elementName) + "*, i32}*"), a coincidence of how it composes
+        // over `items: List<T>`, not a distinct representation this function needs to know
+        // about anymore.
         const std::string elementName = axeaTypeName.substr(14, axeaTypeName.size() - 15);
         return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
@@ -494,55 +498,6 @@ void LlvmIrEmitter::emitStrComparison(int axeaDest,
               << notLessRhs << ")\n";
     const int destReg = defineRegister(axeaDest, fctx);
     *fctx.out << "  %" << destReg << " = xor i1 %" << notLessReg << ", 1\n";
-}
-
-int LlvmIrEmitter::emitPriorityQueueCompare(const std::string& elementType,
-                                            const std::string& predicate,
-                                            const std::string& lhsRef,
-                                            const std::string& rhsRef,
-                                            FunctionContext& fctx)
-{
-    // Returns the freshly allocated destReg (rather than taking one as a
-    // parameter) for the same reason emitStrComparison above defines its
-    // own destReg last: LLVM requires unnamed registers in strictly
-    // increasing textual definition order, so a destReg the *caller*
-    // pre-allocated could end up numerically higher than an intermediate
-    // register (notLessReg below) this function still needs to allocate
-    // and define first.
-    if (elementType == "double")
-    {
-        // fcmp's own *ordered* predicate spelling ("o" + the same
-        // "lt"/"le" suffix `predicate` already carries, e.g. "slt" ->
-        // "olt") - icmp only ever accepts integer/pointer operands, never
-        // float (see docs/language/0005-type-system.md).
-        const int destReg = allocateRegister(fctx);
-        *fctx.out << "  %" << destReg << " = fcmp o" << predicate.substr(1) << " double " << lhsRef
-                  << ", " << rhsRef << "\n";
-        return destReg;
-    }
-    if (elementType != "i8*")
-    {
-        const int destReg = allocateRegister(fctx);
-        *fctx.out << "  %" << destReg << " = icmp " << predicate << " " << elementType << " "
-                  << lhsRef << ", " << rhsRef << "\n";
-        return destReg;
-    }
-    const std::string lessFn = registerOrderRuntime("str");
-    if (predicate == "slt")
-    {
-        const int destReg = allocateRegister(fctx);
-        *fctx.out << "  %" << destReg << " = call i1 " << lessFn << "(i8* " << lhsRef << ", i8* "
-                  << rhsRef << ")\n";
-        return destReg;
-    }
-    // "sle": lhs <= rhs iff not(rhs < lhs) - only a strict less-than
-    // primitive exists (see registerOrderRuntime).
-    const int notLessReg = allocateRegister(fctx);
-    *fctx.out << "  %" << notLessReg << " = call i1 " << lessFn << "(i8* " << rhsRef << ", i8* "
-              << lhsRef << ")\n";
-    const int destReg = allocateRegister(fctx);
-    *fctx.out << "  %" << destReg << " = xor i1 %" << notLessReg << ", 1\n";
-    return destReg;
 }
 
 int LlvmIrEmitter::allocateRegister(FunctionContext& fctx) const
@@ -871,6 +826,28 @@ std::string LlvmIrEmitter::sliceElementType(const std::string& type) const
 {
     // "{T*, i32}" - strip the leading '{' and trailing "*, i32}".
     return type.substr(1, type.size() - 1 - std::string("*, i32}").size());
+}
+
+bool LlvmIrEmitter::isPointerType(const std::string& type) const
+{
+    // A raw Axea `*T` pointer to a *primitive* pointee renders as exactly one of "i32*"/"i64*"/
+    // "double*"/"i1*"/"i24*" (see docs/language/0019-unsafe.md) - unlike every existing
+    // heap-backed collection/struct/array/String/Buffer/closure type here, each of which has its
+    // own distinctive structural prefix ('{'/'['/'%') checked by the isXType helper above/below
+    // it. Explicitly excludes "i8*" (str/cstr's own canonical representation) since neither is a
+    // real `*T` pointer at the Axea type level - this only matters for a hypothetical `*i8`
+    // (pointer to a raw byte), which isn't resolvable this phase anyway ("i8" itself isn't yet a
+    // supported primitive - see resolveType's own primitives map) - documented, not fixed, as a
+    // follow-up risk. Also excludes '%'/'{'/'['-prefixed text (a struct-pointee `*StructName`
+    // renders as "%StructName**" - see llvmType's own comment on why that case is untested/out of
+    // scope this milestone).
+    return type.size() > 1 && type.back() == '*' && type != "i8*" && type.front() != '{' &&
+           type.front() != '[' && type.front() != '%';
+}
+
+std::string LlvmIrEmitter::pointerElementType(const std::string& type) const
+{
+    return type.substr(0, type.size() - 1); // strip exactly one trailing '*'
 }
 
 bool LlvmIrEmitter::isListType(const std::string& type) const
@@ -1942,6 +1919,14 @@ std::string LlvmIrEmitter::emitElementToStrCall(const std::string& elementType,
         body << "  " << dest << " = load i8*, i8** " << ptrPtr << "\n";
         return dest;
     }
+    if (isPointerType(elementType))
+    {
+        // A raw `*T` field (see docs/language/0006-generics.md's own List<T> port follow-up) -
+        // matches emitStructToStringHelpers' own per-field print dispatch and the top-level
+        // print dispatch's identical fallback for a bare pointer value (unsafe Milestone 1): the
+        // same "()" unit sentinel, not an attempt to stringify whatever it points to.
+        return stringPtrConstant("()");
+    }
     // A nested collection element - recurse.
     const std::string fnName = registerCollectionToStrRuntime(elementType);
     const std::string dest = "%t" + std::to_string(nextTmp++);
@@ -2668,6 +2653,10 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[cast->dest] = llvmType(cast->targetType);
         }
+        else if (const auto* sizeOf = dynamic_cast<const IrSizeOf*>(inst.get()))
+        {
+            fctx.registerTypes[sizeOf->dest] = "i64";
+        }
         else if (const auto* constBool = dynamic_cast<const IrConstBool*>(inst.get()))
         {
             fctx.registerTypes[constBool->dest] = "i1";
@@ -2860,66 +2849,6 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
                     fieldIndexAndType(structName, fieldGet->field).second;
             }
         }
-        else if (const auto* listNew = dynamic_cast<const IrListNew*>(inst.get()))
-        {
-            fctx.registerTypes[listNew->dest] =
-                "{i32, " + llvmType(listNew->elementTypeName) + "*, i32}*";
-        }
-        else if (const auto* listPush = dynamic_cast<const IrListPush*>(inst.get()))
-        {
-            // Unit-typed (see docs/language/0033-lists.md) - mirrors how a
-            // unit-returning IrCall is typed "void" here too.
-            fctx.registerTypes[listPush->dest] = "void";
-        }
-        else if (const auto* listPop = dynamic_cast<const IrListPop*>(inst.get()))
-        {
-            fctx.registerTypes[listPop->dest] = listElementType(typeOf(listPop->list, fctx));
-        }
-        else if (const auto* stackNew = dynamic_cast<const IrStackNew*>(inst.get()))
-        {
-            // Same shape llvmType("Stack<T>") itself produces (see
-            // docs/language/0035-stacks.md) - the exact same text
-            // llvmType("List<T>") would, since Stack<T> is the same LLVM
-            // type as List<T>.
-            fctx.registerTypes[stackNew->dest] =
-                "{i32, " + llvmType(stackNew->elementTypeName) + "*, i32}*";
-        }
-        else if (const auto* stackPush = dynamic_cast<const IrStackPush*>(inst.get()))
-        {
-            fctx.registerTypes[stackPush->dest] = "void";
-        }
-        else if (const auto* stackPop = dynamic_cast<const IrStackPop*>(inst.get()))
-        {
-            fctx.registerTypes[stackPop->dest] = listElementType(typeOf(stackPop->stack, fctx));
-        }
-        else if (const auto* stackPeek = dynamic_cast<const IrStackPeek*>(inst.get()))
-        {
-            fctx.registerTypes[stackPeek->dest] = listElementType(typeOf(stackPeek->stack, fctx));
-        }
-        else if (const auto* priorityQueueNew = dynamic_cast<const IrPriorityQueueNew*>(inst.get()))
-        {
-            // Same shape llvmType("PriorityQueue<T>") itself produces (see
-            // docs/language/0039-priority-queues.md) - the exact same text
-            // llvmType("List<T>")/llvmType("Stack<T>") would.
-            fctx.registerTypes[priorityQueueNew->dest] =
-                "{i32, " + llvmType(priorityQueueNew->elementTypeName) + "*, i32}*";
-        }
-        else if (const auto* priorityQueuePush =
-                     dynamic_cast<const IrPriorityQueuePush*>(inst.get()))
-        {
-            fctx.registerTypes[priorityQueuePush->dest] = "void";
-        }
-        else if (const auto* priorityQueuePop = dynamic_cast<const IrPriorityQueuePop*>(inst.get()))
-        {
-            fctx.registerTypes[priorityQueuePop->dest] =
-                listElementType(typeOf(priorityQueuePop->priorityQueue, fctx));
-        }
-        else if (const auto* priorityQueuePeek =
-                     dynamic_cast<const IrPriorityQueuePeek*>(inst.get()))
-        {
-            fctx.registerTypes[priorityQueuePeek->dest] =
-                listElementType(typeOf(priorityQueuePeek->priorityQueue, fctx));
-        }
         else if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(inst.get()))
         {
             // Drives registration (see registerLinkedListInstantiation) -
@@ -2942,55 +2871,6 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[popBack->dest] =
                 linkedListElementLlvmType(typeOf(popBack->list, fctx));
-        }
-        else if (const auto* dequeNew = dynamic_cast<const IrDequeNew*>(inst.get()))
-        {
-            // Drives registration only in the sense of resolving llvmType -
-            // Deque<T> needs no actual registerXInstantiation call (see
-            // llvmType's own Deque<T> branch: no monomorphization at all).
-            fctx.registerTypes[dequeNew->dest] =
-                llvmType("Deque<" + dequeNew->elementTypeName + ">");
-        }
-        else if (dynamic_cast<const IrDequePushFront*>(inst.get()) ||
-                 dynamic_cast<const IrDequePushBack*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrListPush above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (const auto* dequePopFront = dynamic_cast<const IrDequePopFront*>(inst.get()))
-        {
-            // Unlike LinkedList's own linkedListElementLlvmType (which needs
-            // a side-table, since a node's element type doesn't appear in
-            // its own header text), Deque<T>'s element type sits directly in
-            // its header string - dequeElementType reads it straight off,
-            // no side-table needed at all.
-            fctx.registerTypes[dequePopFront->dest] =
-                dequeElementType(typeOf(dequePopFront->deque, fctx));
-        }
-        else if (const auto* dequePopBack = dynamic_cast<const IrDequePopBack*>(inst.get()))
-        {
-            fctx.registerTypes[dequePopBack->dest] =
-                dequeElementType(typeOf(dequePopBack->deque, fctx));
-        }
-        else if (const auto* queueNew = dynamic_cast<const IrQueueNew*>(inst.get()))
-        {
-            // Same reasoning as IrDequeNew above - Queue<T> needs no
-            // registerXInstantiation call either (see docs/language/0038-queues.md).
-            fctx.registerTypes[queueNew->dest] =
-                llvmType("Queue<" + queueNew->elementTypeName + ">");
-        }
-        else if (dynamic_cast<const IrQueueEnqueue*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrListPush above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (const auto* queueDequeue = dynamic_cast<const IrQueueDequeue*>(inst.get()))
-        {
-            // Same reasoning as IrDequePopFront above - dequeElementType
-            // reads the element type straight off Queue<T>'s own header
-            // string too (it's the literal same header Deque<T> has).
-            fctx.registerTypes[queueDequeue->dest] =
-                dequeElementType(typeOf(queueDequeue->queue, fctx));
         }
         else if (const auto* mapNew = dynamic_cast<const IrMapNew*>(inst.get()))
         {
@@ -3131,6 +3011,14 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
                 fctx.registerTypes[indexGet->dest] = arrayElementType(objectType);
             }
         }
+        else if (const auto* deref = dynamic_cast<const IrDeref*>(inst.get()))
+        {
+            fctx.registerTypes[deref->dest] = pointerElementType(typeOf(deref->pointer, fctx));
+        }
+        else if (const auto* alloca = dynamic_cast<const IrAlloca*>(inst.get()))
+        {
+            fctx.registerTypes[alloca->dest] = typeOf(alloca->initialValue, fctx) + "*";
+        }
         else if (const auto* branch = dynamic_cast<const IrBranch*>(inst.get()))
         {
             inferTypesInList(branch->thenBlock, fctx);
@@ -3146,6 +3034,14 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             else
             {
                 fctx.registerTypes[branch->dest] = "void";
+            }
+            // Same reasoning as branch->dest just above, one merged register per outer-scope
+            // name either branch reassigned (see docs/language/0021-axea-ir.md's own follow-up
+            // and IrGenerator::mergeBranchScopes) - thenReg/elseReg both represent the same
+            // Axea-level variable, so either's own type is authoritative.
+            for (const auto& [thenReg, elseReg, destReg] : branch->carriedMerges)
+            {
+                fctx.registerTypes[destReg] = typeOf(thenReg, fctx);
             }
         }
         else if (const auto* loop = dynamic_cast<const IrLoop*>(inst.get()))
@@ -6049,626 +5945,30 @@ void LlvmIrEmitter::emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fc
               << elementType << "* %" << elementPtrReg << "\n";
 }
 
-void LlvmIrEmitter::emitListNew(const IrListNew& listNew, FunctionContext& fctx)
+void LlvmIrEmitter::emitDeref(const IrDeref& deref, FunctionContext& fctx)
 {
-    const std::string elementType = llvmType(listNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*, i32}";
-    const std::string pointerType = headerType + "*";
-
-    // sizeof({i32, T*, i32}) via the standard null-pointer GEP idiom - same
-    // idiom as emitStructNew/emitArrayNew.
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-
-    const int destReg = defineRegister(listNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(listNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << lenPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(listNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
-              << "\n";
-
-    // Capacity starts at 0 - ensureListCapacity's own doubling logic
-    // bootstraps correctly from here (needed=1 > doubled=0 on the first
-    // push selects `needed` itself, not the stalled 0*2 - see that
-    // function's own comment).
-    const int capPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(listNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
+    const std::string pointerType = typeOf(deref.pointer, fctx);
+    const std::string elementType = pointerElementType(pointerType);
+    const int destReg = defineRegister(deref.dest, fctx);
+    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << pointerType << " "
+              << ref(deref.pointer, fctx) << "\n";
 }
 
-void LlvmIrEmitter::emitListPush(const IrListPush& listPush, FunctionContext& fctx)
+void LlvmIrEmitter::emitDerefAssign(const IrDerefAssign& derefAssign, FunctionContext& fctx)
 {
-    const std::string objectType = typeOf(listPush.list, fctx);
-    const std::string headerType =
-        objectType.substr(0, objectType.size() - 1); // strip trailing '*'
-    const std::string elementType = listElementType(objectType);
-    const std::string listRef = ref(listPush.list, fctx);
-
-    // Current length.
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << listRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
-
-    // Amortized (doubling) growth - see ensureListCapacity. Grows the
-    // backing buffer (and copies every existing element across) only when
-    // `newLen` would exceed the list's own current capacity; otherwise
-    // this is a no-op and the existing buffer still has room.
-    ensureListCapacity(
-        headerType, objectType, listRef, elementType, "%" + std::to_string(newLenReg), fctx);
-
-    // Reload the data pointer fresh from the header after
-    // ensureListCapacity - either unchanged (no growth needed) or the
-    // freshly grown buffer ensureListCapacity already stored back into the
-    // header in place. No phi needed to reconcile the two branches
-    // (matches this codebase's established alloca/reload-over-phi
-    // convention - see emitStrComparison's own identical reasoning).
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << listRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    // Store the pushed value at the (now guaranteed in-bounds) last slot,
-    // then the new length - the header pointer itself never changes, so
-    // every existing alias sees the update, exactly like a struct
-    // field-assignment already does.
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
-    *fctx.out << "  store " << elementType << " " << ref(listPush.value, fctx) << ", "
-              << elementType << "* %" << newElementPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-
-    // Unit-typed (see docs/language/0033-lists.md) - deliberately *not*
-    // calling defineRegister here, exactly matching how a unit-returning
-    // IrCall's dest is handled in emitInstructions: since inferTypesInList
-    // already recorded this register's type as "void" (a separate map,
-    // populated regardless), nothing downstream ever calls ref() on it -
-    // only typeOf() - so it never needs an LLVM register number at all.
+    const std::string pointerType = typeOf(derefAssign.pointer, fctx);
+    const std::string elementType = pointerElementType(pointerType);
+    *fctx.out << "  store " << elementType << " " << ref(derefAssign.value, fctx) << ", "
+              << pointerType << " " << ref(derefAssign.pointer, fctx) << "\n";
 }
 
-void LlvmIrEmitter::emitListPop(const IrListPop& listPop, FunctionContext& fctx)
+void LlvmIrEmitter::emitAlloca(const IrAlloca& alloca, FunctionContext& fctx)
 {
-    const std::string objectType = typeOf(listPop.list, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string listRef = ref(listPop.list, fctx);
-
-    // No bounds check here (matches every other out-of-bounds case in this
-    // backend - division, array/slice indexing: the interpreter checks,
-    // compiled code does not - see docs/language/0033-lists.md).
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << listRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = sub i32 %" << oldLenReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-
-    // No shrink - only push ever calls ensureListCapacity; pop just leaves
-    // capacity (and the backing buffer) exactly where it was, only the
-    // logical length shrinks, matching std::vector's own pop_back (which
-    // doesn't shrink capacity either).
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << listRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << newLenReg << "\n";
-    const int destReg = defineRegister(listPop.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitStackNew(const IrStackNew& stackNew, FunctionContext& fctx)
-{
-    // Structurally identical to emitListNew - see that function's own
-    // comments for the sizeof idiom and field layout (see
-    // docs/language/0035-stacks.md).
-    const std::string elementType = llvmType(stackNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*, i32}";
-    const std::string pointerType = headerType + "*";
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-
-    const int destReg = defineRegister(stackNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(stackNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << lenPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(stackNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
-              << "\n";
-
-    const int capPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(stackNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitStackPush(const IrStackPush& stackPush, FunctionContext& fctx)
-{
-    // Structurally identical to emitListPush, including its use of
-    // ensureListCapacity for amortized growth (see that function's own
-    // comments; see docs/language/0035-stacks.md).
-    const std::string objectType = typeOf(stackPush.stack, fctx);
-    const std::string headerType =
-        objectType.substr(0, objectType.size() - 1); // strip trailing '*'
-    const std::string elementType = listElementType(objectType);
-    const std::string stackRef = ref(stackPush.stack, fctx);
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
-
-    ensureListCapacity(
-        headerType, objectType, stackRef, elementType, "%" + std::to_string(newLenReg), fctx);
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
-    *fctx.out << "  store " << elementType << " " << ref(stackPush.value, fctx) << ", "
-              << elementType << "* %" << newElementPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitStackPop(const IrStackPop& stackPop, FunctionContext& fctx)
-{
-    // Structurally identical to emitListPop - no bounds check (see that
-    // function's own comments; see docs/language/0035-stacks.md).
-    const std::string objectType = typeOf(stackPop.stack, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string stackRef = ref(stackPop.stack, fctx);
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = sub i32 %" << oldLenReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << newLenReg << "\n";
-    const int destReg = defineRegister(stackPop.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitStackPeek(const IrStackPeek& stackPeek, FunctionContext& fctx)
-{
-    // The one genuinely new operation: GEP+load the element at length-1,
-    // *without* the decrement-and-store-back emitStackPop does above - the
-    // stack still owns this element afterward (see docs/language/0035-stacks.md).
-    // No bounds check, same reasoning as pop.
-    const std::string objectType = typeOf(stackPeek.stack, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string stackRef = ref(stackPeek.stack, fctx);
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 0\n";
-    const int lenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int topIndexReg = allocateRegister(fctx);
-    *fctx.out << "  %" << topIndexReg << " = sub i32 %" << lenReg << ", 1\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << stackRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << topIndexReg << "\n";
-    const int destReg = defineRegister(stackPeek.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitPriorityQueueNew(const IrPriorityQueueNew& priorityQueueNew,
-                                         FunctionContext& fctx)
-{
-    // Structurally identical to emitStackNew/emitListNew - see that
-    // function's own comments for the sizeof idiom and field layout (see
-    // docs/language/0039-priority-queues.md).
-    const std::string elementType = llvmType(priorityQueueNew.elementTypeName);
-    const std::string headerType = "{i32, " + elementType + "*, i32}";
-    const std::string pointerType = headerType + "*";
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-
-    const int destReg = defineRegister(priorityQueueNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(priorityQueueNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << lenPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(priorityQueueNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
-              << "\n";
-
-    const int capPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << capPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(priorityQueueNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store i32 0, i32* %" << capPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitPriorityQueuePush(const IrPriorityQueuePush& priorityQueuePush,
-                                          FunctionContext& fctx)
-{
-    // The grow-and-append prefix uses ensureListCapacity, the same
-    // amortized-growth helper emitListPush/emitStackPush share (see that
-    // function's own comments) - see docs/language/0039-priority-queues.md.
-    const std::string objectType = typeOf(priorityQueuePush.priorityQueue, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string pqRef = ref(priorityQueuePush.priorityQueue, fctx);
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << pqRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = add i32 %" << oldLenReg << ", 1\n";
-
-    ensureListCapacity(
-        headerType, objectType, pqRef, elementType, "%" + std::to_string(newLenReg), fctx);
-
-    // Reload the data pointer fresh from the header after
-    // ensureListCapacity (see emitListPush's own identical comment) - the
-    // sift-up loop below reads/writes through this same register
-    // throughout, so it sees the grown buffer if growth happened.
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << pqRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << dataReg << ", i32 %" << oldLenReg << "\n";
-    *fctx.out << "  store " << elementType << " " << ref(priorityQueuePush.value, fctx) << ", "
-              << elementType << "* %" << newElementPtrReg << "\n";
-
-    // Sift-up: the just-appended element (index oldLen, in newData) moves
-    // toward the root while it's smaller than its parent - see
-    // docs/language/0039-priority-queues.md's own Design section. Hand-rolled
-    // alloca/load/store-counter blocks, the same no-phi convention the copy
-    // loop above uses, since a phi here would need to forward-reference a
-    // not-yet-emitted register from doSwap on the loop's own back-edge.
-    const int siftLabelId = fctx.nextLabel++;
-    const std::string siftHeaderLabel =
-        "priorityqueue.push.siftup.header" + std::to_string(siftLabelId);
-    const std::string siftCheckLabel =
-        "priorityqueue.push.siftup.check" + std::to_string(siftLabelId);
-    const std::string siftSwapLabel =
-        "priorityqueue.push.siftup.swap" + std::to_string(siftLabelId);
-    const std::string siftDoneLabel =
-        "priorityqueue.push.siftup.done" + std::to_string(siftLabelId);
-
-    const int idxSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 %" << oldLenReg << ", i32* %" << idxSlotReg << "\n";
-    *fctx.out << "  br label %" << siftHeaderLabel << "\n";
-
-    *fctx.out << siftHeaderLabel << ":\n";
-    fctx.currentLabel = siftHeaderLabel;
-    const int idxReg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxReg << " = load i32, i32* %" << idxSlotReg << "\n";
-    const int isRootReg = allocateRegister(fctx);
-    *fctx.out << "  %" << isRootReg << " = icmp eq i32 %" << idxReg << ", 0\n";
-    *fctx.out << "  br i1 %" << isRootReg << ", label %" << siftDoneLabel << ", label %"
-              << siftCheckLabel << "\n";
-
-    *fctx.out << siftCheckLabel << ":\n";
-    fctx.currentLabel = siftCheckLabel;
-    const int idxMinus1Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxMinus1Reg << " = sub i32 %" << idxReg << ", 1\n";
-    const int parentReg = allocateRegister(fctx);
-    *fctx.out << "  %" << parentReg << " = sdiv i32 %" << idxMinus1Reg << ", 2\n";
-    const int parentPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << parentPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << parentReg << "\n";
-    const int parentValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << parentValReg << " = load " << elementType << ", " << elementType << "* %"
-              << parentPtrReg << "\n";
-    const int curPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << curPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << idxReg << "\n";
-    const int curValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << curValReg << " = load " << elementType << ", " << elementType << "* %"
-              << curPtrReg << "\n";
-    const int okReg = emitPriorityQueueCompare(elementType,
-                                               "sle",
-                                               "%" + std::to_string(parentValReg),
-                                               "%" + std::to_string(curValReg),
-                                               fctx);
-    *fctx.out << "  br i1 %" << okReg << ", label %" << siftDoneLabel << ", label %"
-              << siftSwapLabel << "\n";
-
-    *fctx.out << siftSwapLabel << ":\n";
-    fctx.currentLabel = siftSwapLabel;
-    *fctx.out << "  store " << elementType << " %" << curValReg << ", " << elementType << "* %"
-              << parentPtrReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << parentValReg << ", " << elementType << "* %"
-              << curPtrReg << "\n";
-    *fctx.out << "  store i32 %" << parentReg << ", i32* %" << idxSlotReg << "\n";
-    *fctx.out << "  br label %" << siftHeaderLabel << "\n";
-
-    *fctx.out << siftDoneLabel << ":\n";
-    fctx.currentLabel = siftDoneLabel;
-
-    // No data-pointer store-back here (unlike emitListPush/emitStackPush's
-    // own final store) - `dataReg` was only ever *reloaded* from the
-    // header above, never reassigned to a freshly grown buffer in this
-    // function's own body (ensureListCapacity already did that store, if
-    // growth happened, before this point) - writing it back here would be
-    // a redundant no-op.
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitPriorityQueuePop(const IrPriorityQueuePop& priorityQueuePop,
-                                         FunctionContext& fctx)
-{
-    // No bounds check (matches every other pop in this backend). Moves the
-    // last element into the vacated root slot, shrinks the length, then
-    // sifts that element down - see docs/language/0039-priority-queues.md's
-    // own Design section.
-    const std::string objectType = typeOf(priorityQueuePop.priorityQueue, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string pqRef = ref(priorityQueuePop.priorityQueue, fctx);
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << pqRef << ", i32 0, i32 0\n";
-    const int oldLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldLenReg << " = load i32, i32* %" << lenPtrReg << "\n";
-    const int newLenReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newLenReg << " = sub i32 %" << oldLenReg << ", 1\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << pqRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    const int rootPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rootPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 0\n";
-    // The value ultimately returned - captured now, before the root slot is
-    // overwritten below.
-    const int destReg = defineRegister(priorityQueuePop.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << rootPtrReg << "\n";
-
-    const int lastPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lastPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << newLenReg << "\n";
-    const int lastValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lastValReg << " = load " << elementType << ", " << elementType << "* %"
-              << lastPtrReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << lastValReg << ", " << elementType << "* %"
-              << rootPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newLenReg << ", i32* %" << lenPtrReg << "\n";
-
-    // Sift-down: the element now at the root moves toward the leaves,
-    // swapping with whichever child is smaller, until the heap property
-    // holds again. Same hand-rolled alloca/load/store, no-phi convention as
-    // push's own sift-up loop above - one more block than sift-up needs,
-    // to choose the smaller of two children before comparing against the
-    // parent.
-    const int siftLabelId = fctx.nextLabel++;
-    const std::string headerLabel =
-        "priorityqueue.pop.siftdown.header" + std::to_string(siftLabelId);
-    const std::string checkRightLabel =
-        "priorityqueue.pop.siftdown.checkright" + std::to_string(siftLabelId);
-    const std::string compareRightLabel =
-        "priorityqueue.pop.siftdown.compareright" + std::to_string(siftLabelId);
-    const std::string setRightLabel =
-        "priorityqueue.pop.siftdown.setright" + std::to_string(siftLabelId);
-    const std::string compareSmallestLabel =
-        "priorityqueue.pop.siftdown.comparesmallest" + std::to_string(siftLabelId);
-    const std::string swapLabel = "priorityqueue.pop.siftdown.swap" + std::to_string(siftLabelId);
-    const std::string doneLabel = "priorityqueue.pop.siftdown.done" + std::to_string(siftLabelId);
-
-    const int idxSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 0, i32* %" << idxSlotReg << "\n";
-    const int smallestSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << smallestSlotReg << " = alloca i32\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << headerLabel << ":\n";
-    fctx.currentLabel = headerLabel;
-    const int idxReg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxReg << " = load i32, i32* %" << idxSlotReg << "\n";
-    const int idxTimes2Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << idxTimes2Reg << " = mul i32 %" << idxReg << ", 2\n";
-    const int leftReg = allocateRegister(fctx);
-    *fctx.out << "  %" << leftReg << " = add i32 %" << idxTimes2Reg << ", 1\n";
-    const int hasLeftReg = allocateRegister(fctx);
-    *fctx.out << "  %" << hasLeftReg << " = icmp slt i32 %" << leftReg << ", %" << newLenReg
-              << "\n";
-    *fctx.out << "  br i1 %" << hasLeftReg << ", label %" << checkRightLabel << ", label %"
-              << doneLabel << "\n";
-
-    *fctx.out << checkRightLabel << ":\n";
-    fctx.currentLabel = checkRightLabel;
-    *fctx.out << "  store i32 %" << leftReg << ", i32* %" << smallestSlotReg << "\n";
-    const int rightReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rightReg << " = add i32 %" << leftReg << ", 1\n";
-    const int hasRightReg = allocateRegister(fctx);
-    *fctx.out << "  %" << hasRightReg << " = icmp slt i32 %" << rightReg << ", %" << newLenReg
-              << "\n";
-    *fctx.out << "  br i1 %" << hasRightReg << ", label %" << compareRightLabel << ", label %"
-              << compareSmallestLabel << "\n";
-
-    *fctx.out << compareRightLabel << ":\n";
-    fctx.currentLabel = compareRightLabel;
-    const int rightPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rightPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << rightReg << "\n";
-    const int rightValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rightValReg << " = load " << elementType << ", " << elementType << "* %"
-              << rightPtrReg << "\n";
-    const int leftPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << leftPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << leftReg << "\n";
-    const int leftValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << leftValReg << " = load " << elementType << ", " << elementType << "* %"
-              << leftPtrReg << "\n";
-    const int rightSmallerReg = emitPriorityQueueCompare(elementType,
-                                                         "slt",
-                                                         "%" + std::to_string(rightValReg),
-                                                         "%" + std::to_string(leftValReg),
-                                                         fctx);
-    *fctx.out << "  br i1 %" << rightSmallerReg << ", label %" << setRightLabel << ", label %"
-              << compareSmallestLabel << "\n";
-
-    *fctx.out << setRightLabel << ":\n";
-    fctx.currentLabel = setRightLabel;
-    *fctx.out << "  store i32 %" << rightReg << ", i32* %" << smallestSlotReg << "\n";
-    *fctx.out << "  br label %" << compareSmallestLabel << "\n";
-
-    *fctx.out << compareSmallestLabel << ":\n";
-    fctx.currentLabel = compareSmallestLabel;
-    const int smallestReg = allocateRegister(fctx);
-    *fctx.out << "  %" << smallestReg << " = load i32, i32* %" << smallestSlotReg << "\n";
-    const int smallestPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << smallestPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << dataReg << ", i32 %" << smallestReg << "\n";
-    const int smallestValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << smallestValReg << " = load " << elementType << ", " << elementType
-              << "* %" << smallestPtrReg << "\n";
-    const int curPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << curPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << idxReg << "\n";
-    const int curValReg = allocateRegister(fctx);
-    *fctx.out << "  %" << curValReg << " = load " << elementType << ", " << elementType << "* %"
-              << curPtrReg << "\n";
-    const int needSwapReg = emitPriorityQueueCompare(elementType,
-                                                     "slt",
-                                                     "%" + std::to_string(smallestValReg),
-                                                     "%" + std::to_string(curValReg),
-                                                     fctx);
-    *fctx.out << "  br i1 %" << needSwapReg << ", label %" << swapLabel << ", label %" << doneLabel
-              << "\n";
-
-    *fctx.out << swapLabel << ":\n";
-    fctx.currentLabel = swapLabel;
-    *fctx.out << "  store " << elementType << " %" << curValReg << ", " << elementType << "* %"
-              << smallestPtrReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << smallestValReg << ", " << elementType << "* %"
-              << curPtrReg << "\n";
-    *fctx.out << "  store i32 %" << smallestReg << ", i32* %" << idxSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << doneLabel << ":\n";
-    fctx.currentLabel = doneLabel;
-}
-
-void LlvmIrEmitter::emitPriorityQueuePeek(const IrPriorityQueuePeek& priorityQueuePeek,
-                                          FunctionContext& fctx)
-{
-    // The minimum always sits at index 0 by the heap invariant - unlike
-    // emitStackPeek, no length read/arithmetic is needed at all. No bounds
-    // check, same reasoning as every other peek/pop here.
-    const std::string objectType = typeOf(priorityQueuePeek.priorityQueue, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = listElementType(objectType);
-    const std::string pqRef = ref(priorityQueuePeek.priorityQueue, fctx);
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << pqRef << ", i32 0, i32 1\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int rootPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rootPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 0\n";
-    const int destReg = defineRegister(priorityQueuePeek.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << rootPtrReg << "\n";
+    const std::string elementType = typeOf(alloca.initialValue, fctx);
+    const int destReg = defineRegister(alloca.dest, fctx);
+    *fctx.out << "  %" << destReg << " = alloca " << elementType << "\n";
+    *fctx.out << "  store " << elementType << " " << ref(alloca.initialValue, fctx) << ", "
+              << elementType << "* %" << destReg << "\n";
 }
 
 void LlvmIrEmitter::emitMapNew(const IrMapNew& mapNew, FunctionContext& fctx)
@@ -6875,9 +6175,9 @@ void LlvmIrEmitter::emitSetRemove(const IrSetRemove& setRemove, FunctionContext&
 void LlvmIrEmitter::emitSortedMapNew(const IrSortedMapNew& sortedMapNew, FunctionContext& fctx)
 {
     // A fresh {count: 0, root: null} heap header - same malloc + null-GEP
-    // sizeof idiom as emitListNew/emitStackNew (2 fields, no bucket array
+    // sizeof idiom as emitStructNew/emitArrayNew, 2 fields, no bucket array
     // unlike emitMapNew/emitSetNew - a tree needs no initial bucket
-    // allocation, see docs/language/0040-sorted-maps.md).
+    // allocation, see docs/language/0040-sorted-maps.md.
     const std::string pointerType =
         llvmType("SortedMap<" + sortedMapNew.keyTypeName + "," + sortedMapNew.valueTypeName + ">");
     const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
@@ -9321,472 +8621,6 @@ void LlvmIrEmitter::emitLinkedListPopBack(const IrLinkedListPopBack& popBack, Fu
               << ".pop_back(" << listType << " " << ref(popBack.list, fctx) << ")\n";
 }
 
-void LlvmIrEmitter::emitDequeNew(const IrDequeNew& dequeNew, FunctionContext& fctx)
-{
-    // Already registered (resolving llvmType is enough - unlike LinkedList/
-    // Map/Set, Deque<T> has no registerXInstantiation call at all, see
-    // llvmType's own Deque<T> branch) by inferTypesInList's earlier pass
-    // over this same instruction, so this just looks the header type back
-    // up - mirrors emitMapNew/emitLinkedListNew's identical reasoning.
-    const std::string pointerType = llvmType("Deque<" + dequeNew.elementTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-    const std::string elementType = dequeElementType(pointerType);
-
-    // sizeof({i32, i32, T*}) via the standard null-pointer GEP idiom - same
-    // idiom as emitListNew/emitLinkedListNew.
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(dequeNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(dequeNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(dequeNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store i32 0, i32* %" << startPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(dequeNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
-              << "\n";
-}
-
-// Shared by emitDequePushFront/emitDequePushBack below: mallocs a fresh
-// buffer sized to `oldCount + 1` and copies the existing `oldCount` elements
-// out, offset by the *old* start (reading data[start+i], not data[i] - see
-// docs/language/0037-deques.md), writing each copied element to
-// `newData[i + destOffset]` (destOffset is 0 for push_back, 1 for
-// push_front, so push_front's copy lands one slot further in, leaving room
-// for the new element at index 0). Returns the new data register; the
-// caller still needs to write the pushed value itself and store the new
-// count/start(=0)/data back into the header. Mirrors emitListPush's own
-// malloc + hand-rolled copy loop (alloca/load/store counter, no phi - same
-// unnamed-sequential-register reason) almost exactly, generalized by one
-// destination offset parameter.
-int LlvmIrEmitter::emitDequeCopyForPush(const std::string& elementType,
-                                        const std::string& oldDataRef,
-                                        int oldCountReg,
-                                        int oldStartReg,
-                                        int newDataReg,
-                                        int destOffset,
-                                        FunctionContext& fctx)
-{
-    const int labelId = fctx.nextLabel++;
-    const std::string headerLabel = "deque.push.copy.header" + std::to_string(labelId);
-    const std::string bodyLabel = "deque.push.copy.body" + std::to_string(labelId);
-    const std::string doneLabel = "deque.push.copy.done" + std::to_string(labelId);
-
-    const int counterSlotReg = allocateRegister(fctx);
-    *fctx.out << "  %" << counterSlotReg << " = alloca i32\n";
-    *fctx.out << "  store i32 0, i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << headerLabel << ":\n";
-    fctx.currentLabel = headerLabel;
-    const int iReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int condReg = allocateRegister(fctx);
-    *fctx.out << "  %" << condReg << " = icmp slt i32 %" << iReg << ", %" << oldCountReg << "\n";
-    *fctx.out << "  br i1 %" << condReg << ", label %" << bodyLabel << ", label %" << doneLabel
-              << "\n";
-
-    *fctx.out << bodyLabel << ":\n";
-    fctx.currentLabel = bodyLabel;
-    const int iForSrcReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForSrcReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int srcIdxReg = allocateRegister(fctx);
-    *fctx.out << "  %" << srcIdxReg << " = add i32 %" << oldStartReg << ", %" << iForSrcReg << "\n";
-    const int srcPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << srcPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* " << oldDataRef << ", i32 %" << srcIdxReg << "\n";
-    const int valReg = allocateRegister(fctx);
-    *fctx.out << "  %" << valReg << " = load " << elementType << ", " << elementType << "* %"
-              << srcPtrReg << "\n";
-    const int iForDstReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForDstReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int dstIdxReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dstIdxReg << " = add i32 %" << iForDstReg << ", " << destOffset << "\n";
-    const int dstPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dstPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << newDataReg << ", i32 %" << dstIdxReg << "\n";
-    *fctx.out << "  store " << elementType << " %" << valReg << ", " << elementType << "* %"
-              << dstPtrReg << "\n";
-    const int iForIncReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iForIncReg << " = load i32, i32* %" << counterSlotReg << "\n";
-    const int iNextReg = allocateRegister(fctx);
-    *fctx.out << "  %" << iNextReg << " = add i32 %" << iForIncReg << ", 1\n";
-    *fctx.out << "  store i32 %" << iNextReg << ", i32* %" << counterSlotReg << "\n";
-    *fctx.out << "  br label %" << headerLabel << "\n";
-
-    *fctx.out << doneLabel << ":\n";
-    fctx.currentLabel = doneLabel;
-    return newDataReg;
-}
-
-void LlvmIrEmitter::emitDequePushFront(const IrDequePushFront& pushFront, FunctionContext& fctx)
-{
-    const std::string objectType = typeOf(pushFront.deque, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string dequeRef = ref(pushFront.deque, fctx);
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 1\n";
-    const int oldStartReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldStartReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = add i32 %" << oldCountReg << ", 1\n";
-
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newCount64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCount64Reg << " = zext i32 %" << newCountReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newCount64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 2\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    // Copy the existing elements one slot further in (destOffset 1), leaving
-    // index 0 free for the new front element.
-    emitDequeCopyForPush(elementType,
-                         "%" + std::to_string(oldDataReg),
-                         oldCountReg,
-                         oldStartReg,
-                         newDataReg,
-                         1,
-                         fctx);
-
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 0\n";
-    *fctx.out << "  store " << elementType << " " << ref(pushFront.value, fctx) << ", "
-              << elementType << "* %" << newElementPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-    *fctx.out << "  store i32 0, i32* %" << startPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitDequePushBack(const IrDequePushBack& pushBack, FunctionContext& fctx)
-{
-    const std::string objectType = typeOf(pushBack.deque, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string dequeRef = ref(pushBack.deque, fctx);
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 1\n";
-    const int oldStartReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldStartReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = add i32 %" << oldCountReg << ", 1\n";
-
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newCount64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCount64Reg << " = zext i32 %" << newCountReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newCount64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 2\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    // Copy the existing elements straight across (destOffset 0); the new
-    // back element goes at index oldCount, right after them.
-    emitDequeCopyForPush(elementType,
-                         "%" + std::to_string(oldDataReg),
-                         oldCountReg,
-                         oldStartReg,
-                         newDataReg,
-                         0,
-                         fctx);
-
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 %" << oldCountReg << "\n";
-    *fctx.out << "  store " << elementType << " " << ref(pushBack.value, fctx) << ", "
-              << elementType << "* %" << newElementPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-    *fctx.out << "  store i32 0, i32* %" << startPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitDequePopFront(const IrDequePopFront& popFront, FunctionContext& fctx)
-{
-    const std::string objectType = typeOf(popFront.deque, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string dequeRef = ref(popFront.deque, fctx);
-
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 1\n";
-    const int startReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 2\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << startReg << "\n";
-    const int destReg = defineRegister(popFront.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-
-    const int newStartReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newStartReg << " = add i32 %" << startReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newStartReg << ", i32* %" << startPtrReg << "\n";
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = sub i32 %" << oldCountReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitDequePopBack(const IrDequePopBack& popBack, FunctionContext& fctx)
-{
-    const std::string objectType = typeOf(popBack.deque, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string dequeRef = ref(popBack.deque, fctx);
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 1\n";
-    const int startReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << dequeRef << ", i32 0, i32 2\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    const int lastRelReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lastRelReg << " = sub i32 %" << oldCountReg << ", 1\n";
-    const int lastIdxReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lastIdxReg << " = add i32 %" << startReg << ", %" << lastRelReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << lastIdxReg << "\n";
-    const int destReg = defineRegister(popBack.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = sub i32 %" << oldCountReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitQueueNew(const IrQueueNew& queueNew, FunctionContext& fctx)
-{
-    // Structurally identical to emitDequeNew - see its own doc comment
-    // (see docs/language/0038-queues.md).
-    const std::string pointerType = llvmType("Queue<" + queueNew.elementTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-    const std::string elementType = dequeElementType(pointerType);
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(queueNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(queueNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(queueNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store i32 0, i32* %" << startPtrReg << "\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(queueNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store " << elementType << "* null, " << elementType << "** %" << dataPtrPtrReg
-              << "\n";
-}
-
-void LlvmIrEmitter::emitQueueEnqueue(const IrQueueEnqueue& enqueue, FunctionContext& fctx)
-{
-    // Structurally identical to emitDequePushBack (enqueue maps onto
-    // push_back - add at the back) - see its own doc comment (see
-    // docs/language/0038-queues.md).
-    const std::string objectType = typeOf(enqueue.queue, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string queueRef = ref(enqueue.queue, fctx);
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 1\n";
-    const int oldStartReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldStartReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = add i32 %" << oldCountReg << ", 1\n";
-
-    const int elemSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* null, i32 1\n";
-    const int elemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elemSizeReg << " = ptrtoint " << elementType << "* %" << elemSizePtrReg
-              << " to i64\n";
-    const int newCount64Reg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCount64Reg << " = zext i32 %" << newCountReg << " to i64\n";
-    const int newBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newBytesReg << " = mul i64 %" << newCount64Reg << ", %" << elemSizeReg
-              << "\n";
-    const int rawNewDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawNewDataReg << " = call i8* @malloc(i64 %" << newBytesReg << ")\n";
-    const int newDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newDataReg << " = bitcast i8* %" << rawNewDataReg << " to " << elementType
-              << "*\n";
-
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 2\n";
-    const int oldDataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldDataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-
-    emitDequeCopyForPush(elementType,
-                         "%" + std::to_string(oldDataReg),
-                         oldCountReg,
-                         oldStartReg,
-                         newDataReg,
-                         0,
-                         fctx);
-
-    const int newElementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newElementPtrReg << " = getelementptr " << elementType << ", "
-              << elementType << "* %" << newDataReg << ", i32 %" << oldCountReg << "\n";
-    *fctx.out << "  store " << elementType << " " << ref(enqueue.value, fctx) << ", " << elementType
-              << "* %" << newElementPtrReg << "\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-    *fctx.out << "  store i32 0, i32* %" << startPtrReg << "\n";
-    *fctx.out << "  store " << elementType << "* %" << newDataReg << ", " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitQueueDequeue(const IrQueueDequeue& dequeue, FunctionContext& fctx)
-{
-    // Structurally identical to emitDequePopFront (dequeue maps onto
-    // pop_front - remove from the front, classic FIFO) - see its own doc
-    // comment (see docs/language/0038-queues.md).
-    const std::string objectType = typeOf(dequeue.queue, fctx);
-    const std::string headerType = objectType.substr(0, objectType.size() - 1);
-    const std::string elementType = dequeElementType(objectType);
-    const std::string queueRef = ref(dequeue.queue, fctx);
-
-    const int startPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 1\n";
-    const int startReg = allocateRegister(fctx);
-    *fctx.out << "  %" << startReg << " = load i32, i32* %" << startPtrReg << "\n";
-    const int dataPtrPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 2\n";
-    const int dataReg = allocateRegister(fctx);
-    *fctx.out << "  %" << dataReg << " = load " << elementType << "*, " << elementType << "** %"
-              << dataPtrPtrReg << "\n";
-    const int elementPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", " << elementType
-              << "* %" << dataReg << ", i32 %" << startReg << "\n";
-    const int destReg = defineRegister(dequeue.dest, fctx);
-    *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
-              << elementPtrReg << "\n";
-
-    const int newStartReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newStartReg << " = add i32 %" << startReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newStartReg << ", i32* %" << startPtrReg << "\n";
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << objectType
-              << " " << queueRef << ", i32 0, i32 0\n";
-    const int oldCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << oldCountReg << " = load i32, i32* %" << countPtrReg << "\n";
-    const int newCountReg = allocateRegister(fctx);
-    *fctx.out << "  %" << newCountReg << " = sub i32 %" << oldCountReg << ", 1\n";
-    *fctx.out << "  store i32 %" << newCountReg << ", i32* %" << countPtrReg << "\n";
-}
-
 void LlvmIrEmitter::emitBranch(const IrBranch& branch, FunctionContext& fctx)
 {
     const int labelId = fctx.nextLabel++;
@@ -9834,14 +8668,23 @@ void LlvmIrEmitter::emitBranch(const IrBranch& branch, FunctionContext& fctx)
     {
         // A fallen-through side can still carry no value (branch.*Value ==
         // -1, e.g. an if-without-else's implicit unit else-branch) - only
-        // sides that both reached the merge block *and* produced a real
-        // register are valid phi predecessors.
+        // sides that both reached the merge block *and* produced a real,
+        // non-void register are valid phi predecessors. A side whose own
+        // trailing expression is a unit-typed call (e.g. `self.items.set(...)`,
+        // a struct method returning nothing) still gets a real, non-"-1"
+        // dest register (see IrCall's own "x = numbers.push(4) is legal"
+        // convention) - but a void-typed register is never assigned a real
+        // LLVM SSA value (no "%N = ..." is ever emitted for it, matching
+        // every other void-producing construct in this backend), so ref()
+        // on it would look up a register llvmRegisterOf never received -
+        // excluded here via the same typeOf(...) != "void" check that
+        // gates every other "never ref() a void register" site.
         std::vector<std::pair<std::string, std::string>> incoming; // (value ref, predecessor label)
-        if (!thenTerminated && branch.thenValue != -1)
+        if (!thenTerminated && branch.thenValue != -1 && typeOf(branch.thenValue, fctx) != "void")
         {
             incoming.emplace_back(ref(branch.thenValue, fctx), thenExitLabel);
         }
-        if (!elseTerminated && branch.elseValue != -1)
+        if (!elseTerminated && branch.elseValue != -1 && typeOf(branch.elseValue, fctx) != "void")
         {
             incoming.emplace_back(ref(branch.elseValue, fctx), elseExitLabel);
         }
@@ -9861,6 +8704,37 @@ void LlvmIrEmitter::emitBranch(const IrBranch& branch, FunctionContext& fctx)
             }
             *fctx.out << "\n";
         }
+    }
+
+    // Every outer-scope name either branch reassigned (see IrGenerator::mergeBranchScopes and
+    // docs/language/0021-axea-ir.md's own follow-up) - orthogonal to branch.dest above (that's
+    // the if-*expression's* own value; this is side-effecting reassignment, present or absent
+    // independently of whether the if's own result is ever used). Same "only a side that both
+    // reached the merge block *and* produced a real, non-void register is a valid phi
+    // predecessor" filtering as branch.dest's own phi just above.
+    for (const auto& [thenReg, elseReg, mergedDest] : branch.carriedMerges)
+    {
+        std::vector<std::pair<std::string, std::string>> incoming;
+        if (!thenTerminated && typeOf(thenReg, fctx) != "void")
+        {
+            incoming.emplace_back(ref(thenReg, fctx), thenExitLabel);
+        }
+        if (!elseTerminated && typeOf(elseReg, fctx) != "void")
+        {
+            incoming.emplace_back(ref(elseReg, fctx), elseExitLabel);
+        }
+        if (incoming.empty())
+        {
+            continue;
+        }
+        const int destReg = defineRegister(mergedDest, fctx);
+        *fctx.out << "  %" << destReg << " = phi " << typeOf(mergedDest, fctx);
+        for (std::size_t i = 0; i < incoming.size(); ++i)
+        {
+            *fctx.out << (i == 0 ? " [ " : ", [ ") << incoming[i].first << ", %"
+                      << incoming[i].second << " ]";
+        }
+        *fctx.out << "\n";
     }
 }
 
@@ -10078,6 +8952,34 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
                 continue;
             }
 
+            // `ptr + i` / `ptr - i` (see docs/language/0019-unsafe.md) - a single-index GEP,
+            // element-scaled automatically by LLVM's own type system, exactly like every slice/
+            // List/Array index GEP already is (see emitIndexGet). Minus negates the offset first
+            // so both operators reduce to the identical GEP shape.
+            if (isPointerType(lhsType))
+            {
+                const std::string elementType = pointerElementType(lhsType);
+                const std::string rhsType = typeOf(binOp->rhs, fctx);
+                if (binOp->op == TokenKind::Minus)
+                {
+                    const int negReg = allocateRegister(fctx);
+                    *fctx.out << "  %" << negReg << " = sub " << rhsType << " 0, " << rhsRef
+                              << "\n";
+                    const int destReg = defineRegister(binOp->dest, fctx);
+                    *fctx.out << "  %" << destReg << " = getelementptr " << elementType << ", "
+                              << lhsType << " " << lhsRef << ", " << rhsType << " %" << negReg
+                              << "\n";
+                }
+                else
+                {
+                    const int destReg = defineRegister(binOp->dest, fctx);
+                    *fctx.out << "  %" << destReg << " = getelementptr " << elementType << ", "
+                              << lhsType << " " << lhsRef << ", " << rhsType << " " << rhsRef
+                              << "\n";
+                }
+                continue;
+            }
+
             // f64 gets its own opcode table (fadd/fsub/.../fcmp - see
             // floatBinOpMnemonic) - i32/i64 share binOpMnemonic's existing
             // integer opcodes unchanged, since LLVM's int opcodes are
@@ -10106,6 +9008,17 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             const std::string dstType = llvmType(cast->targetType);
             const int destReg = defineRegister(cast->dest, fctx);
 
+            // Pointer-to-pointer cast (see docs/language/0006-generics.md's own List<T> port
+            // follow-up) - a plain bitcast, free and correct by construction (the underlying
+            // bytes are unambiguous machine bytes; TypeChecker's own CastExpr case already
+            // guarantees this only reaches here inside an `unsafe` block).
+            if (isPointerType(srcType) && isPointerType(dstType))
+            {
+                *fctx.out << "  %" << destReg << " = bitcast " << srcType << " " << srcRef
+                          << " to " << dstType << "\n";
+                continue;
+            }
+
             if (srcType == dstType)
             {
                 const std::string zeroOp = dstType == "double" ? "fadd double 0.0, " + srcRef
@@ -10130,6 +9043,31 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
                 *fctx.out << "  %" << destReg << " = fptosi double " << srcRef << " to " << dstType
                           << "\n";
             }
+            continue;
+        }
+        if (const auto* sizeOf = dynamic_cast<const IrSizeOf*>(inst.get()))
+        {
+            // `sizeof<T>()` (see docs/language/0006-generics.md's own List<T> port follow-up) -
+            // the same null-pointer-GEP + ptrtoint idiom emitListNew/emitStructNew/emitArrayNew
+            // already use internally to compute a concrete LLVM type's own byte size, exposed
+            // here as a real user-facing instruction for the first time.
+            std::string elementType = llvmType(sizeOf->typeName);
+            std::string pointerType;
+            if (!elementType.empty() && elementType.back() == '*')
+            {
+                pointerType = elementType;
+                elementType.pop_back();
+            }
+            else
+            {
+                pointerType = elementType + "*";
+            }
+            const int sizePtrReg = allocateRegister(fctx);
+            *fctx.out << "  %" << sizePtrReg << " = getelementptr " << elementType << ", "
+                      << pointerType << " null, i32 1\n";
+            const int destReg = defineRegister(sizeOf->dest, fctx);
+            *fctx.out << "  %" << destReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
+                      << " to i64\n";
             continue;
         }
         if (const auto* call = dynamic_cast<const IrCall*>(inst.get()))
@@ -10190,6 +9128,32 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
                 args.emplace_back(sliceType, "%" + std::to_string(withLenReg));
             }
 
+            // `malloc`/`free` (see docs/language/0019-unsafe.md) always call the one shared
+            // `i8* @malloc(i64)` / `void @free(i8*)` symbol this backend already unconditionally
+            // declares for its own internal allocation machinery (never a second, user-typed
+            // declare - see the declare loop's own comment), bitcasting around it to/from the
+            // call site's own concrete `*T` type - mirrors the exact "malloc raw bytes, then
+            // bitcast to the wanted concrete type" idiom already used at every one of this
+            // backend's own internal allocation sites.
+            if (call->callee == "malloc")
+            {
+                const int rawReg = allocateRegister(fctx);
+                *fctx.out << "  %" << rawReg << " = call i8* @malloc(i64 " << args[0].second
+                          << ")\n";
+                const int destReg = defineRegister(call->dest, fctx);
+                *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawReg << " to " << returnType
+                          << "\n";
+                continue;
+            }
+            if (call->callee == "free")
+            {
+                const int argReg = allocateRegister(fctx);
+                *fctx.out << "  %" << argReg << " = bitcast " << args[0].first << " "
+                          << args[0].second << " to i8*\n";
+                *fctx.out << "  call void @free(i8* %" << argReg << ")\n";
+                continue;
+            }
+
             *fctx.out << "  ";
             if (returnType != "void")
             {
@@ -10244,6 +9208,21 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitIndexSet(*indexSet, fctx);
             continue;
         }
+        if (const auto* deref = dynamic_cast<const IrDeref*>(inst.get()))
+        {
+            emitDeref(*deref, fctx);
+            continue;
+        }
+        if (const auto* derefAssign = dynamic_cast<const IrDerefAssign*>(inst.get()))
+        {
+            emitDerefAssign(*derefAssign, fctx);
+            continue;
+        }
+        if (const auto* alloca = dynamic_cast<const IrAlloca*>(inst.get()))
+        {
+            emitAlloca(*alloca, fctx);
+            continue;
+        }
         if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(inst.get()))
         {
             emitStrSlice(*strSlice, fctx);
@@ -10294,61 +9273,6 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitBufferAppendValue(*appendValue, fctx);
             continue;
         }
-        if (const auto* listNew = dynamic_cast<const IrListNew*>(inst.get()))
-        {
-            emitListNew(*listNew, fctx);
-            continue;
-        }
-        if (const auto* listPush = dynamic_cast<const IrListPush*>(inst.get()))
-        {
-            emitListPush(*listPush, fctx);
-            continue;
-        }
-        if (const auto* listPop = dynamic_cast<const IrListPop*>(inst.get()))
-        {
-            emitListPop(*listPop, fctx);
-            continue;
-        }
-        if (const auto* stackNew = dynamic_cast<const IrStackNew*>(inst.get()))
-        {
-            emitStackNew(*stackNew, fctx);
-            continue;
-        }
-        if (const auto* stackPush = dynamic_cast<const IrStackPush*>(inst.get()))
-        {
-            emitStackPush(*stackPush, fctx);
-            continue;
-        }
-        if (const auto* stackPop = dynamic_cast<const IrStackPop*>(inst.get()))
-        {
-            emitStackPop(*stackPop, fctx);
-            continue;
-        }
-        if (const auto* stackPeek = dynamic_cast<const IrStackPeek*>(inst.get()))
-        {
-            emitStackPeek(*stackPeek, fctx);
-            continue;
-        }
-        if (const auto* priorityQueueNew = dynamic_cast<const IrPriorityQueueNew*>(inst.get()))
-        {
-            emitPriorityQueueNew(*priorityQueueNew, fctx);
-            continue;
-        }
-        if (const auto* priorityQueuePush = dynamic_cast<const IrPriorityQueuePush*>(inst.get()))
-        {
-            emitPriorityQueuePush(*priorityQueuePush, fctx);
-            continue;
-        }
-        if (const auto* priorityQueuePop = dynamic_cast<const IrPriorityQueuePop*>(inst.get()))
-        {
-            emitPriorityQueuePop(*priorityQueuePop, fctx);
-            continue;
-        }
-        if (const auto* priorityQueuePeek = dynamic_cast<const IrPriorityQueuePeek*>(inst.get()))
-        {
-            emitPriorityQueuePeek(*priorityQueuePeek, fctx);
-            continue;
-        }
         if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(inst.get()))
         {
             emitLinkedListNew(*linkedListNew, fctx);
@@ -10372,46 +9296,6 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
         if (const auto* popBack = dynamic_cast<const IrLinkedListPopBack*>(inst.get()))
         {
             emitLinkedListPopBack(*popBack, fctx);
-            continue;
-        }
-        if (const auto* dequeNew = dynamic_cast<const IrDequeNew*>(inst.get()))
-        {
-            emitDequeNew(*dequeNew, fctx);
-            continue;
-        }
-        if (const auto* dequePushFront = dynamic_cast<const IrDequePushFront*>(inst.get()))
-        {
-            emitDequePushFront(*dequePushFront, fctx);
-            continue;
-        }
-        if (const auto* dequePushBack = dynamic_cast<const IrDequePushBack*>(inst.get()))
-        {
-            emitDequePushBack(*dequePushBack, fctx);
-            continue;
-        }
-        if (const auto* dequePopFront = dynamic_cast<const IrDequePopFront*>(inst.get()))
-        {
-            emitDequePopFront(*dequePopFront, fctx);
-            continue;
-        }
-        if (const auto* dequePopBack = dynamic_cast<const IrDequePopBack*>(inst.get()))
-        {
-            emitDequePopBack(*dequePopBack, fctx);
-            continue;
-        }
-        if (const auto* queueNew = dynamic_cast<const IrQueueNew*>(inst.get()))
-        {
-            emitQueueNew(*queueNew, fctx);
-            continue;
-        }
-        if (const auto* queueEnqueue = dynamic_cast<const IrQueueEnqueue*>(inst.get()))
-        {
-            emitQueueEnqueue(*queueEnqueue, fctx);
-            continue;
-        }
-        if (const auto* queueDequeue = dynamic_cast<const IrQueueDequeue*>(inst.get()))
-        {
-            emitQueueDequeue(*queueDequeue, fctx);
             continue;
         }
         if (const auto* mapNew = dynamic_cast<const IrMapNew*>(inst.get()))
@@ -10727,6 +9611,7 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
     const std::string bareStrFmt = stringPtrConstant("%s");
     const std::string trueStr = stringPtrConstant("true");
     const std::string falseStr = stringPtrConstant("false");
+    const std::string unitStr = stringPtrConstant("()");
 
     // A char field's own UTF-8 encoding (see below) needs encodeCharUtf8,
     // which - like every other emit helper - takes a real FunctionContext,
@@ -10893,6 +9778,15 @@ void LlvmIrEmitter::emitStructPrintHelpers(const IrProgram& program, std::ostrin
                 const std::string nestedStructName = structNameFromPointerType(fieldLlvmType);
                 out << "  call void @axea.print." << nestedStructName << "(" << fieldLlvmType
                     << " %" << valReg << ")\n";
+            }
+            else if (isPointerType(fieldLlvmType))
+            {
+                // A raw `*T` field (see docs/language/0006-generics.md's own List<T> port
+                // follow-up) - matches the top-level print dispatch's own identical fallback for
+                // a bare pointer value (unsafe Milestone 1): prints the same "()" unit sentinel
+                // rather than attempting to dereference/print whatever it points to.
+                out << "  %" << nextReg++ << " = call i32 (i8*, ...) @printf(i8* " << bareStrFmt
+                    << ", i8* " << unitStr << ")\n";
             }
             else
             {
@@ -11750,6 +10644,18 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << newline << ")\n";
         }
+        else if (isPointerType(llvmTypeStr))
+        {
+            // `*T` (see docs/language/0019-unsafe.md) - a raw address has no meaningful printed
+            // form (printing it would also be non-deterministic run to run), so this falls back
+            // to the same "()" unit sentinel closures use just above - matching the interpreter's
+            // own toString, whose generic fallback (never given a PointerInstance-specific case)
+            // already returns "()" for exactly this reason. Checked before the generic
+            // "must be a nested struct pointer" fallback below, which would otherwise misparse a
+            // bare "i32*"/"i64*" as struct-name text.
+            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
+                << strFmt << ", i8* " << namePtr << ", i8* " << unitStr << ")\n";
+        }
         else if (isNamedStructPointerType(llvmTypeStr)) // struct pointer
         {
             const std::string structName = structNameFromPointerType(llvmTypeStr);
@@ -11922,6 +10828,18 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // call site).
     for (const auto& externDecl : program.externs)
     {
+        // `malloc`/`free` (see docs/language/0019-unsafe.md) are already unconditionally
+        // declared above (`i8* @malloc(i64)` / `void @free(i8*)`) for this backend's own internal
+        // allocation machinery - a user's own `extern c malloc`/`free` declaration must never get
+        // a second, differently-typed `declare` for the same symbol name (LLVM forbids two
+        // declares of one external symbol with different signatures, and a user's own `*T`
+        // return/param type renders differently from the fixed "i8*" above). Call sites bitcast
+        // around the one shared declaration instead - see the IrCall handler's own malloc/free
+        // special case.
+        if (externDecl.name == "malloc" || externDecl.name == "free")
+        {
+            continue;
+        }
         out << "declare " << llvmReturnType(externDecl.returnType) << " @" << externDecl.name
             << "(";
         for (std::size_t i = 0; i < externDecl.paramTypes.size(); ++i)

@@ -1,0 +1,316 @@
+module collections
+
+extern c malloc(size: i64) -> *i32
+extern c free(ptr: *i32)
+
+struct List<T>
+{
+    length: i32
+    data: *T
+    capacity: i32
+}
+
+pub newList<T>() -> List<T>
+{
+    capacity = 1
+    raw = malloc(capacity as i64 * sizeof<T>())
+    data = unsafe { raw as *T }
+    return List<T> { length: 0, data: data, capacity: capacity }
+}
+
+// A compact way to build a List<T> already populated with an array literal's own contents
+// (e.g. `newListFrom<i32>([1, 2, 3])`) - an ordinary array-literal-to-slice<T> coercion at the
+// call site (already supported everywhere else a slice<T> parameter is used), copied one
+// element at a time into a fresh, independent List<T>.
+pub newListFrom<T>(elements: slice<T>) -> List<T>
+{
+    list = newList<T>()
+    for value in elements
+    {
+        list.push(value)
+    }
+    return list
+}
+
+impl<T> List<T>
+{
+    push(self, value: T)
+    {
+        needed = self.length + 1
+        if needed > self.capacity
+        {
+            doubled = self.capacity * 2
+            newCapacity = doubled
+            if needed > doubled { newCapacity = needed }
+            raw = malloc(newCapacity as i64 * sizeof<T>())
+            newData = unsafe { raw as *T }
+            i = 0
+            loop
+            {
+                if i >= self.length { break }
+                unsafe { *(newData + i) = *(self.data + i) }
+                i = i + 1
+            }
+            oldData = unsafe { self.data as *i32 }
+            free(oldData)
+            self.data = newData
+            self.capacity = newCapacity
+        }
+        unsafe { *(self.data + self.length) = value }
+        self.length = self.length + 1
+    }
+
+    pop(self) -> T
+    {
+        self.length = self.length - 1
+        return unsafe { *(self.data + self.length) }
+    }
+
+    get(self, index: i32) -> T
+    {
+        return unsafe { *(self.data + index) }
+    }
+
+    set(self, index: i32, value: T)
+    {
+        unsafe { *(self.data + index) = value }
+    }
+
+    // An honest, explicit deep copy - a fresh malloc of the same capacity, every live element
+    // copied across, `self` left completely untouched. Never aliases self's own buffer: pushing
+    // to the clone (or the original) can never be observed through the other, even before
+    // either one's own next capacity-growing push.
+    clone(self) -> List<T>
+    {
+        raw = malloc(self.capacity as i64 * sizeof<T>())
+        newData = unsafe { raw as *T }
+        i = 0
+        loop
+        {
+            if i >= self.length { break }
+            unsafe { *(newData + i) = *(self.data + i) }
+            i = i + 1
+        }
+        return List<T> { length: self.length, data: newData, capacity: self.capacity }
+    }
+}
+
+struct Stack<T>
+{
+    items: List<T>
+}
+
+pub newStack<T>() -> Stack<T>
+{
+    return Stack<T> { items: collections.newList<T>() }
+}
+
+impl<T> Stack<T>
+{
+    push(self, value: T)
+    {
+        self.items.push(value)
+    }
+
+    pop(self) -> T
+    {
+        return self.items.pop()
+    }
+
+    peek(self) -> T
+    {
+        return self.items.get(self.items.length - 1)
+    }
+
+    length(self) -> i32
+    {
+        return self.items.length
+    }
+}
+
+struct Deque<T>
+{
+    length: i32
+    start: i32
+    data: *T
+}
+
+pub newDeque<T>() -> Deque<T>
+{
+    raw = malloc(0 as i64 * sizeof<T>())
+    data = unsafe { raw as *T }
+    return Deque<T> { length: 0, start: 0, data: data }
+}
+
+impl<T> Deque<T>
+{
+    push_back(self, value: T)
+    {
+        newLength = self.length + 1
+        raw = malloc(newLength as i64 * sizeof<T>())
+        newData = unsafe { raw as *T }
+        i = 0
+        loop
+        {
+            if i >= self.length { break }
+            unsafe { *(newData + i) = *(self.data + (self.start + i)) }
+            i = i + 1
+        }
+        unsafe { *(newData + self.length) = value }
+        oldData = unsafe { self.data as *i32 }
+        free(oldData)
+        self.data = newData
+        self.start = 0
+        self.length = newLength
+    }
+
+    push_front(self, value: T)
+    {
+        newLength = self.length + 1
+        raw = malloc(newLength as i64 * sizeof<T>())
+        newData = unsafe { raw as *T }
+        i = 0
+        loop
+        {
+            if i >= self.length { break }
+            unsafe { *(newData + (i + 1)) = *(self.data + (self.start + i)) }
+            i = i + 1
+        }
+        unsafe { *newData = value }
+        oldData = unsafe { self.data as *i32 }
+        free(oldData)
+        self.data = newData
+        self.start = 0
+        self.length = newLength
+    }
+
+    pop_front(self) -> T
+    {
+        value = unsafe { *(self.data + self.start) }
+        self.start = self.start + 1
+        self.length = self.length - 1
+        return value
+    }
+
+    pop_back(self) -> T
+    {
+        lastIndex = self.start + self.length - 1
+        value = unsafe { *(self.data + lastIndex) }
+        self.length = self.length - 1
+        return value
+    }
+
+    get(self, index: i32) -> T
+    {
+        return unsafe { *(self.data + (self.start + index)) }
+    }
+
+    set(self, index: i32, value: T)
+    {
+        unsafe { *(self.data + (self.start + index)) = value }
+    }
+}
+
+struct Queue<T>
+{
+    items: Deque<T>
+}
+
+pub newQueue<T>() -> Queue<T>
+{
+    return Queue<T> { items: collections.newDeque<T>() }
+}
+
+impl<T> Queue<T>
+{
+    enqueue(self, value: T)
+    {
+        self.items.push_back(value)
+    }
+
+    dequeue(self) -> T
+    {
+        return self.items.pop_front()
+    }
+
+    length(self) -> i32
+    {
+        return self.items.length
+    }
+}
+
+struct PriorityQueue<T>
+{
+    items: List<T>
+}
+
+pub newPriorityQueue<T>() -> PriorityQueue<T>
+{
+    return PriorityQueue<T> { items: collections.newList<T>() }
+}
+
+impl<T> PriorityQueue<T>
+{
+    push(self, value: T)
+    {
+        self.items.push(value)
+        i = self.items.length - 1
+        loop
+        {
+            if i <= 0 { break }
+            parent = (i - 1) / 2
+            if self.items.get(i) < self.items.get(parent)
+            {
+                tmp = self.items.get(parent)
+                self.items.set(parent, self.items.get(i))
+                self.items.set(i, tmp)
+                i = parent
+            }
+            else
+            {
+                break
+            }
+        }
+    }
+
+    pop(self) -> T
+    {
+        top = self.items.get(0)
+        lastValue = self.items.pop()
+        if self.items.length > 0
+        {
+            self.items.set(0, lastValue)
+            i = 0
+            loop
+            {
+                left = i * 2 + 1
+                right = i * 2 + 2
+                smallest = i
+                if left < self.items.length
+                {
+                    if self.items.get(left) < self.items.get(smallest) { smallest = left }
+                }
+                if right < self.items.length
+                {
+                    if self.items.get(right) < self.items.get(smallest) { smallest = right }
+                }
+                if smallest == i { break }
+                tmp = self.items.get(i)
+                self.items.set(i, self.items.get(smallest))
+                self.items.set(smallest, tmp)
+                i = smallest
+            }
+        }
+        return top
+    }
+
+    peek(self) -> T
+    {
+        return self.items.get(0)
+    }
+
+    length(self) -> i32
+    {
+        return self.items.length
+    }
+}

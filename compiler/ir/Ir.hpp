@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -83,6 +84,15 @@ struct IrCall final : IrInst
     std::vector<int> args;
 };
 
+// `sizeof<TypeName>()` (see docs/language/0006-generics.md's own List<T> port follow-up) - no
+// operand (there's no runtime value to evaluate, just a static type name), result is i64.
+// `typeName` is always concrete by the time this is emitted - GenericMonomorphizer substitutes a
+// bare type-parameter reference here exactly like IrCast::targetType.
+struct IrSizeOf final : IrInst
+{
+    std::string typeName;
+};
+
 struct IrStructNew final : IrInst
 {
     std::string typeName;
@@ -156,6 +166,40 @@ struct IrIndexSet final : IrInst
     int value;
 };
 
+// `*ptr` (read) inside `unsafe { }` (see docs/language/0019-unsafe.md) - a dedicated instruction
+// rather than reuse of IrIndexGet's own generic dispatch-by-LLVM-type-text: IrIndexGet's own
+// first check (str/cstr indexing, both rendering to plain "i8*") would otherwise misinterpret any
+// raw pointer whose LLVM representation collides with str/cstr's own "i8*" as a UTF-8
+// string-indexing operation instead of a raw scalar load.
+struct IrDeref final : IrInst
+{
+    int pointer;
+};
+
+// `*ptr = value` inside `unsafe { }` - the write counterpart to IrDeref above, same reasoning.
+struct IrDerefAssign final : IrInst
+{
+    int pointer;
+    int value;
+};
+
+// `&name`'s own backing store (see docs/language/0019-unsafe.md) - a genuine, permanent stack
+// slot for a local variable/parameter whose address is taken anywhere in its enclosing function
+// or top-level script (see IrGenerator::collectAddressTakenNames), initialized immediately with
+// `initialValue`. `dest` is the slot's own pointer register - every later read/write of the
+// backed name reuses the existing IrDeref/IrDerefAssign instructions directly off this register
+// (no dedicated load/store instruction needed - a stack slot is exactly the "real pointer"
+// IrDeref's own source-agnostic codegen already handles, see LlvmIrEmitter::emitDeref). Unlike
+// IrLoop::carried's own per-loop alloca/load/store text, this is function-scoped and emitted
+// exactly once, at the name's first binding (a param, or an AssignmentStmt's first definition) -
+// never inside a loop body's own re-executing block, so a name reassigned inside a loop it was
+// already bound outside of reuses this same slot every iteration rather than allocating a fresh
+// one each time.
+struct IrAlloca final : IrInst
+{
+    int initialValue;
+};
+
 // `object[start..end]` / `object[..end]` / `object[start..]` / `object[..]`
 // (see docs/language/0045-str-slicing.md). Originally str-coercible-only
 // (`object` resolved to a bare i8* at the LLVM layer exactly like
@@ -194,66 +238,16 @@ struct IrJoin final : IrInst
     int separator;
 };
 
-// `List<elem>()` - a fresh, empty, growable list (see docs/language/0033-lists.md).
-// `elementTypeName` is carried explicitly (unlike IrArrayNew, which infers it
-// from its own elements) - a brand-new empty list has no elements to infer
-// the type from.
-struct IrListNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `list.push(value)` - no dest (void); mutates `list`'s own header fields in
-// place. IndexGet/IndexSet/FieldGet(".length") are all reused unchanged for
-// List (see docs/language/0033-lists.md) - only push/pop need dedicated
-// instructions, since they're the only operations that change a list's shape
-// rather than just reading/writing an existing slot.
-struct IrListPush final : IrInst
-{
-    int list;
-    int value;
-};
-
-// `list.pop()` - dest is the removed element.
-struct IrListPop final : IrInst
-{
-    int list;
-};
-
-// `Stack<T>()` - a LIFO collection backed internally by List<T>'s own
-// machinery (see docs/language/0035-stacks.md). Carries elementTypeName
-// exactly like IrListNew - a brand-new empty stack has nothing to infer it
-// from.
-struct IrStackNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `stack.push(value)` - no dest (void); mirrors IrListPush exactly.
-struct IrStackPush final : IrInst
-{
-    int stack;
-    int value;
-};
-
-// `stack.pop()` - dest is the removed element; mirrors IrListPop exactly.
-struct IrStackPop final : IrInst
-{
-    int stack;
-};
-
-// `stack.peek()` - dest is the top element, *not* removed (the one
-// genuinely new operation List<T> doesn't have - see
-// docs/language/0035-stacks.md).
-struct IrStackPeek final : IrInst
-{
-    int stack;
-};
+// `List<T>`/`Stack<T>` are real, user-declared generic structs now, not compiler intrinsics (see
+// docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up and std/collections.ax) -
+// there is no IrListNew/IrListPush/IrListPop/IrStackNew/IrStackPush/IrStackPop/IrStackPeek
+// anymore; `.push`/`.pop`/`.get`/`.set`/`.peek` reach them via the general struct method dispatch
+// (an ordinary IrCall), construction via their own `newList<T>()`/`newStack<T>()` generic
+// top-level functions.
 
 // `LinkedList<elem>()` - a fresh, empty, doubly linked, node-based collection
-// (see docs/language/0036-linked-lists.md). Carries elementTypeName exactly
-// like IrListNew/IrStackNew - a brand-new empty list has nothing to infer it
-// from.
+// (see docs/language/0036-linked-lists.md). Carries elementTypeName - a
+// brand-new empty list has nothing to infer it from.
 struct IrLinkedListNew final : IrInst
 {
     std::string elementTypeName;
@@ -284,99 +278,15 @@ struct IrLinkedListPopBack final : IrInst
     int list;
 };
 
-// `Deque<elem>()` - a fresh, empty, growable array with a `start` offset
-// (see docs/language/0037-deques.md). Carries elementTypeName exactly like
-// IrListNew/IrStackNew/IrLinkedListNew - a brand-new empty deque has
-// nothing to infer it from.
-struct IrDequeNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `deque.push_front(value)`/`deque.push_back(value)` - no dest (void);
-// mutate `deque`'s own header fields in place (reallocating - see
-// docs/language/0037-deques.md).
-struct IrDequePushFront final : IrInst
-{
-    int deque;
-    int value;
-};
-
-struct IrDequePushBack final : IrInst
-{
-    int deque;
-    int value;
-};
-
-// `deque.pop_front()`/`deque.pop_back()` - dest is the removed element (no
-// reallocation - just start/count arithmetic).
-struct IrDequePopFront final : IrInst
-{
-    int deque;
-};
-
-struct IrDequePopBack final : IrInst
-{
-    int deque;
-};
-
-// `Queue<elem>()` - a fresh, empty FIFO collection backed internally by
-// Deque<T>'s own machinery (see docs/language/0038-queues.md). Carries
-// elementTypeName exactly like IrDequeNew.
-struct IrQueueNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `queue.enqueue(value)` - no dest (void); maps onto Deque<T>.push_back's
-// own shape.
-struct IrQueueEnqueue final : IrInst
-{
-    int queue;
-    int value;
-};
-
-// `queue.dequeue()` - dest is the removed element; maps onto
-// Deque<T>.pop_front's own shape.
-struct IrQueueDequeue final : IrInst
-{
-    int queue;
-};
-
-// `PriorityQueue<elem>()` - a fresh, empty binary heap (see
-// docs/language/0039-priority-queues.md). Carries elementTypeName exactly
-// like IrListNew/IrStackNew - a brand-new empty heap has nothing to infer it
-// from. `elementTypeName` is always "i32" in a well-typed program (the only
-// orderable type this phase), but carried as a string anyway, mirroring
-// every other collection's *New instruction here.
-struct IrPriorityQueueNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `priorityQueue.push(value)` - no dest (void); appends then sifts the new
-// element up toward the root until the heap property holds again.
-struct IrPriorityQueuePush final : IrInst
-{
-    int priorityQueue;
-    int value;
-};
-
-// `priorityQueue.pop()` - dest is the removed minimum; moves the last
-// element into the vacated root slot, then sifts it down until the heap
-// property holds again.
-struct IrPriorityQueuePop final : IrInst
-{
-    int priorityQueue;
-};
-
-// `priorityQueue.peek()` - dest is the minimum element, *not* removed - the
-// minimum always sits at index 0 by the heap invariant, so (unlike
-// IrStackPeek) this needs no arithmetic at all.
-struct IrPriorityQueuePeek final : IrInst
-{
-    int priorityQueue;
-};
+// `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>` are all real, user-declared
+// generic structs now, not compiler intrinsics (see docs/language/0006-generics.md's own
+// List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up and std/collections.ax) -
+// there is no IrDequeNew/IrDequePushFront/IrDequePushBack/IrDequePopFront/IrDequePopBack/
+// IrQueueNew/IrQueueEnqueue/IrQueueDequeue/IrPriorityQueueNew/IrPriorityQueuePush/
+// IrPriorityQueuePop/IrPriorityQueuePeek anymore; `.push_front`/`.push_back`/`.pop_front`/
+// `.pop_back`/`.get`/`.set`/`.enqueue`/`.dequeue`/`.push`/`.pop`/`.peek` all reach their own real
+// methods via the general struct method dispatch (an ordinary IrCall), construction via their
+// own `newDeque<T>()`/`newQueue<T>()`/`newPriorityQueue<T>()` generic top-level functions.
 
 // `SortedMap<key,value>()` - a fresh, empty AVL tree (see
 // docs/language/0040-sorted-maps.md). Carries the concrete K/V type strings
@@ -548,7 +458,7 @@ struct IrParse final : IrInst
 // `payloadTypeName` is T's own canonical type name, needed at LLVM emission
 // time to build the `{i1, T}` literal - unlike every other dest-typed
 // instruction here, it can't be inferred from `value` alone, since None has
-// no value register to infer from (mirrors IrListNew's own
+// no value register to infer from (mirrors IrLinkedListNew's own
 // elementTypeName, needed for the identical reason on an empty list).
 struct IrOptionalNew final : IrInst
 {
@@ -653,7 +563,7 @@ struct IrBufferAppendValue final : IrInst
 
 // `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's
 // generic rewrite). Carries the concrete K/V type strings explicitly - like
-// IrListNew's own elementTypeName, a brand-new empty Map has nothing to infer
+// IrLinkedListNew's own elementTypeName, a brand-new empty Map has nothing to infer
 // them from - so LlvmIrEmitter can look up (or register, on first sight) the
 // right monomorphized instantiation.
 struct IrMapNew final : IrInst
@@ -733,6 +643,18 @@ struct IrBranch final : IrInst
     std::vector<std::unique_ptr<IrInst>> elseBlock;
     int thenValue = -1;
     int elseValue = -1;
+    // (thenReg, elseReg, destReg) per outer-scope name either branch reassigned to a different
+    // register than it had before the branch - thenReg/elseReg are whichever register that
+    // branch's own IrScope rebound the name to (or the pre-branch register, if that particular
+    // branch never touched it); destReg is a freshly allocated register code after the branch
+    // reads instead of the original pre-branch one. Mirrors thenValue/elseValue/dest above
+    // exactly, just generalized to every other name either branch's own statements reassigned,
+    // not only the branch-expression's own result. Populated by
+    // IrGenerator::mergeBranchScopes, reconciled into a real phi by LlvmIrEmitter::emitBranch
+    // (see docs/language/0021-axea-ir.md's own follow-up correcting its own originally-
+    // documented "no merge" limitation, accurate when this IR was only ever printed for `ax ir`,
+    // wrong now that it drives real LLVM codegen).
+    std::vector<std::tuple<int, int, int>> carriedMerges;
 };
 
 struct IrReturn final : IrInst

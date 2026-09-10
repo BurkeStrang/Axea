@@ -325,4 +325,24 @@ private:
     // module's own qualified self-reference (`math.helper()` called from within math's own code)
     // from the `pub` check a genuinely external qualified reference needs.
     std::string currentFunctionModule_;
+    // `unsafe { ... }` (see docs/language/0019-unsafe.md) - true only while checkExpr's own
+    // UnsafeBlockExpr case is actively walking that block's body. A plain member field with
+    // manual save/restore at that single call site (not a parameter threaded through every
+    // checkExpr/checkStmt/checkBlock/checkFieldType/checkCallArguments signature) - correctly
+    // handles nesting (`unsafe { unsafe { ... } }`) with zero changes anywhere else, since that
+    // one call site is the only place the value ever changes. Explicitly reset to false at the
+    // start of both TypeChecker::check's own top-level-statement loop and checkFunction (every
+    // function body starts fresh, regardless of what an unrelated function or top-level statement
+    // left it as) - this codebase performs a single static walk of each function body, never a
+    // dynamic call-stack simulation, so a caller being inside `unsafe` never implicitly extends
+    // into a callee's own body either.
+    bool insideUnsafe_ = false;
+    // `&name` (see docs/language/0019-unsafe.md) - closures are out of scope for address-of this
+    // phase (IrGenerator's own address-taken-name escape analysis deliberately doesn't recurse
+    // into a ClosureExpr's own body), so this flag exists purely to reject `&name` there with a
+    // clean diagnostic instead of letting it silently miscompile into a plain value register at
+    // codegen time. Same save/restore shape as insideUnsafe_ above, just gating a rejection
+    // instead of a requirement, and flipped around ClosureExpr's own body-checking instead of
+    // UnsafeBlockExpr's.
+    bool insideClosureBody_ = false;
 };
