@@ -1,7 +1,85 @@
 # `SortedMap<K,V>`: A Real AVL Tree, the First Self-Balancing Structure
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0040-sorted-maps.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`SortedMap<K,V>` is no longer a compiler intrinsic. Following `Map<K,V>`/`Set<T>`'s own port
+(`docs/language/0034-maps-and-sets.md`'s own "2026 Update", this document's own sibling), it is
+now a real, user-declared generic struct with a generic inherent `impl` block, living in
+`std/collections.ax`. Unlike `Map<K,V>`/`Set<T>`, no new language feature was needed first — real
+Axea source already supports generic `<`/`>` comparisons on any `TypeChecker::isOrderableKind`
+type, already proven end-to-end by `PriorityQueue<T>`'s own real port (`docs/language/0006-
+generics.md`'s own port follow-up).
+
+```ax
+use collections
+
+scores: SortedMap<i32,i32> = collections.newSortedMap<i32,i32>()
+scores.set(93, 1)
+scores.set(87, 2)
+
+top = scores.get(87)         // 2
+has = scores.contains(93)    // true
+scores.remove(93)
+```
+
+**What changed and why:**
+
+- **Construction**: `SortedMap<K,V>()` call-style sugar → `collections.newSortedMap<K,V>()`, an
+  ordinary generic function call — identical reasoning to every prior port's own construction
+  change.
+- **A real `*SortedMapNode<K,V>` pointer tree**, not a hand-rolled `%axea.SortedMapNode.<id>` LLVM
+  type with hand-emitted runtime functions. Node layout `{ key, value, height, left, right }`,
+  faithfully translating the retired intrinsic's own hand-verified AVL algorithm (height-cached
+  rebalancing, the same four LL/LR/RR/RL rotation cases, in-order-successor splicing for
+  two-children removal, no `free` on `remove` — matches this codebase's "leak, don't free"
+  convention).
+- **`insertNode`/`removeNode`'s own `i1* isNewOut`/`i1* isRemovedOut` out-parameters became
+  ordinary result structs returned by value** (`SortedMapInsertResult<K,V>`/
+  `SortedMapRemoveResult<K,V>`, each `{ node: *SortedMapNode<K,V>, wasNew/wasRemoved: bool }`) —
+  real Axea has no out-parameters; a hand-written LLVM function threaded the "did this call
+  actually insert/remove" flag through a pointer specifically *because* it could only cleanly
+  return one value alongside the rebalanced subtree root. A real function returning a small struct
+  has no such limitation. `unsafe { *ptr }` assigned to a local (`yNode = unsafe { *y }`) is a
+  live, write-through view onto the same heap node — mutating a field through it (`yNode.left =
+  t2`) writes through to the real underlying struct, the identical pattern `Map<K,V>.remove`'s own
+  `prevNode.next = ...` already established.
+- **`K`'s own "must be orderable" restriction is no longer enforced eagerly at construction
+  time** — a real generic struct has no trait-bound system to enforce that at declaration time.
+  The error now surfaces the first time `<`/`>` is actually reached inside a monomorphized
+  `set`/`get`/`contains`/`remove` body for that concrete `K` (`TypeChecker`'s own ordinary
+  `BinaryExpr` `Less`/`Greater`/... case, `requireOrdered`) — the exact same accepted scope
+  narrowing `Map<K,V>`/`Set<T>`'s own hashability restriction already went through.
+- **No bounds check on `get`'s own missing-key case** — dereferences a null node pointer once the
+  search runs off a leaf, matching `Map<K,V>.get()`'s own identical "2026 Update": the interpreter
+  throws a clear "dereferenced a null pointer" error, compiled mode is genuine UB (was an
+  unspecified sentinel before).
+- **`.length` stays a bare field**, matching `Map<K,V>`/`Set<T>`/`Deque<T>`/`LinkedList<T>`'s own
+  precedent.
+- **A real, previously-undiscovered compiler bug found and fixed while porting**: a module's own
+  *private* (non-`pub`) top-level generic function calling *another* private top-level function in
+  that same module, by bare (unqualified) name — e.g. an `impl<K,V> SortedMap<K,V>` method calling
+  its own module's `sortedMapInsertNode<K,V>(...)` helper — never resolved
+  (`GenericMonomorphizer` threw `"'sortedMapInsertNode' is not a known generic function"`).
+  `ModuleLoader::mergeModule` renames every plain top-level `FunctionDecl`'s own *declaration* to
+  `"moduleName.originalName"`, but nothing rewrote the matching bare *call sites* to match —
+  `UnqualifiedCallResolver::resolveUnqualifiedCalls` (which runs later, on the fully merged
+  program) only ever indexes a used module's own `pub` functions as resolution candidates, by
+  design (it exposes a module's own public API unqualified to *external* callers, not a module's
+  own internal cross-references). Never triggered before this port: nothing in `std/collections.ax`
+  ever had one top-level function call a *different* top-level function before — only
+  `self.resize()`-style method calls and `hash<K>()`/`keyEq<K>()` builtin intrinsics. Fixed in
+  `ModuleLoader::mergeModule` itself, narrowly scoped to a single module's own not-yet-merged
+  items (that module's own plain top-level function names only, collected before any of them are
+  renamed) — zero cross-module ambiguity risk.
+- See `examples/sorted_map.ax` for a worked example (verified both interpreted and compiled, `-O0`
+  and `-O1`, including a 50-element ascending/descending stress test exercising every rotation
+  case, plus `char`/`str`/`i64`/`f64` key types); everything below this section documents the
+  *original compiler-intrinsic design* (now retired) for historical context.
 
 ---
 
@@ -393,9 +471,10 @@ already emptied it.
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **`K` is `i32` only.** No `by:`/`order:` selector, no `Ordered` trait -
-  same gap `PriorityQueue<T>`'s own element-type restriction already
-  documents (see `docs/language/0039-priority-queues.md`).
+- **`K` is `i32`/`i64`/`f64`/`char`/`str` only** (this note was stale before the 2026 Update above
+  even landed — `isOrderableKind` was widened past `i32` alone by `docs/language/0051-numeric-
+  widening.md`). No `by:`/`order:` selector, no `Ordered` trait - same gap `PriorityQueue<T>`'s own
+  element-type restriction already documents (see `docs/language/0039-priority-queues.md`).
 - **No `[key]`/`[key] =` syntax.** `0029`'s own sketch shows it, but no
   indexed-assignment desugar exists for any non-array-shaped receiver in
   this codebase - `set(key, value)` is the only mutation path, matching

@@ -1,7 +1,69 @@
 # `SortedSet<T>`: `SortedMap<K,V>`'s Own Tree, Minus the Value Field
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0041-sorted-sets.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`SortedSet<T>` is no longer a compiler intrinsic. Following `SortedMap<K,V>`'s own port
+(`docs/language/0040-sorted-maps.md`'s own "2026 Update", this document's own sibling), it is now
+a real, user-declared generic struct with a generic inherent `impl` block, living in
+`std/collections.ax` - the last of the ten collections `docs/language/0029-collections.md`
+originally scoped as compiler intrinsics. No new language feature was needed, same reasoning as
+SortedMap<K,V>'s own port: real Axea source already supports generic `<`/`>` comparisons on any
+`TypeChecker::isOrderableKind` type.
+
+```ax
+use collections
+
+ids: SortedSet<i32> = collections.newSortedSet<i32>()
+ids.add(93)
+ids.add(87)
+
+has = ids.contains(87)   // true
+ids.remove(93)
+```
+
+**What changed and why:** byte-for-byte `SortedMap<K,V>`'s own "2026 Update" section above, minus
+the value field, the same relationship the two collections' own *original* designs already had:
+
+- **Construction**: `SortedSet<T>()` call-style sugar → `collections.newSortedSet<T>()`, an
+  ordinary generic function call.
+- **A real `*SortedSetNode<T>` pointer tree**, not a hand-rolled `%axea.SortedSetNode.<id>` LLVM
+  type with hand-emitted runtime functions. Node layout `{ key, height, left, right }` (one field
+  narrower than `SortedMap<K,V>`'s own `{ key, value, height, left, right }`, no value to store),
+  faithfully translating the retired intrinsic's own hand-verified AVL algorithm. `insertNode`'s
+  "already present" base case has nothing to update (no value field) - it just reports "not new"
+  and returns the node unchanged, matching this document's own original "Design" section's
+  identical observation about the retired intrinsic.
+- **`insertNode`/`removeNode`'s own `i1* isNewOut`/`i1* isRemovedOut` out-parameters became
+  ordinary result structs returned by value** (`SortedSetInsertResult<T>`/
+  `SortedSetRemoveResult<T>`, each `{ node: *SortedSetNode<T>, wasNew/wasRemoved: bool }`) -
+  identical reasoning to `SortedMap<K,V>`'s own port.
+- **`T`'s own "must be orderable" restriction is no longer enforced eagerly at construction
+  time** - it now surfaces the first time `<`/`>` is actually reached inside a monomorphized
+  `add`/`contains`/`remove` body for that concrete `T`, the same accepted scope narrowing
+  `SortedMap<K,V>`'s own port already went through.
+- **`.length` stays a bare field**, matching every other real collection in `std/collections.ax`.
+- **The last of this session's own `isSortedSetExpr`/`isSortedMapExpr`/`isSetExpr`-style
+  method-name-collision resolvers is gone.** `set`/`get`/`add`/`contains`/`remove` all reach
+  their own real struct methods via the general struct method dispatch now - the four-way
+  `contains`/`remove` collision this document's own original "The wrinkle, compounding" section
+  described no longer exists at all; `IrGenerator`'s own entire remaining special-case
+  `MethodCallExpr` block for these names, and every one of its own `isXExpr` disambiguation
+  resolvers, collapsed to nothing once every collection retired.
+- **A real, previously-undiscovered compiler bug found and fixed while porting `SortedMap<K,V>`
+  just before this collection** (see `docs/language/0040-sorted-maps.md`'s own "2026 Update" for
+  the full account): a module's own private top-level generic function calling another private
+  top-level function in that same module, by bare name, never resolved. Fixed in
+  `ModuleLoader::mergeModule`; `SortedSet<T>`'s own `impl` methods (calling
+  `sortedSetInsertNode<T>(...)`/`sortedSetRemoveNode<T>(...)`) rely on that same fix.
+- See `examples/sorted_set.ax` for a worked example (verified both interpreted and compiled,
+  `-O0` and `-O1`, including a 50-element ascending/descending stress test plus `char`/`str` key
+  types); everything below this section documents the *original compiler-intrinsic design* (now
+  retired) for historical context.
 
 ---
 
@@ -302,8 +364,10 @@ precedent every collection's own worked example here already shows.
 
 # Known Imprecision / Out of Scope (By Design, Not Oversight)
 
-- **`T` is `i32` only.** Same gap `PriorityQueue<T>`/`SortedMap<K,V>`'s own
-  restrictions already document.
+- **`T` is `i32`/`i64`/`f64`/`char`/`str` only** (this note was stale before the 2026 Update
+  above even landed - `isOrderableKind` was widened past `i32` alone by `docs/language/0051-
+  numeric-widening.md`). Same gap `PriorityQueue<T>`/`SortedMap<K,V>`'s own restrictions already
+  document.
 - **No `for`-in iteration**, and therefore no way to observe sorted order
   from Axea code directly this phase - the identical deferred piece
   `SortedMap<K,V>` has, for the identical reason (blocked on iteration

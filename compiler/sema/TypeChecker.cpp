@@ -84,9 +84,12 @@ namespace
     // ordering, like Set<T>/Map<K,V>'s own hashability below, only ever
     // considers the bare value type; convert to str first, the same way a
     // String already has to for any other str-only operation. Shared by
-    // requireOrdered below and by PriorityQueue<T>/SortedMap<K,V>/
-    // SortedSet<T>'s own element/key-type checks, which all mean the same
-    // "orderable" (see docs/language/0039-priority-queues.md).
+    // requireOrdered below and, now that PriorityQueue<T>/SortedMap<K,V>/SortedSet<T> are all
+    // real, user-declared generic structs (see docs/language/0006-generics.md's own port
+    // follow-up, docs/language/0040-sorted-maps.md's own "2026 Update", and
+    // docs/language/0041-sorted-sets.md's own "2026 Update"), by the ordinary BinaryExpr
+    // `<`/`<=`/`>`/`>=` case their own monomorphized method bodies reach like any other `<`
+    // comparison (see docs/language/0039-priority-queues.md).
     bool isOrderableKind(TypeKind kind)
     {
         return isNumericKind(kind) || kind == TypeKind::Char || kind == TypeKind::String;
@@ -120,6 +123,25 @@ namespace
     bool isStrCoercible(const Type& type)
     {
         return type == kStr || type.kind == TypeKind::OwnedString;
+    }
+
+    // `null` (see docs/language/0019-unsafe.md) - true when `from` is the untyped null pointer
+    // literal's own type and `to` is any real `*T`. A self-referential node struct (e.g.
+    // `Node<T> { next: *Node<T> }`, see docs/language/0036-linked-lists.md's own 2026 port) uses
+    // a real raw pointer for this, not a plain struct-typed field - RegionChecker's own move
+    // semantics has no partial-move support (a struct-typed field is always Borrowed, regardless
+    // of its parent's own region - see RegionChecker.cpp's own FieldExpr comment), so rebinding a
+    // traversal variable via `current = current.next` is only legal when `next` is pointer-typed
+    // (pointers are primitive-like - always Owned, no move-tracking at all - see RegionChecker's
+    // own "'*T' parameter is always Owned" rule). Checked wherever a value is being matched
+    // against an expected/declared pointer type (call arguments, assignment, struct-literal
+    // field init, a plain field assignment, `return`) - mirrors arrayToSliceCoercion's own
+    // "narrow, single-purpose coercion rule checked alongside plain equality" shape exactly.
+    // `==`/`!=` needs this checked in *both* directions (either operand could be the null side),
+    // every other call site only needs the one direction (the value coerces to the expected type).
+    bool isNullPointerCoercion(const Type& from, const Type& to)
+    {
+        return from.kind == TypeKind::NullPointer && to.kind == TypeKind::Pointer;
     }
 
     // Types safe to cross an `extern c` boundary (see
@@ -170,12 +192,7 @@ namespace
             case TypeKind::Enum:
             case TypeKind::Struct:
             case TypeKind::Array:
-            case TypeKind::Slice:
-            case TypeKind::LinkedList:
-            case TypeKind::Map:
-            case TypeKind::Set:
-            case TypeKind::SortedMap:
-            case TypeKind::SortedSet: return true;
+            case TypeKind::Slice: return true;
             default: return false;
         }
     }
@@ -229,31 +246,17 @@ namespace
     // field type too, like any other struct, so the restriction this phase's own intrinsic
     // implementation used to need no longer applies; no rejectListAsFieldType left here.
 
-    // Same "kept restricted purely to bound this pass's surface area, not
-    // for any deeper architectural reason" rationale slice<T>/List<T> used to share above -
-    // see docs/language/0034-maps-and-sets.md.
-    void rejectMapOrSetAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::Map || type.kind == TypeKind::Set)
-        {
-            throw std::runtime_error(typeName(type) +
-                                     " is not supported as a struct field type in this phase");
-        }
-    }
+    // Map<K,V>/Set<T> are real, user-declared generic structs now (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - they may freely be a struct field
+    // type too, like any other struct; no rejectMapOrSetAsFieldType left here.
 
     // Stack<T> is a real, user-declared generic struct now (see
     // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - it may freely be a
     // struct field type too, like any other struct; no rejectStackAsFieldType left here.
 
-    // Same rationale again - see docs/language/0036-linked-lists.md.
-    void rejectLinkedListAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::LinkedList)
-        {
-            throw std::runtime_error(
-                "LinkedList<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // LinkedList<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own port follow-up) - it may freely be a struct field
+    // type too, like any other struct; no rejectLinkedListAsFieldType left here.
 
     // Deque<T> is a real, user-declared generic struct now (see
     // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - it may
@@ -270,25 +273,13 @@ namespace
     // port follow-up) - it may freely be a struct field type too, like any other struct; no
     // rejectPriorityQueueAsFieldType left here.
 
-    // Same rationale again - see docs/language/0040-sorted-maps.md.
-    void rejectSortedMapAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::SortedMap)
-        {
-            throw std::runtime_error(
-                "SortedMap<K,V> is not supported as a struct field type in this phase");
-        }
-    }
+    // SortedMap<K,V> is a real, user-declared generic struct now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - it may freely be a struct field
+    // type too, like any other struct; no rejectSortedMapAsFieldType left here.
 
-    // Same rationale again - see docs/language/0041-sorted-sets.md.
-    void rejectSortedSetAsFieldType(const Type& type)
-    {
-        if (type.kind == TypeKind::SortedSet)
-        {
-            throw std::runtime_error(
-                "SortedSet<T> is not supported as a struct field type in this phase");
-        }
-    }
+    // SortedSet<T> is a real, user-declared generic struct now (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - it may freely be a struct field
+    // type too, like any other struct; no rejectSortedSetAsFieldType left here.
 
     // Same rationale again - see docs/language/0042-string.md.
     void rejectOwnedStringAsFieldType(const Type& type)
@@ -419,6 +410,58 @@ namespace
         }
         return {params, returnType};
     }
+
+    // Does `expr` contain a `break` reachable from a `loop { ... }`'s own body, without
+    // descending into a *nested* loop/while (whose own break targets that inner loop, not the
+    // one being asked about)? Used by TypeChecker::definitelyReturns below (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update" - a real, previously-undiscovered
+    // gap found while porting Map<K,V>: `get(self, key: K) -> V { idx = ... loop { ... if
+    // keyEq<K>(...) { return ... } cur = ... } }` has no code at all after the loop, and the loop
+    // itself has no `break` - every exit is a `return` from inside it, so the function
+    // unconditionally returns on every path, but `definitelyReturns` never had a `LoopExpr` case
+    // to recognize that (every earlier collection's own loops always had a `return` *after* the
+    // loop instead, e.g. PriorityQueue<T>.pop()'s own sift-down loop, so this was never exercised
+    // before). Not a fully general control-flow analysis - covers block/if/unsafe/match nesting,
+    // the only shapes a `break` can appear inside in this grammar.
+    bool containsReachableBreak(const Expr& expr)
+    {
+        if (const auto* block = dynamic_cast<const BlockExpr*>(&expr))
+        {
+            for (const auto& statement : block->statements)
+            {
+                if (dynamic_cast<const BreakStmt*>(statement.get()))
+                {
+                    return true;
+                }
+                if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(statement.get());
+                    exprStmt && containsReachableBreak(*exprStmt->expr))
+                {
+                    return true;
+                }
+            }
+            return block->result && containsReachableBreak(*block->result);
+        }
+        if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
+        {
+            return containsReachableBreak(*ifExpr->thenBranch) ||
+                   containsReachableBreak(*ifExpr->elseBranch);
+        }
+        if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+        {
+            return containsReachableBreak(*unsafeBlock->body);
+        }
+        if (const auto* matchExpr = dynamic_cast<const MatchExpr*>(&expr))
+        {
+            return std::any_of(matchExpr->arms.begin(),
+                               matchExpr->arms.end(),
+                               [](const MatchArm& arm)
+                               { return containsReachableBreak(*arm.body); });
+        }
+        // LoopExpr/WhileStmt aren't recursed into - a `break` there targets that inner loop, not
+        // the outer one this check is asking about. Every other expression shape can't contain a
+        // statement at all.
+        return false;
+    }
 } // namespace
 
 std::string typeName(const Type& type)
@@ -450,16 +493,11 @@ std::string typeName(const Type& type)
         case TypeKind::Shared: return "Shared<" + type.elementTypeName + ">";
         case TypeKind::Result:
             return "Result<" + type.elementTypeName + "," + type.valueTypeName + ">";
-        case TypeKind::LinkedList: return "LinkedList<" + type.elementTypeName + ">";
-        case TypeKind::Map: return "Map<" + type.elementTypeName + "," + type.valueTypeName + ">";
-        case TypeKind::Set: return "Set<" + type.elementTypeName + ">";
-        case TypeKind::SortedMap:
-            return "SortedMap<" + type.elementTypeName + "," + type.valueTypeName + ">";
-        case TypeKind::SortedSet: return "SortedSet<" + type.elementTypeName + ">";
         case TypeKind::OwnedString: return "String";
         case TypeKind::Buffer: return "Buffer";
         case TypeKind::CStr: return "cstr";
         case TypeKind::Pointer: return "*" + type.elementTypeName;
+        case TypeKind::NullPointer: return "null";
         default: return "<unsupported type>";
     }
 }
@@ -677,8 +715,9 @@ Type TypeChecker::checkCallArguments(const std::string& calleeDisplayName,
         // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
         // syntax, the actual ergonomic point of the feature.
         const bool unionWrapCoercion = isUnionMember(argType, paramType);
+        const bool nullPointerCoercion = isNullPointerCoercion(argType, paramType);
         if (!(argType == paramType) && !arrayToSliceCoercion && !stringToStrCoercion &&
-            !unionWrapCoercion)
+            !unionWrapCoercion && !nullPointerCoercion)
         {
             throw std::runtime_error("argument " + std::to_string(i + 1) + " to '" +
                                      calleeDisplayName + "' expects " + typeName(paramType) +
@@ -801,15 +840,10 @@ Type TypeChecker::resolveType(const std::string& name) const
     // user-declared generic struct now (std/collections.ax), resolved by the ordinary struct
     // lookup further down like any other, same as List<T> just above.
 
-    // "LinkedList<elem>" - a doubly linked, node-based collection (see
-    // docs/language/0036-linked-lists.md) - same one-level element
-    // restriction as List<elem>/Stack<elem> above, for the same reason.
-    if (name.starts_with("LinkedList<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(11, name.size() - 12);
-        const Type elementType = resolveType(elementName);
-        return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
-    }
+    // "LinkedList<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0006-generics.md's own port follow-up) - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other.
 
     // "Deque<elem>" is deliberately NOT recognized here anymore (see
     // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - it's a
@@ -834,127 +868,35 @@ Type TypeChecker::resolveType(const std::string& name) const
     // any PriorityQueue<bool> reference (GenericMonomorphizer eagerly clones every impl method
     // the moment a struct instantiation is referenced, not lazily per call).
 
-    // "Set<elem>" - the canonical form Parser::parseTypeName always produces
-    // (see docs/language/0034-maps-and-sets.md's generic rewrite, modeled on
-    // Rust: the element type needs real Hash+Eq, monomorphized per distinct
-    // shape actually used - see LlvmIrEmitter). `elementTypeName` stores the
-    // canonical string (`typeName` of the resolved element type, not the raw
-    // source text) so two differently-spelled-but-equivalent Set<T>s still
-    // compare equal via the defaulted operator==.
-    if (name.starts_with("Set<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(4, name.size() - 5);
-        const Type elementType = resolveType(elementName);
-        rejectSliceOutsideParameter(elementType, "a Set element type");
-        std::unordered_set<std::string> visitedStructs;
-        if (!isHashable(elementType, visitedStructs))
-        {
-            throw std::runtime_error(
-                "Set<T> requires a hashable element type (i32, bool, str, or a struct/array/"
-                "List composed entirely of hashable types), found Set<" +
-                typeName(elementType) + ">");
-        }
-        Type result{};
-        result.kind = TypeKind::Set;
-        result.elementTypeName = typeName(elementType);
-        return result;
-    }
+    // "Set<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other. `hash<T>()`/`keyEq<T>()` (below) are the new generic-code-facing
+    // entry point into the same `isHashable` requirement Set<T>'s own key used to enforce eagerly
+    // here.
 
-    // "SortedSet<elem>" - a real AVL tree, keeping elements ordered (see
-    // docs/language/0041-sorted-sets.md). Same string-based
-    // elementTypeName representation Set<T> above uses (not List/Stack's
-    // own flat elementKind - mirrors Set<T>, not the array-like
-    // collections, since SortedSet<T> is "Set<T>, but ordered"). The
-    // restriction here is orderability, not hashability - same
-    // isOrderableKind requirement PriorityQueue<T>/SortedMap<K,V>'s own
-    // element/key already have (see docs/language/0039-priority-queues.md).
-    if (name.starts_with("SortedSet<") && name.back() == '>')
-    {
-        const std::string elementName = name.substr(10, name.size() - 11);
-        const Type elementType = resolveType(elementName);
-        if (!isOrderableKind(elementType.kind))
-        {
-            throw std::runtime_error(
-                "SortedSet<T> requires an orderable element type (i32, i64, f64, char, or str only "
-                "in "
-                "this phase - no other type is comparable yet), found SortedSet<" +
-                typeName(elementType) + ">");
-        }
-        Type result{};
-        result.kind = TypeKind::SortedSet;
-        result.elementTypeName = typeName(elementType);
-        return result;
-    }
+    // "SortedSet<elem>" is deliberately NOT recognized here anymore (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other. The real generic function's own eager orderability enforcement this
+    // branch used to do is gone too, matching SortedMap<K,V>'s own identical port decision - a
+    // non-orderable T now surfaces from within the monomorphized `add`/`contains`/`remove` body's
+    // own `<`/`>` comparison instead (see TypeChecker.cpp's own BinaryExpr Less/LessEqual/... case
+    // and `requireOrdered`).
 
-    // "Map<key,value>" - the canonical form Parser::parseTypeName always
-    // produces. Same Hash+Eq requirement on the key as Set<T> above; V has no
-    // such requirement (never hashed or compared - only ever stored) and may
-    // be any resolvable type except slice<T> (still parameter-only).
-    if (name.starts_with("Map<") && name.back() == '>')
-    {
-        const std::string args = name.substr(4, name.size() - 5);
-        const auto comma = findTopLevelComma(args);
-        if (comma == std::string::npos)
-        {
-            throw std::runtime_error("malformed Map type: " + name);
-        }
-        const std::string keyName = args.substr(0, comma);
-        const std::string valueName = args.substr(comma + 1);
-        const Type keyType = resolveType(keyName);
-        const Type valueType = resolveType(valueName);
-        rejectSliceOutsideParameter(keyType, "a Map key type");
-        rejectSliceOutsideParameter(valueType, "a Map value type");
-        std::unordered_set<std::string> visitedStructs;
-        if (!isHashable(keyType, visitedStructs))
-        {
-            throw std::runtime_error(
-                "Map<K,V> requires a hashable key type (i32, bool, str, or a struct/array/List "
-                "composed entirely of hashable types), found Map<" +
-                typeName(keyType) + "," + typeName(valueType) + ">");
-        }
-        Type result{};
-        result.kind = TypeKind::Map;
-        result.elementTypeName = typeName(keyType);
-        result.valueTypeName = typeName(valueType);
-        return result;
-    }
+    // "Map<key,value>" is deliberately NOT recognized here anymore (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other.
 
-    // "SortedMap<key,value>" - a real AVL tree, keeping keys ordered (see
-    // docs/language/0040-sorted-maps.md). Same two-type-argument shape as
-    // Map<K,V> above, reusing its bracket-depth-aware comma split - but the
-    // key restriction is orderability, not hashability: only types
-    // isOrderableKind accepts (i32, char) have a real total order in this
-    // language today (same reasoning PriorityQueue<T>'s own element-type
-    // restriction already established - see
-    // docs/language/0039-priority-queues.md). V has no such requirement
-    // (never compared, only stored) and may be any resolvable type except
-    // slice<T> (still parameter-only), exactly like Map<K,V>'s own V.
-    if (name.starts_with("SortedMap<") && name.back() == '>')
-    {
-        const std::string args = name.substr(10, name.size() - 11);
-        const auto comma = findTopLevelComma(args);
-        if (comma == std::string::npos)
-        {
-            throw std::runtime_error("malformed SortedMap type: " + name);
-        }
-        const std::string keyName = args.substr(0, comma);
-        const std::string valueName = args.substr(comma + 1);
-        const Type keyType = resolveType(keyName);
-        const Type valueType = resolveType(valueName);
-        rejectSliceOutsideParameter(valueType, "a SortedMap value type");
-        if (!isOrderableKind(keyType.kind))
-        {
-            throw std::runtime_error("SortedMap<K,V> requires an orderable key type (i32, i64, "
-                                     "f64, char, or str only in this "
-                                     "phase - no other type is comparable yet), found SortedMap<" +
-                                     typeName(keyType) + "," + typeName(valueType) + ">");
-        }
-        Type result{};
-        result.kind = TypeKind::SortedMap;
-        result.elementTypeName = typeName(keyType);
-        result.valueTypeName = typeName(valueType);
-        return result;
-    }
+    // "SortedMap<key,value>" is deliberately NOT recognized here anymore (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other. The real generic function `hash<T>()`-style eager key-type
+    // enforcement this branch used to do is gone too, matching Map<K,V>'s own identical port
+    // decision - a non-orderable K now surfaces from within the monomorphized `set`/`get`/
+    // `contains`/`remove` body's own `<`/`>` comparison instead (see
+    // TypeChecker.cpp's own BinaryExpr Less/LessEqual/... case and `requireOrdered`).
 
     // "String" - Axea's own owned, growable byte buffer (see
     // docs/language/0042-string.md), distinct from the `str` primitive
@@ -1279,10 +1221,6 @@ void TypeChecker::registerSignatures(const Program& program)
         {
             const Type fieldType = resolveType(field.type);
             rejectSliceOutsideParameter(fieldType, "a struct field type");
-            rejectMapOrSetAsFieldType(fieldType);
-            rejectLinkedListAsFieldType(fieldType);
-            rejectSortedMapAsFieldType(fieldType);
-            rejectSortedSetAsFieldType(fieldType);
             rejectOwnedStringAsFieldType(fieldType);
             rejectBufferAsFieldType(fieldType);
         }
@@ -1460,6 +1398,15 @@ bool TypeChecker::definitelyReturns(const BlockExpr& block) const
             {
                 return true;
             }
+            // `loop { ... }` with no reachable `break` anywhere in it (see
+            // docs/language/0034-maps-and-sets.md's own "2026 Update" and
+            // containsReachableBreak's own doc comment above) - every exit is a `return`, so this
+            // diverges exactly like Rust's own `loop {}` (typed `!`, unifies with anything).
+            if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(exprStmt->expr.get());
+                loopExpr && !containsReachableBreak(*loopExpr->body))
+            {
+                return true;
+            }
         }
     }
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(block.result.get()))
@@ -1469,6 +1416,10 @@ bool TypeChecker::definitelyReturns(const BlockExpr& block) const
     if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(block.result.get()))
     {
         return definitelyReturns(static_cast<const BlockExpr&>(*unsafeBlock->body));
+    }
+    if (const auto* loopExpr = dynamic_cast<const LoopExpr*>(block.result.get()))
+    {
+        return !containsReachableBreak(*loopExpr->body);
     }
     return false;
 }
@@ -1609,7 +1560,9 @@ void TypeChecker::checkStmt(const Stmt& stmt,
                 // tracked at the declared union type from here on (not the
                 // bare alternative's own type), so a later `match x { ... }`
                 // sees the union it was actually declared as.
-                if (!isUnionMember(valueType, declared))
+                // `x: *T = null` (see docs/language/0019-unsafe.md) needs the identical
+                // "track the declared type from here on, not the coerced-from one" treatment.
+                if (!isUnionMember(valueType, declared) && !isNullPointerCoercion(valueType, declared))
                 {
                     throw std::runtime_error("variable '" + assignment->name + "' declared as " +
                                              typeName(declared) + " but initialized with " +
@@ -1697,8 +1650,10 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         {
             // Implicit union wrapping (see docs/language/0065-unions.md) -
             // `return 5` from a function declared `-> i32 | str` needs no
-            // wrapper syntax.
-            if (!isUnionMember(valueType, *expectedReturnType))
+            // wrapper syntax. `return null` (see docs/language/0019-unsafe.md) needs the
+            // identical treatment against a `*T`-declared return type.
+            if (!isUnionMember(valueType, *expectedReturnType) &&
+                !isNullPointerCoercion(valueType, *expectedReturnType))
             {
                 throw std::runtime_error("'return' produces " + typeName(valueType) +
                                          " but function declares " + typeName(*expectedReturnType));
@@ -1722,7 +1677,7 @@ void TypeChecker::checkStmt(const Stmt& stmt,
                                               currentLoopBreakTypes);
         const Type valueType =
             checkExpr(*fieldAssign->value, env, expectedReturnType, currentLoopBreakTypes);
-        if (!(fieldType == valueType))
+        if (!(fieldType == valueType) && !isNullPointerCoercion(valueType, fieldType))
         {
             throw std::runtime_error("field '" + fieldAssign->field + "' expects " +
                                      typeName(fieldType) + ", got " + typeName(valueType));
@@ -1776,7 +1731,7 @@ void TypeChecker::checkStmt(const Stmt& stmt,
         const Type pointeeType = resolveType(pointerType.elementTypeName);
         const Type valueType =
             checkExpr(*derefAssign->value, env, expectedReturnType, currentLoopBreakTypes);
-        if (!(valueType == pointeeType))
+        if (!(valueType == pointeeType) && !isNullPointerCoercion(valueType, pointeeType))
         {
             throw std::runtime_error("pointer dereference assignment expects " +
                                      typeName(pointeeType) + ", got " + typeName(valueType));
@@ -1864,44 +1819,18 @@ Type TypeChecker::checkFieldType(const Expr& object,
                                  "' (did you mean 'length'?)");
     }
 
-    // Map<K,V>/Set<T> aren't indexable (unordered - no `[i]`), so this is a
-    // standalone case rather than folded into isIndexable above (see
-    // docs/language/0034-maps-and-sets.md).
-    if (objectType.kind == TypeKind::Map || objectType.kind == TypeKind::Set)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // Map<K,V>/Set<T> are real, user-declared generic structs now (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - `.length` reaches them via
+    // ordinary struct field lookup further down, like any other struct; no standalone case left
+    // here.
 
-    // SortedMap<K,V> isn't indexable either - no `[key]`/`[key] =` syntax
-    // this phase, and no `for`-in iteration either (see
-    // docs/language/0040-sorted-maps.md) - mirrors Map<K,V>/Set<T>'s own
-    // identical restriction.
-    if (objectType.kind == TypeKind::SortedMap)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // SortedMap<K,V> is a real, user-declared generic struct now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - `.length` reaches it via ordinary
+    // struct field lookup further down, like any other struct; no standalone case left here.
 
-    // SortedSet<T> isn't indexable either - same reasoning as SortedMap<K,V>
-    // above (see docs/language/0041-sorted-sets.md).
-    if (objectType.kind == TypeKind::SortedSet)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
+    // SortedSet<T> is a real, user-declared generic struct now (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - `.length` reaches it via ordinary
+    // struct field lookup further down, like any other struct; no standalone case left here.
 
     // str isn't indexable either this phase - slicing (`s[..4]`) is its own
     // separate AST node, not FieldExpr (see docs/language/0045-str-slicing.md).
@@ -1960,18 +1889,6 @@ Type TypeChecker::checkFieldType(const Expr& object,
     // is an ordinary method (`s.length()`), not a bare field, since it delegates to an internal
     // `items: List<T>` field with no computed-property syntax to expose that through a bare
     // field read; reached via general struct method dispatch, not here.
-
-    // LinkedList<T> isn't indexable either - node-based, front/back access
-    // only, no `[i]` (see docs/language/0036-linked-lists.md).
-    if (objectType.kind == TypeKind::LinkedList)
-    {
-        if (field == "length")
-        {
-            return kI32;
-        }
-        throw std::runtime_error(typeName(objectType) + " has no field '" + field +
-                                 "' (did you mean 'length'?)");
-    }
 
     // Queue<T> is a real, user-declared generic struct now (see
     // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up) -
@@ -2678,47 +2595,11 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // `.length()` reach it via the general struct method dispatch at the end of this
         // if-chain.
 
-        // LinkedList<T> (see docs/language/0036-linked-lists.md) - push_front/push_back/
-        // pop_front/pop_back are unique names nothing else uses, so there's no ambiguity to
-        // resolve downstream (see IrGenerator). No peek_front/peek_back this phase - every operation
-        // either adds or removes, never aliases, so RegionChecker needs no
-        // exception clause for LinkedList<T> at all.
-        if (objectType.kind == TypeKind::LinkedList)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "push_front" || methodCall->method == "push_back")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type argType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(argType == elementType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(elementType) + ", got " + typeName(argType));
-                }
-                return kUnit;
-            }
-
-            if (methodCall->method == "pop_front" || methodCall->method == "pop_back")
-            {
-                if (!methodCall->arguments.empty())
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 0 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                return elementType;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
+        // LinkedList<T> is a real, user-declared generic struct now (see
+        // docs/language/0006-generics.md's own port follow-up) - there is no
+        // TypeKind::LinkedList-specific push_front/push_back/pop_front/pop_back dispatch left
+        // here; they reach it via the general struct method dispatch at the end of this
+        // if-chain, the same way List<T>/Stack<T>/Deque<T>/Queue<T> already do above.
 
         // Deque<T> is a real, user-declared generic struct now (see
         // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) - there
@@ -2740,180 +2621,30 @@ Type TypeChecker::checkExpr(const Expr& expr,
         // method dispatch earlier in this same if-chain (the same one Stack<T>'s own former
         // push/pop/peek already reaches).
 
-        // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
-        // rewrite) - K/V are checked against their own resolved types
-        // (elementTypeName/valueTypeName, re-resolved on demand), not a
-        // hardcoded i32 the way this used to be fixed.
-        if (objectType.kind == TypeKind::Map)
-        {
-            const Type keyType = resolveType(objectType.elementTypeName);
-            const Type valueType = resolveType(objectType.valueTypeName);
+        // Map<K,V>/Set<T> are real, user-declared generic structs now (see
+        // docs/language/0034-maps-and-sets.md's own "2026 Update") - there is no
+        // TypeKind::Map/TypeKind::Set-specific `set`/`get`/`contains`/`remove`/`add` dispatch left
+        // here; all reach it via the general struct method dispatch earlier in this same
+        // if-chain, with `hash<T>()`/`keyEq<T>()` (this file's own new builtin cases) as K's/T's
+        // hashability check now happening inside their own monomorphized method bodies instead of
+        // eagerly here.
 
-            if (methodCall->method == "set")
-            {
-                if (methodCall->arguments.size() != 2)
-                {
-                    throw std::runtime_error("'set' expects 2 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenKeyType = checkExpr(
-                    *methodCall->arguments[0], env, expectedReturnType, currentLoopBreakTypes);
-                const Type givenValueType = checkExpr(
-                    *methodCall->arguments[1], env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenKeyType == keyType) || !(givenValueType == valueType))
-                {
-                    throw std::runtime_error("'set' expects (" + typeName(keyType) + ", " +
-                                             typeName(valueType) + "), got (" +
-                                             typeName(givenKeyType) + ", " +
-                                             typeName(givenValueType) + ")");
-                }
-                return kUnit;
-            }
+        // SortedMap<K,V> is a real, user-declared generic struct now (see
+        // docs/language/0040-sorted-maps.md's own "2026 Update") - there is no
+        // TypeKind::SortedMap-specific `set`/`get`/`contains`/`remove` dispatch left here; all
+        // reach it via the general struct method dispatch earlier in this same if-chain, with a
+        // non-orderable K now surfacing from within the monomorphized method body's own `<`/`>`
+        // comparison instead of eagerly here (matches Map<K,V>'s own identical port decision).
 
-            if (methodCall->method == "get" || methodCall->method == "contains" ||
-                methodCall->method == "remove")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenKeyType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenKeyType == keyType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(keyType) + ", got " + typeName(givenKeyType));
-                }
-                if (methodCall->method == "get")
-                {
-                    return valueType;
-                }
-                return methodCall->method == "contains" ? kBool : kUnit;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        if (objectType.kind == TypeKind::Set)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "add" || methodCall->method == "contains" ||
-                methodCall->method == "remove")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenType == elementType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(elementType) + ", got " +
-                                             typeName(givenType));
-                }
-                return methodCall->method == "contains" ? kBool : kUnit;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // SortedMap<K,V> (see docs/language/0040-sorted-maps.md) - set/get/
-        // contains/remove are byte-for-byte Map<K,V>'s own shape; the
-        // difference (keeping keys ordered internally) is purely an
-        // implementation detail below TypeChecker, not something that
-        // changes any signature here.
-        if (objectType.kind == TypeKind::SortedMap)
-        {
-            const Type keyType = resolveType(objectType.elementTypeName);
-            const Type valueType = resolveType(objectType.valueTypeName);
-
-            if (methodCall->method == "set")
-            {
-                if (methodCall->arguments.size() != 2)
-                {
-                    throw std::runtime_error("'set' expects 2 arguments, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenKeyType = checkExpr(
-                    *methodCall->arguments[0], env, expectedReturnType, currentLoopBreakTypes);
-                const Type givenValueType = checkExpr(
-                    *methodCall->arguments[1], env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenKeyType == keyType) || !(givenValueType == valueType))
-                {
-                    throw std::runtime_error("'set' expects (" + typeName(keyType) + ", " +
-                                             typeName(valueType) + "), got (" +
-                                             typeName(givenKeyType) + ", " +
-                                             typeName(givenValueType) + ")");
-                }
-                return kUnit;
-            }
-
-            if (methodCall->method == "get" || methodCall->method == "contains" ||
-                methodCall->method == "remove")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenKeyType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenKeyType == keyType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(keyType) + ", got " + typeName(givenKeyType));
-                }
-                if (methodCall->method == "get")
-                {
-                    return valueType;
-                }
-                return methodCall->method == "contains" ? kBool : kUnit;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
-
-        // SortedSet<T> (see docs/language/0041-sorted-sets.md) - add/
-        // contains/remove are byte-for-byte Set<T>'s own shape above; the
-        // difference (keeping elements ordered internally) is purely an
-        // implementation detail below TypeChecker.
-        if (objectType.kind == TypeKind::SortedSet)
-        {
-            const Type elementType = resolveType(objectType.elementTypeName);
-
-            if (methodCall->method == "add" || methodCall->method == "contains" ||
-                methodCall->method == "remove")
-            {
-                if (methodCall->arguments.size() != 1)
-                {
-                    throw std::runtime_error("'" + methodCall->method +
-                                             "' expects 1 argument, got " +
-                                             std::to_string(methodCall->arguments.size()));
-                }
-                const Type givenType = checkExpr(
-                    *methodCall->arguments.front(), env, expectedReturnType, currentLoopBreakTypes);
-                if (!(givenType == elementType))
-                {
-                    throw std::runtime_error("'" + methodCall->method + "' expects " +
-                                             typeName(elementType) + ", got " +
-                                             typeName(givenType));
-                }
-                return methodCall->method == "contains" ? kBool : kUnit;
-            }
-
-            throw std::runtime_error("no such method '" + methodCall->method + "' on " +
-                                     typeName(objectType));
-        }
+        // SortedSet<T> is a real, user-declared generic struct now (see
+        // docs/language/0041-sorted-sets.md's own "2026 Update") - there is no
+        // TypeKind::SortedSet-specific `add`/`contains`/`remove` dispatch left here; all reach it
+        // via the general struct method dispatch earlier in this same if-chain, with a
+        // non-orderable T now surfacing from within the monomorphized method body's own `<`/`>`
+        // comparison instead of eagerly here (matches SortedMap<K,V>'s own identical port
+        // decision) - this is the last of these branches: every collection
+        // docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real
+        // Axea source.
 
         // String (see docs/language/0042-string.md) - `append` accepts
         // anything str-coercible (a str, or another String - the same
@@ -3116,7 +2847,8 @@ Type TypeChecker::checkExpr(const Expr& expr,
             const Type initType =
                 checkExpr(*initializer, env, expectedReturnType, currentLoopBreakTypes);
             const Type declaredFieldType = resolveType(declaredField.type);
-            if (!(initType == declaredFieldType))
+            if (!(initType == declaredFieldType) &&
+                !isNullPointerCoercion(initType, declaredFieldType))
             {
                 throw std::runtime_error(
                     "field '" + declaredField.name + "' of '" + literal->typeName + "' expects " +
@@ -3152,12 +2884,6 @@ Type TypeChecker::checkExpr(const Expr& expr,
         return arrayLikeType(TypeKind::Array,
                              typeName(elementType),
                              static_cast<int>(arrayLiteral->elements.size()));
-    }
-
-    if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
-    {
-        const Type elementType = resolveType(linkedListNew->elementType);
-        return arrayLikeType(TypeKind::LinkedList, typeName(elementType));
     }
 
     if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
@@ -3327,13 +3053,29 @@ Type TypeChecker::checkExpr(const Expr& expr,
                 return requireInt(leftType, rightType);
             case TokenKind::Star:
             case TokenKind::Slash: return requireInt(leftType, rightType);
+            case TokenKind::Ampersand:
+                // Bitwise AND (see docs/language/0034-maps-and-sets.md's own "2026 Update") -
+                // unlike requireInt's own +/-/*//, f64 makes no sense for a bitwise operator, so
+                // this is deliberately narrower: i32/i64 only, same kind on both sides.
+                if (leftType.kind != rightType.kind ||
+                    (leftType.kind != TypeKind::I32 && leftType.kind != TypeKind::I64))
+                {
+                    throw std::runtime_error(
+                        "'&' requires two i32 or two i64 operands, found " + typeName(leftType) +
+                        " and " + typeName(rightType));
+                }
+                return leftType;
             case TokenKind::Less:
             case TokenKind::LessEqual:
             case TokenKind::Greater:
             case TokenKind::GreaterEqual: requireOrdered(leftType, rightType); return kBool;
             case TokenKind::EqualEqual:
             case TokenKind::BangEqual:
-                if (!(leftType == rightType))
+                // `ptr == null` / `null != ptr` (see docs/language/0019-unsafe.md) - either
+                // operand could be the null side, unlike every other isNullPointerCoercion call
+                // site in this file (where one side is always the fixed "expected" type).
+                if (!(leftType == rightType) && !isNullPointerCoercion(leftType, rightType) &&
+                    !isNullPointerCoercion(rightType, leftType))
                 {
                     throw std::runtime_error("cannot compare " + typeName(leftType) + " and " +
                                              typeName(rightType));
@@ -3384,6 +3126,51 @@ Type TypeChecker::checkExpr(const Expr& expr,
         return kI64;
     }
 
+    if (const auto* hashOf = dynamic_cast<const HashOfExpr*>(&expr))
+    {
+        const Type keyType = resolveType(hashOf->typeName);
+        std::unordered_set<std::string> visitedStructs;
+        if (!isHashable(keyType, visitedStructs))
+        {
+            throw std::runtime_error(
+                "hash<T>() requires a hashable type (i32, bool, str, or a struct/array/List "
+                "composed entirely of hashable types), found hash<" + typeName(keyType) + ">");
+        }
+        const Type valueType =
+            checkExpr(*hashOf->value, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(valueType == keyType))
+        {
+            throw std::runtime_error("hash<" + typeName(keyType) +
+                                     ">() argument type mismatch: expected " + typeName(keyType) +
+                                     ", found " + typeName(valueType));
+        }
+        return kI32;
+    }
+
+    if (const auto* keyEq = dynamic_cast<const KeyEqExpr*>(&expr))
+    {
+        const Type keyType = resolveType(keyEq->typeName);
+        std::unordered_set<std::string> visitedStructs;
+        if (!isHashable(keyType, visitedStructs))
+        {
+            throw std::runtime_error(
+                "keyEq<T>() requires a hashable type (i32, bool, str, or a struct/array/List "
+                "composed entirely of hashable types), found keyEq<" + typeName(keyType) + ">");
+        }
+        const Type leftType =
+            checkExpr(*keyEq->left, env, expectedReturnType, currentLoopBreakTypes);
+        const Type rightType =
+            checkExpr(*keyEq->right, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(leftType == keyType) || !(rightType == keyType))
+        {
+            throw std::runtime_error("keyEq<" + typeName(keyType) +
+                                     ">() argument type mismatch: expected (" + typeName(keyType) +
+                                     ", " + typeName(keyType) + "), found (" + typeName(leftType) +
+                                     ", " + typeName(rightType) + ")");
+        }
+        return kBool;
+    }
+
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
     {
         const Type payloadType =
@@ -3414,6 +3201,14 @@ Type TypeChecker::checkExpr(const Expr& expr,
             "cannot infer the type of 'None' here - use it in a declared-type assignment "
             "(x: Optional<T> = None) or a bare 'return None' inside a function declared to "
             "return Optional<T>");
+    }
+
+    if (dynamic_cast<const NullExpr*>(&expr))
+    {
+        // Unlike `None` just above, `null` needs no surrounding context to type-check at all -
+        // see NullExpr's own doc comment in ast/Expr.hpp. Every real consumption site
+        // (isNullPointerCoercion's own call sites) accepts this standalone type directly.
+        return Type{TypeKind::NullPointer};
     }
 
     if (dynamic_cast<const OkExpr*>(&expr) || dynamic_cast<const ErrExpr*>(&expr))

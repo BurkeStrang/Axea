@@ -18,41 +18,23 @@ namespace
         return type.substr(1, type.find(';') - 1);
     }
 
-    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> are real, user-declared generic
-    // structs now (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
-    // PriorityQueue<T> port follow-up) - a param's own mangled type name (e.g. "List$i32",
-    // "Stack$i32", "Deque$i32", "Queue$i32", "PriorityQueue$i32") is already caught by the
-    // ordinary `structs_.contains` check every struct param gets, so there is no
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>/LinkedList<T>/Map<K,V>/Set<T> are all
+    // real, user-declared generic structs now (see docs/language/0006-generics.md's own port
+    // follow-up and docs/language/0034-maps-and-sets.md's own "2026 Update") - a param's own
+    // mangled type name (e.g. "List$i32", "Map$str$i32") is already caught by the ordinary
+    // `structs_.contains` check every struct param gets, so there is no
     // isListTypeString/isStackTypeString/isDequeTypeString/isQueueTypeString/
-    // isPriorityQueueTypeString-style helper left here (unlike the still-intrinsic collections
-    // below).
-
-    bool isLinkedListTypeString(const std::string& type)
-    {
-        return type.starts_with("LinkedList<");
-    }
-
-    bool isMapTypeString(const std::string& type)
-    {
-        return type.starts_with("Map<");
-    }
-
-    bool isSetTypeString(const std::string& type)
-    {
-        return type.starts_with("Set<");
-    }
-
-    // No elementTypeName extraction needed, same reasoning as Set<T> above -
-    // none of add/contains/remove ever return the stored element (see
-    // docs/language/0041-sorted-sets.md).
-    bool isSortedSetTypeString(const std::string& type)
-    {
-        return type.starts_with("SortedSet<");
-    }
+    // isPriorityQueueTypeString/isLinkedListTypeString/isMapTypeString/isSetTypeString-style
+    // helper left here (unlike the still-intrinsic collections below) - including no
+    // mapValueTypeName-style `.get()` aliasing-propagation extraction, since a real struct
+    // method's own result gets no automatic elementStructType propagation at all (RegionChecker
+    // has no way to know a generic struct's own method body "aliases" vs "removes" - the same
+    // accepted gap Stack<T>'s own `.peek()` port already established, not something Map<K,V>'s
+    // port needed to newly solve).
 
     // String isn't generic (see docs/language/0042-string.md), so this is
     // an exact match, not a starts_with prefix check. No elementTypeName
-    // extraction needed either, same reasoning as Queue<T>/SortedSet<T>
+    // extraction needed either, same reasoning as Queue<T>
     // above - `append` never returns the stored content, so there's no
     // aliasing case for MethodCallExpr to special-case.
     bool isStringTypeString(const std::string& type)
@@ -72,69 +54,13 @@ namespace
         return type == "Buffer";
     }
 
-    // "Map<K,V>" -> "V". Own bracket-depth-aware top-level-comma split (per
-    // this codebase's "each pass owns its own walk" convention - TypeChecker
-    // has its own copy of this same logic, independently, for the same
-    // reason: K/V can themselves be nested generics containing commas, e.g.
-    // Map<i32,Map<i32,i32>>, since docs/language/0034-maps-and-sets.md's
-    // generic rewrite). Only V is ever extracted here - RegionChecker only
-    // needs this to propagate struct-aliasing through `.get()`'s result
-    // (mirrors array/List's own elementStructType extraction); nothing ever
-    // returns K itself, so K's own struct-ness is irrelevant here.
-    std::string mapValueTypeName(const std::string& type)
-    {
-        const std::string args = type.substr(4, type.size() - 5); // strip "Map<" and trailing ">"
-        int depth = 0;
-        for (std::size_t i = 0; i < args.size(); ++i)
-        {
-            if (args[i] == '<' || args[i] == '[')
-            {
-                ++depth;
-            }
-            else if (args[i] == '>' || args[i] == ']')
-            {
-                --depth;
-            }
-            else if (args[i] == ',' && depth == 0)
-            {
-                return args.substr(i + 1);
-            }
-        }
-        return ""; // malformed - unreachable for a well-checked program
-    }
-
-    bool isSortedMapTypeString(const std::string& type)
-    {
-        return type.starts_with("SortedMap<");
-    }
-
-    // "SortedMap<K,V>" -> "V" - mirrors mapValueTypeName's own bracket-
-    // depth-aware split above (see docs/language/0040-sorted-maps.md).
-    // `.get()` is the only SortedMap operation that can hand back a value
-    // aliasing the tree's own stored instance, same reasoning as Map<K,V>'s
-    // own V extraction.
-    std::string sortedMapValueTypeName(const std::string& type)
-    {
-        const std::string args =
-            type.substr(10, type.size() - 11); // strip "SortedMap<" and trailing ">"
-        int depth = 0;
-        for (std::size_t i = 0; i < args.size(); ++i)
-        {
-            if (args[i] == '<' || args[i] == '[')
-            {
-                ++depth;
-            }
-            else if (args[i] == '>' || args[i] == ']')
-            {
-                --depth;
-            }
-            else if (args[i] == ',' && depth == 0)
-            {
-                return args.substr(i + 1);
-            }
-        }
-        return ""; // malformed - unreachable for a well-checked program
-    }
+    // SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - same reasoning as Map<K,V>/Set<T> above, no
+    // isSortedMapTypeString/sortedMapValueTypeName/isSortedSetTypeString left here; `.get()`
+    // reading a struct-typed value out is now unconditionally Owned under the default rule (an
+    // accepted gap, matching Map<K,V>/Stack<T>'s own identical port precedent, not a regression to
+    // fix).
 } // namespace
 
 RegionEnv::RegionEnv(const RegionEnv* parent)
@@ -330,24 +256,16 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
         }
         std::string elementStructType;
         const bool isArray = isArrayTypeString(param.type);
-        const bool isMap = isMapTypeString(param.type);
-        const bool isSet = isSetTypeString(param.type);
-        // LinkedList<T> (see docs/language/0036-linked-lists.md) carries the
-        // same aliasing risk as every other heap-allocated collection
-        // (mustn't be treated as Owned unless `take`n) - but unlike
-        // List<T>.pop()/Stack<T>.peek()/Map<K,V>.get(), no LinkedList<T>
-        // operation this phase ever hands back a stored element without
-        // removing it (no peek_front/peek_back), so there's no elementStructType
-        // extraction to do here: MethodCallExpr's aliasing exception is never
-        // consulted for LinkedList<T>.
-        const bool isLinkedList = isLinkedListTypeString(param.type);
-        // Deque<T>/Queue<T>/PriorityQueue<T> are real, user-declared generic structs now (see
-        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
-        // PriorityQueue<T> port follow-up) - a param's own mangled type name is already caught
-        // by the ordinary `structs_.contains` check above (structType), so there is no
-        // isDeque/isQueue/isPriorityQueue left here.
-        const bool isSortedMap = isSortedMapTypeString(param.type);
-        const bool isSortedSet = isSortedSetTypeString(param.type);
+        // Deque<T>/Queue<T>/PriorityQueue<T>/LinkedList<T>/Map<K,V>/Set<T> are all real,
+        // user-declared generic structs now (see docs/language/0006-generics.md's own port
+        // follow-up and docs/language/0034-maps-and-sets.md's own "2026 Update") - a param's own
+        // mangled type name is already caught by the ordinary `structs_.contains` check above
+        // (structType), so there is no isDeque/isQueue/isPriorityQueue/isLinkedList/isMap/isSet
+        // left here. LinkedList<T>/Map<K,V>/Set<T>'s own aliasing story stays exactly as
+        // documented when Map<K,V> was still intrinsic: a real struct method's own result gets no
+        // automatic elementStructType propagation at all, so `.get()` reading a struct-typed value
+        // out is now unconditionally Owned under the default rule, not aliased - matching
+        // Stack<T>'s own `.peek()` port precedent.
         const bool isString = isStringTypeString(param.type);
         const bool isBuffer = isBufferTypeString(param.type);
         // Closures (see the move-semantics work's closure drop-lifecycle addition) are heap-
@@ -368,44 +286,14 @@ void RegionChecker::checkFunction(const FunctionDecl& function,
                 elementStructType = elementName;
             }
         }
-        else if (isMap)
-        {
-            // Only V (not K) - `.get()` is the only Map operation that can
-            // hand back a value aliasing the map's own stored instance (see
-            // docs/language/0034-maps-and-sets.md's generic rewrite); K is
-            // never itself returned, so K's struct-ness doesn't matter here.
-            // Set needs no equivalent: none of add/contains/remove ever
-            // return the stored element.
-            const std::string valueName = mapValueTypeName(param.type);
-            if (structs_.contains(valueName))
-            {
-                elementStructType = valueName;
-            }
-        }
-        else if (isSortedMap)
-        {
-            // Same reasoning as Map above - `.get()` is the only SortedMap
-            // operation that can hand back a value aliasing the tree's own
-            // stored instance (see docs/language/0040-sorted-maps.md).
-            const std::string valueName = sortedMapValueTypeName(param.type);
-            if (structs_.contains(valueName))
-            {
-                elementStructType = valueName;
-            }
-        }
-        // Struct-, array-, List-, Stack-, LinkedList-, Deque-, Queue-,
-        // PriorityQueue-, Map-, Set-, SortedMap-, SortedSet-, String-, and
-        // Buffer-typed parameters all carry aliasing risk (all are
-        // heap-allocated, reference-semantics values - see
-        // docs/language/0031-arrays.md, 0033-lists.md,
-        // 0034-maps-and-sets.md, 0035-stacks.md, 0036-linked-lists.md,
-        // 0037-deques.md, 0038-queues.md, 0039-priority-queues.md,
-        // 0040-sorted-maps.md, 0041-sorted-sets.md, 0042-string.md, and
-        // 0043-buffer.md); a primitive parameter is always Owned regardless
-        // of its read/write/take capability.
+        // Struct- (including List/Stack/LinkedList/Deque/Queue/PriorityQueue/Map/Set/SortedMap/
+        // SortedSet, all real generic structs now), array-, String-, and Buffer-typed parameters
+        // all carry aliasing risk (all are heap-allocated, reference-semantics values - see
+        // docs/language/0031-arrays.md, 0034-maps-and-sets.md, 0040-sorted-maps.md,
+        // 0041-sorted-sets.md, 0042-string.md, and 0043-buffer.md); a primitive parameter is
+        // always Owned regardless of its read/write/take capability.
         const bool borrowed =
-            (!structType.empty() || isArray || isLinkedList ||
-             isMap || isSet || isSortedMap || isSortedSet ||
+            (!structType.empty() || isArray ||
              isString || isBuffer || isShared || isClosure) &&
             capabilities[i] != Capability::Take;
         env.define(param.name,
@@ -441,7 +329,8 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
 {
     if (dynamic_cast<const IntegerExpr*>(&expr) || dynamic_cast<const Int64Expr*>(&expr) ||
         dynamic_cast<const FloatExpr*>(&expr) || dynamic_cast<const BoolExpr*>(&expr) ||
-        dynamic_cast<const StringExpr*>(&expr) || dynamic_cast<const CharExpr*>(&expr))
+        dynamic_cast<const StringExpr*>(&expr) || dynamic_cast<const CharExpr*>(&expr) ||
+        dynamic_cast<const NullExpr*>(&expr))
     {
         return RegionInfo{Region::Owned, "", ""};
     }
@@ -599,20 +488,6 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         return RegionInfo{Region::Owned, "", ""};
     }
 
-    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new tree starts empty, always Owned
-        // (see docs/language/0040-sorted-maps.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
-    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new tree starts empty, always Owned
-        // (see docs/language/0041-sorted-sets.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
     if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
     {
         // Same reasoning again - String(text) always allocates a fresh
@@ -630,13 +505,6 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
     {
         // Same reasoning again - a brand-new buffer starts empty, always
         // Owned (see docs/language/0043-buffer.md).
-        return RegionInfo{Region::Owned, "", ""};
-    }
-
-    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
-    {
-        // Same reasoning again - a brand-new linked list starts empty,
-        // always Owned (see docs/language/0036-linked-lists.md).
         return RegionInfo{Region::Owned, "", ""};
     }
 
@@ -837,8 +705,10 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         // Inserting a struct/enum-typed value into a collection consumes it,
         // exactly like passing it to a `take` param - this is the fix for the collection-insert
         // UAF found this session (previously patched with a runtime retain; a compile-time move
-        // error is strictly better). "set" is Map/SortedMap's own two-argument form (key, value) -
-        // both can be struct/enum-typed and both get consumed on insert.
+        // error is strictly better). "set" was Map<K,V>/SortedMap<K,V>'s own two-argument form
+        // (key, value) - both are real struct methods now (reached via the general struct method
+        // dispatch above), so this "set" case is kept for forward compatibility with any future
+        // builtin collection, not currently reachable by either.
         static const std::unordered_set<std::string> insertingMethods = {
             "push", "push_front", "push_back", "enqueue", "add"};
         for (std::size_t i = 0; i < methodCall->arguments.size(); ++i)
@@ -857,14 +727,17 @@ RegionInfo RegionChecker::regionOfExpr(const Expr& expr,
         // `.field` on it resolves correctly (mirrors IndexExpr's identical
         // propagation for a struct-typed array/slice element).
         //
-        // "get" (Map<K,V>, docs/language/0034-maps-and-sets.md) and "peek"
-        // (Stack<T>, docs/language/0035-stacks.md) are the exceptions to
-        // "Owned unless removed": unlike pop/remove, neither removes - the
-        // container still holds the same instance afterward, so a
-        // struct-typed element aliases the container exactly the way an
-        // array/slice index read does. Reusing pop's "always Owned" rule
-        // here would silently let a borrowed Map<K, StructV>/Stack<StructT>
-        // parameter's stored struct escape a function's return.
+        // "get"/"peek" are the exceptions to "Owned unless removed": unlike pop/remove, neither
+        // removes - the container still holds the same instance afterward, so a struct-typed
+        // element aliases the container exactly the way an array/slice index read does. Reusing
+        // pop's "always Owned" rule here would silently let a borrowed parameter's stored struct
+        // escape a function's return. Only ever fires when `objectInfo.elementStructType` is
+        // already populated - today nothing populates it anymore (array's own IndexExpr case
+        // propagates separately; SortedMap<K,V>'s own `.get()` was the last builtin to populate it
+        // here, and it's a real struct method now, see docs/language/0040-sorted-maps.md's own
+        // "2026 Update", matching Map<K,V>/Stack<T>'s own identical port precedent above), so this
+        // branch is kept for forward compatibility with any future builtin collection - an
+        // accepted gap, not a regression to fix.
         if ((methodCall->method == "get" || methodCall->method == "peek") &&
             !objectInfo.elementStructType.empty())
         {

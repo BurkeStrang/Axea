@@ -95,6 +95,11 @@ enum class TypeKind
     Generic,
     Reference,
     Pointer,
+    // `null` (see docs/language/0019-unsafe.md) - the untyped null pointer literal's own type.
+    // Carries no `elementTypeName` (unlike Pointer) - the whole point is that it's compatible
+    // with *any* `*T`, resolved at each consumption site (see TypeChecker.cpp's own
+    // `isNullPointerCoercion` and every call site that checks it) rather than synthesized here.
+    NullPointer,
     Slice,
     Array,
     List,

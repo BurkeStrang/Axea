@@ -1,7 +1,91 @@
 # `Map<K,V>` / `Set<T>`: A Real Hash Table, Generic Over Any Hashable Key
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0034-maps-and-sets.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`Map<K,V>`/`Set<T>` are no longer compiler intrinsics. Following `List<T>`/`Stack<T>`/`Deque<T>`/
+`Queue<T>`/`PriorityQueue<T>`/`LinkedList<T>`'s own ports (this document's own siblings' "2026
+Update" sections), both are now real, user-declared generic structs with generic inherent `impl`
+blocks, living in `std/collections.ax` — but like `LinkedList<T>` before them, they needed a real
+new language feature first, not just `null`: **generic hash/equality dispatch**. A hash table
+fundamentally needs to hash and compare an arbitrary key type `K` from inside its own generic
+`impl` body, and nothing in the language let generic code operate on its own type parameter's
+structure before this - `sizeof<T>()` was the closest precedent (a compiler intrinsic expression
+resolved per-instantiation), extended here with two siblings:
+
+```ax
+use collections
+
+hash<T>(value: T) -> i32       // structural hash, generic over any hashable T
+keyEq<T>(a: T, b: T) -> bool    // structural equality, same restriction
+
+m: Map<str,i32> = collections.newMap<str,i32>()
+m.set("apple", 3)
+count = m.get("apple")   // 3
+
+s: Set<i32> = collections.newSet<i32>()
+s.add(1)
+has = s.contains(1)      // true
+```
+
+**What changed and why:**
+
+- **`hash<T>()`/`keyEq<T>()` are new builtin intrinsic expressions**, recognized by literal text
+  exactly like `sizeof<T>()` (not real callable functions) - `typeName` must resolve to a hashable
+  type (the same `isHashable` rule this document's own "Type Checking" section below already
+  established: `i32`, `bool`, `str`, or a struct/array/`List<T>` composed entirely of hashable
+  types). They reuse `registerKeyRuntime`'s own per-type hash/equality function generation
+  directly (`@axea.hash.<Type>`/`@axea.eq.<Type>`) - the exact same generated functions
+  `Map<K,V>`/`Set<T>`'s own `set`/`get`/`contains`/`remove` used to call internally, now exposed
+  as a real, standalone, generic-code-facing entry point instead.
+- **Construction**: `Map<K,V>()`/`Set<T>()` call-style sugar → `collections.newMap<K,V>()`/
+  `collections.newSet<T>()`, ordinary (generic) function calls — identical reasoning to every
+  prior port's own construction change. Two-type-argument generic calls (`newMap<K,V>()`) needed
+  real parser work no single-type-param port before it did — see "Parsing" below.
+- **A real, self-referential `*MapEntry<K,V>`/`*SetEntry<T>` pointer chain per bucket, and a real
+  `**MapEntry<K,V>`/`**SetEntry<T>` bucket array**, not a hand-rolled `%axea.MapEntry.<id>`/
+  `%axea.SetEntry.<id>` LLVM type with hand-emitted runtime functions. Faithfully replicates the
+  retired intrinsic's own hand-verified policy: initial bucket count 8, doubling when
+  `length * 4 > bucketCount * 3` (load factor > 0.75), bucket index via `hash<K>(key) & (bucketCount
+  - 1)` (a bitmask - see "Bitwise AND" below), insert-at-chain-head, no `free` on `remove` (matches
+  this codebase's "leak, don't free" convention).
+- **`.length` stays a bare field** (`m.length`, no parens) — `Map<K,V>`/`Set<T>` own it directly,
+  matching `Deque<T>`/`LinkedList<T>`'s own precedent.
+- **No bounds check on `get`'s own missing-key case** — dereferences a null node pointer once the
+  chain runs out, matching the retired intrinsic's own documented "returns an unspecified sentinel"
+  UB in compiled mode. The **one** real improvement: the interpreter now throws a clear
+  "dereferenced a null pointer" error instead, the same "interpreter catches more than compiled UB
+  does" contract every other empty-collection operation in this codebase already has.
+- **A real, accepted scope narrowing** (mirrors `Deque<T>`'s own "accepted API loss" framing): the
+  retired intrinsic eagerly rejected `Map<UnhashableType,V>` the moment the type was *declared*
+  (`resolveType`'s own `Map<key,value>` branch called `isHashable` immediately). A real generic
+  struct has no trait-bound system to enforce that at declaration time — the error now surfaces the
+  first time `hash<K>(...)` is actually reached inside a monomorphized `set`/`get`/`contains`/
+  `remove` body for that concrete `K` (`GenericMonomorphizer` always instantiates a struct's own
+  `impl` methods the moment it's referenced, before `TypeChecker` runs, so this still catches every
+  *used* `Map`/`Set` with an unhashable key at compile time — only a declared-but-never-called one
+  would now go uncaught, an edge case, not a real-world regression).
+- **Bitwise AND (`&`) is a real infix operator for the first time** — needed for the bucket-index
+  computation above; previously `&` only had prefix (`&name`, address-of) meaning. Placed at its
+  own precedence level, with the identical newline-boundary disambiguation guard `*` (dereference
+  vs. multiplication) already needed.
+- **Parsing**: two real, previously-undiscovered gaps found while writing `newMap<K,V>()`/
+  `collections.newMap<K,V>()` call sites — (1) the general `name<Type>(args)` call-site
+  recognition (shared with every prior single-type-param generic function call this session) only
+  ever parsed *one* type argument; extended to comma-separated multiple. (2) The lookahead scans
+  deciding whether a `<` opens a generic call/struct-literal, or a module-qualified
+  `object.method<T>(args)` call, only ever recognized a single bare identifier as the type
+  argument — even a *nested* one-argument case like `.newBox<List<i32>>()` was already
+  unsupported before this port, let alone a fixed-array argument like `newMap<i32,[i32;2]>()`.
+  Both scans now track full bracket/array-type syntax (`[`, `]`, `;`, integer literals, `*`), not
+  just bare identifiers and commas.
+- See `examples/map_set.ax` for a worked example (verified both interpreted and compiled, `-O0`
+  and `-O1`); everything below this section documents the *original compiler-intrinsic design*
+  (now retired) for historical context.
 
 ---
 

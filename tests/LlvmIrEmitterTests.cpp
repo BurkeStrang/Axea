@@ -288,83 +288,13 @@ TEST("LlvmIrEmitter reads a slice's .length via extractvalue, not a compile-time
 // behavior is verified via examples/list.ax and examples/stack.ax instead (both interpreted and
 // compiled).
 
-TEST("LlvmIrEmitter declares a named self-referential node type for LinkedList<T>")
-{
-    // Monomorphized (see docs/language/0036-linked-lists.md), same
-    // lazy-registration-by-canonical-string pattern as Map/Set's own entry
-    // types - the first LinkedList instantiation actually used gets id 0.
-    auto ir = emitLlvmIr("f() -> i32 { s = LinkedList<i32>()  return s.length }");
-    EXPECT_TRUE(ir.find("%axea.LLNode.0 = type { i32, %axea.LLNode.0*, %axea.LLNode.0* }") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter represents LinkedList<i32> as a pointer to a 3-field heap header")
-{
-    auto ir = emitLlvmIr("useLinkedList(s: LinkedList<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(
-        ir.find("define i32 @useLinkedList({i32, %axea.LLNode.0*, %axea.LLNode.0*}* %0) {") !=
-        std::string::npos);
-}
-
-TEST("LlvmIrEmitter's LinkedList<T>() construction mallocs a header and zero-initializes it")
-{
-    auto ir = emitLlvmIr("f() -> i32 { s = LinkedList<i32>()  return s.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // length = 0
-    EXPECT_TRUE(ir.find("store %axea.LLNode.0* null, %axea.LLNode.0**") !=
-                std::string::npos); // head/tail = null
-}
-
-TEST("LlvmIrEmitter LinkedList push_front/push_back/pop_front/pop_back each emit a single call "
-     "into that instantiation's own runtime function")
-{
-    auto ir = emitLlvmIr("f(s: LinkedList<i32>, v: i32) { "
-                         "  s.push_front(v) "
-                         "  s.push_back(v) "
-                         "} "
-                         "g(s: LinkedList<i32>) -> i32 { "
-                         "  a = s.pop_front() "
-                         "  b = s.pop_back() "
-                         "  return a + b "
-                         "}");
-    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_front(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.linkedlist.0.push_back(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i32 @axea.linkedlist.0.pop_front(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i32 @axea.linkedlist.0.pop_back(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter LinkedList push_front's runtime function contains a real br i1, unlike "
-     "List<T>.push's straight-line-plus-loop shape")
-{
-    // The reason push_front/push_back/pop_front/pop_back are template-text
-    // runtime functions (named %registers) rather than inlined the way
-    // List<T>.push/.pop are: maintaining the head/tail invariant on an
-    // empty-list transition needs real conditional control flow (see
-    // docs/language/0036-linked-lists.md).
-    auto ir = emitLlvmIr("f() { s = LinkedList<i32>()  s.push_front(1) }");
-    const auto fnStart = ir.find("define void @axea.linkedlist.0.push_front(");
-    EXPECT_TRUE(fnStart != std::string::npos);
-    const auto fnEnd = ir.find("\n}\n", fnStart);
-    const std::string fnBody = ir.substr(fnStart, fnEnd - fnStart);
-    EXPECT_TRUE(fnBody.find("br i1") != std::string::npos);
-    EXPECT_TRUE(fnBody.find("emptycase:") != std::string::npos);
-    EXPECT_TRUE(fnBody.find("nonemptycase:") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a LinkedList's .length via GEP+load, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("len(s: LinkedList<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.LLNode.0*, %axea.LLNode.0*}, "
-                        "{i32, %axea.LLNode.0*, %axea.LLNode.0*}* %0, i32 0, i32 0") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level LinkedList<T> binding as a count only, unlike an array's "
-     "runtime print loop")
-{
-    auto ir = emitLlvmIr("s = LinkedList<i32>()");
-    EXPECT_TRUE(ir.find("LinkedList(") != std::string::npos);
-}
+// LinkedList<T> is a real, user-declared generic struct now, not a compiler intrinsic (see
+// docs/language/0036-linked-lists.md's own "2026 Update" - this needed real `null` pointer
+// support as a prerequisite, see docs/language/0019-unsafe.md) - its own internal LLVM
+// representation (a self-referential `*Node<T>` pointer pair, ordinary Axea `unsafe`/struct-field
+// source instead of a hand-rolled node type and hand-emitted runtime functions) is no longer this
+// compiler's concern to unit-test; its behavior is verified via examples/linked_list.ax instead
+// (both interpreted and compiled).
 
 // Deque<T>/Queue<T> are real, user-declared generic structs now, not compiler intrinsics (see
 // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port follow-up and
@@ -379,119 +309,32 @@ TEST("LlvmIrEmitter prints a top-level LinkedList<T> binding as a count only, un
 // emitted LLVM basic blocks) is no longer this compiler's concern to unit-test; its behavior is
 // verified via examples/priority_queue.ax instead (both interpreted and compiled).
 
-TEST("LlvmIrEmitter declares named self-referential types for Map/Set entries")
-{
-    // Monomorphized (see docs/language/0034-maps-and-sets.md's generic
-    // rewrite): the first Map/Set instantiation actually used gets id 0
-    // (Map's and Set's own id counters are independent, so both land on
-    // "0" here even though this program only builds a Map).
-    auto ir = emitLlvmIr("f() -> i32 { m = Map<i32,i32>()  return m.length }");
-    EXPECT_TRUE(ir.find("%axea.MapEntry.0 = type { i32, i32, %axea.MapEntry.0* }") !=
-                std::string::npos);
-}
+// Map<K,V>/Set<T> are real, user-declared generic structs now, not compiler intrinsics (see
+// docs/language/0034-maps-and-sets.md's own "2026 Update") - their own internal LLVM
+// representation (a self-referential `*MapEntry<K,V>`/`*SetEntry<T>` pointer, `**Entry<K,V>`
+// bucket array, ordinary Axea `unsafe`/struct-field source instead of a hand-rolled entry type
+// and hand-emitted runtime functions) is no longer this compiler's concern to unit-test; their
+// behavior is verified via examples/map_set.ax instead (both interpreted and compiled).
+// `hash<T>()`/`keyEq<T>()` (below) are the new generic-code-facing entry point into
+// `registerKeyRuntime`'s own per-type hash/equality generation, which *is* still this compiler's
+// concern to unit-test directly - it's a real, standalone intrinsic now, not something only
+// reachable through Map/Set's own former internal dispatch.
 
-TEST("LlvmIrEmitter represents Map<i32,i32>/Set<i32> as a pointer to a 3-field heap header")
+TEST("LlvmIrEmitter's hash<T>()/keyEq<T>() generate a byte-walk hash/equality pair for str keys")
 {
-    auto ir = emitLlvmIr("useMap(m: Map<i32,i32>) -> i32 { return m.length } "
-                         "useSet(s: Set<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("define i32 @useMap({i32, i32, %axea.MapEntry.0**}* %0) {") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define i32 @useSet({i32, i32, %axea.SetEntry.0**}* %0) {") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter's Map<i32,i32>() construction mallocs a header and an 8-slot bucket array")
-{
-    auto ir = emitLlvmIr("f() -> i32 { m = Map<i32,i32>()  return m.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
-    EXPECT_TRUE(ir.find("store i32 8, i32*") != std::string::npos); // bucketCount = 8
-    // 8 unrolled null-initializing stores into the fresh bucket array, within
-    // `f` itself - scoped to before the per-instantiation axea.map.0.*
-    // runtime functions (registerMapInstantiation), which contain a couple
-    // more of this same substring in their own, unrelated resize/remove
-    // logic.
-    const std::size_t runtimeStart = ir.find("define i32 @axea.hash.i32");
-    EXPECT_TRUE(runtimeStart != std::string::npos);
-    std::size_t nullStoreCount = 0;
-    for (std::size_t pos = ir.find("store %axea.MapEntry.0* null,");
-         pos != std::string::npos && pos < runtimeStart;
-         pos = ir.find("store %axea.MapEntry.0* null,", pos + 1))
-    {
-        ++nullStoreCount;
-    }
-    EXPECT_EQ(nullStoreCount, static_cast<std::size_t>(8));
-}
-
-TEST("LlvmIrEmitter's Map/Set operations call that instantiation's own axea.map.N/axea.set.N "
-     "runtime functions")
-{
-    auto ir = emitLlvmIr("f() { "
-                         "  m = Map<i32,i32>() "
-                         "  m.set(1, 2) "
-                         "  v = m.get(1) "
-                         "  hit = m.contains(1) "
-                         "  m.remove(1) "
-                         "  s = Set<i32>() "
-                         "  s.add(1) "
-                         "  shit = s.contains(1) "
-                         "  s.remove(1) "
-                         "}");
-    EXPECT_TRUE(ir.find("call void @axea.map.0.set(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i32 @axea.map.0.get(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.map.0.contains(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.map.0.remove(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.set.0.add(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.set.0.contains(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.set.0.remove(") != std::string::npos);
-    // Shared primitive key hash (i32 keys, both Map and Set), and each
-    // instantiation's own resize function.
-    EXPECT_TRUE(ir.find("define i32 @axea.hash.i32(i32 %key) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @axea.map.0.resize(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define void @axea.set.0.resize(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a Map/Set's .length via GEP+load field 0, not a compile-time constant")
-{
-    auto ir = emitLlvmIr("mlen(m: Map<i32,i32>) -> i32 { return m.length } "
-                         "slen(s: Set<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32, %axea.MapEntry.0**}, "
-                        "{i32, i32, %axea.MapEntry.0**}* %0, i32 0, i32 0") != std::string::npos);
-    EXPECT_TRUE(ir.find("getelementptr {i32, i32, %axea.SetEntry.0**}, "
-                        "{i32, i32, %axea.SetEntry.0**}* %0, i32 0, i32 0") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter monomorphizes each distinct Map<K,V> shape into its own entry type/functions")
-{
-    // Map<i32,i32> and Map<i32,str> are two genuinely different
-    // instantiations (different V) - each gets its own numbered entry type
-    // and its own axea.map.N.* functions, coexisting correctly (see
-    // docs/language/0034-maps-and-sets.md's generic rewrite).
-    auto ir = emitLlvmIr("useA(m: Map<i32,i32>) -> i32 { return m.get(1) } "
-                         "useB(m: Map<i32,str>) -> str { return m.get(1) }");
-    EXPECT_TRUE(ir.find("%axea.MapEntry.0 = type { i32, i32, %axea.MapEntry.0* }") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("%axea.MapEntry.1 = type { i32, i8*, %axea.MapEntry.1* }") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define i32 @axea.map.0.get(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i8* @axea.map.1.get(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter generates a byte-walk hash/equality pair for str keys")
-{
-    auto ir = emitLlvmIr("f() -> i32 { m = Map<str,i32>()  m.set(\"a\", 1)  return m.get(\"a\") }");
+    auto ir = emitLlvmIr("f() -> i32 { return hash<str>(\"a\") } "
+                         "g() -> bool { return keyEq<str>(\"a\", \"b\") }");
     EXPECT_TRUE(ir.find("define i32 @axea.hash.str(i8* %s) {") != std::string::npos);
     EXPECT_TRUE(ir.find("define i1 @axea.eq.str(i8* %a, i8* %b) {") != std::string::npos);
-    // .set/.get call through the shared str hash/eq, not an inline icmp
-    // (which would be pointer-identity comparison - wrong for string
-    // content equality).
+    EXPECT_TRUE(ir.find("call i32 @axea.hash.str(") != std::string::npos);
     EXPECT_TRUE(ir.find("call i1 @axea.eq.str(") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter generates a recursive derive-hash/equality pair for a struct key")
+TEST("LlvmIrEmitter's hash<T>()/keyEq<T>() generate a recursive derive-hash/equality pair for a "
+     "struct key")
 {
     auto ir = emitLlvmIr("struct Point { x: i32  y: i32 } "
-                         "f() { s = Set<Point>()  s.add(Point { x: 1  y: 2 }) }");
+                         "f() -> i32 { p = Point { x: 1, y: 2 }  return hash<Point>(p) }");
     EXPECT_TRUE(ir.find("define i32 @axea.hash.Point(%Point* %v) {") != std::string::npos);
     EXPECT_TRUE(ir.find("define i1 @axea.eq.Point(%Point* %a, %Point* %b) {") != std::string::npos);
     // Combines each field's own i32 hash (djb2-style: acc = acc*31 + fieldHash).
@@ -499,242 +342,38 @@ TEST("LlvmIrEmitter generates a recursive derive-hash/equality pair for a struct
     EXPECT_TRUE(ir.find("mul i32") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter generates an unrolled hash/equality pair for a fixed-array key")
+TEST("LlvmIrEmitter's hash<T>()/keyEq<T>() generate an unrolled hash/equality pair for a "
+     "fixed-array key")
 {
-    auto ir = emitLlvmIr("f() { s = Set<[i32;3]>()  s.add([1, 2, 3]) }");
+    auto ir = emitLlvmIr("f() -> i32 { a = [1, 2, 3]  return hash<[i32;3]>(a) }");
     EXPECT_TRUE(ir.find("define i32 @axea.hash.arr.0([3 x i32]* %v) {") != std::string::npos);
     EXPECT_TRUE(ir.find("define i1 @axea.eq.arr.0([3 x i32]* %a, [3 x i32]* %b) {") !=
                 std::string::npos);
 }
 
-// List<T> as a Set/Map key is no longer supported - it's a real, user-declared generic struct
-// now (see docs/language/0006-generics.md's own List<T> port follow-up and std/collections.ax),
-// and hashing/equality for it would need a real user-level implementation, not the retired
-// intrinsic's own runtime-loop hash/equality pair.
+// List<T> as a hash<T>()/keyEq<T>() key is no longer supported - it's a real, user-declared
+// generic struct now (see docs/language/0006-generics.md's own List<T> port follow-up and
+// std/collections.ax), and hashing/equality for it would need a real user-level implementation,
+// not the retired intrinsic's own runtime-loop hash/equality pair.
 
-TEST("LlvmIrEmitter prints a top-level Map/Set binding by count, not contents")
-{
-    auto ir = emitLlvmIr("m = Map<i32,i32>() s = Set<i32>()");
-    EXPECT_TRUE(ir.find("Map(") != std::string::npos);
-    EXPECT_TRUE(ir.find("Set(") != std::string::npos);
-    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
-}
+// SortedMap<K,V> is a real, user-declared generic struct now (see
+// docs/language/0040-sorted-maps.md's own "2026 Update") - there is no internal-codegen-shape
+// test left here at all anymore (mirrors Map<K,V>/Set<T>'s own identical, already-complete
+// removal from this file): its own monomorphized node type/set/get/contains/remove functions are
+// ordinary real Axea source in std/collections.ax now, compiled the same way any other generic
+// struct's own impl methods already are - already covered by this file's own generic
+// struct/generic method codegen tests elsewhere, with nothing SortedMap-specific left to assert.
 
-TEST("LlvmIrEmitter represents SortedMap<i32,i32> as a pointer to a named-node 2-field heap "
-     "header, distinct from Map/Set's own 3-field header")
-{
-    auto ir = emitLlvmIr("useSM(m: SortedMap<i32,i32>) -> i32 { return m.length }");
-    EXPECT_TRUE(ir.find("define i32 @useSM({i32, %axea.SortedMapNode.0*}* %0) {") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter declares a 5-field self-referential node type for SortedMap<K,V> - key, "
-     "value, height, left, right")
-{
-    auto ir = emitLlvmIr("f() -> i32 { m = SortedMap<i32,i32>()  m.set(1, 2)  return m.length }");
-    EXPECT_TRUE(ir.find("%axea.SortedMapNode.0 = type { i32, i32, i32, %axea.SortedMapNode.0*, "
-                        "%axea.SortedMapNode.0* }") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedMap<K,V>() construction mallocs a 2-field header and zero-"
-     "initializes it - no bucket array, unlike Map/Set's own 3-field header")
-{
-    auto ir = emitLlvmIr("f() -> i32 { m = SortedMap<i32,i32>()  return m.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
-    EXPECT_TRUE(ir.find("store %axea.SortedMapNode.0* null, %axea.SortedMapNode.0**") !=
-                std::string::npos); // root = null
-}
-
-TEST("LlvmIrEmitter's SortedMap operations call that instantiation's own axea.sortedmap.N "
-     "runtime functions, including the AVL rotation/height helpers")
-{
-    auto ir = emitLlvmIr("f() { "
-                         "  m = SortedMap<i32,i32>() "
-                         "  m.set(1, 2) "
-                         "  v = m.get(1) "
-                         "  hit = m.contains(1) "
-                         "  m.remove(1) "
-                         "}");
-    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.set(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i32 @axea.sortedmap.0.get(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.sortedmap.0.contains(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.remove(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i32 @axea.sortedmap.0.height(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.rotateLeft(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.rotateRight(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.insertNode(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedMapNode.0* @axea.sortedmap.0.removeNode(") !=
-                std::string::npos);
-    // No `free` call anywhere - matches this codebase's established "leak,
-    // don't free" policy (Map<K,V>.remove doesn't free its entry either).
-    EXPECT_TRUE(ir.find("call void @free") == std::string::npos);
-    // No `phi` anywhere - every loop/recursive helper here uses the same
-    // alloca/load/store convention this whole backend establishes (see
-    // docs/language/0040-sorted-maps.md).
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a SortedMap's .length via GEP+load field 0, not a compile-time "
-     "constant")
-{
-    auto ir = emitLlvmIr("len(m: SortedMap<i32,i32>) -> i32 { return m.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.SortedMapNode.0*}, "
-                        "{i32, %axea.SortedMapNode.0*}* %0, i32 0, i32 0") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedMap<char,V> node type stores the key at char's own i24 width, not "
-     "a hardcoded i32 - char is orderable by codepoint, same as i32 (see "
-     "docs/language/0044-char.md)")
-{
-    auto ir = emitLlvmIr("f() { m = SortedMap<char,i32>()  m.set('a', 1) }");
-    EXPECT_TRUE(ir.find("type { i24, i32, i32,") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp slt i24") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedMap<str,V> node type stores the key as a bare i8*, comparing via a "
-     "real lexicographic @axea.less.str call, not a pointer-identity icmp - str has a real "
-     "order, same as i32/char (see docs/language/0042-string.md)")
-{
-    auto ir = emitLlvmIr("f() { m = SortedMap<str,i32>()  m.set(\"a\", 1) }");
-    EXPECT_TRUE(ir.find("type { i8*, i32, i32,") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i1 @axea.less.str(i8* %a, i8* %b)") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.less.str(") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp slt i8*") == std::string::npos);
-    EXPECT_TRUE(ir.find("icmp sgt i8*") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter monomorphizes each distinct SortedMap<K,V> shape into its own node type/"
-     "functions")
-{
-    auto ir = emitLlvmIr("useA(m: SortedMap<i32,i32>) -> i32 { return m.get(1) } "
-                         "useB(m: SortedMap<i32,str>) -> str { return m.get(1) }");
-    EXPECT_TRUE(ir.find("%axea.SortedMapNode.0 = type { i32, i32, i32, %axea.SortedMapNode.0*, "
-                        "%axea.SortedMapNode.0* }") != std::string::npos);
-    EXPECT_TRUE(ir.find("%axea.SortedMapNode.1 = type { i32, i8*, i32, %axea.SortedMapNode.1*, "
-                        "%axea.SortedMapNode.1* }") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i32 @axea.sortedmap.0.get(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i8* @axea.sortedmap.1.get(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level SortedMap binding by count, not contents - matches the "
-     "interpreter's own identical choice (see docs/language/0040-sorted-maps.md)")
-{
-    auto ir = emitLlvmIr("m = SortedMap<i32,i32>()");
-    EXPECT_TRUE(ir.find("SortedMap(") != std::string::npos);
-    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter Map<K,V>/SortedMap<K,V> set/get resolve to distinct emit functions despite "
-     "sharing the same method names")
-{
-    auto ir = emitLlvmIr("useMap(m: Map<i32,i32>) { m.set(1, 2) } "
-                         "useSortedMap(m: SortedMap<i32,i32>) { m.set(1, 2) }");
-    EXPECT_TRUE(ir.find("call void @axea.map.0.set(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.sortedmap.0.set(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter represents SortedSet<i32> as a pointer to a named-node 2-field heap header, "
-     "distinct from Set's own 3-field header")
-{
-    auto ir = emitLlvmIr("useSS(s: SortedSet<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("define i32 @useSS({i32, %axea.SortedSetNode.0*}* %0) {") !=
-                std::string::npos);
-}
-
-TEST("LlvmIrEmitter declares a 4-field self-referential node type for SortedSet<T> - key, "
-     "height, left, right - no value field, unlike SortedMap<K,V>'s own 5-field node")
-{
-    auto ir = emitLlvmIr("f() -> i32 { s = SortedSet<i32>()  s.add(1)  return s.length }");
-    EXPECT_TRUE(ir.find("%axea.SortedSetNode.0 = type { i32, i32, %axea.SortedSetNode.0*, "
-                        "%axea.SortedSetNode.0* }") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedSet<T>() construction mallocs a 2-field header and zero-initializes "
-     "it - no bucket array, unlike Set's own 3-field header")
-{
-    auto ir = emitLlvmIr("f() -> i32 { s = SortedSet<i32>()  return s.length }");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64") != std::string::npos);
-    EXPECT_TRUE(ir.find("store i32 0, i32*") != std::string::npos); // count = 0
-    EXPECT_TRUE(ir.find("store %axea.SortedSetNode.0* null, %axea.SortedSetNode.0**") !=
-                std::string::npos); // root = null
-}
-
-TEST("LlvmIrEmitter's SortedSet operations call that instantiation's own axea.sortedset.N "
-     "runtime functions, including the AVL rotation/height helpers")
-{
-    auto ir = emitLlvmIr("f() { "
-                         "  s = SortedSet<i32>() "
-                         "  s.add(1) "
-                         "  hit = s.contains(1) "
-                         "  s.remove(1) "
-                         "}");
-    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.add(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.sortedset.0.contains(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.remove(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i32 @axea.sortedset.0.height(") != std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.rotateLeft(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.rotateRight(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.insertNode(") !=
-                std::string::npos);
-    EXPECT_TRUE(ir.find("define %axea.SortedSetNode.0* @axea.sortedset.0.removeNode(") !=
-                std::string::npos);
-    // No `free` call, no `phi` anywhere - matches SortedMap<K,V>'s own
-    // identical choices (see docs/language/0041-sorted-sets.md).
-    EXPECT_TRUE(ir.find("call void @free") == std::string::npos);
-    EXPECT_TRUE(ir.find(" phi ") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedSet<char> node type stores the key at char's own i24 width, not "
-     "a hardcoded i32 - char is orderable by codepoint, same as i32 (see "
-     "docs/language/0044-char.md)")
-{
-    auto ir = emitLlvmIr("f() { s = SortedSet<char>()  s.add('a') }");
-    EXPECT_TRUE(ir.find("type { i24, i32,") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp slt i24") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's SortedSet<str> node type stores the key as a bare i8*, comparing via a "
-     "real lexicographic @axea.less.str call, not a pointer-identity icmp - str has a real "
-     "order, same as i32/char (see docs/language/0042-string.md)")
-{
-    auto ir = emitLlvmIr("f() { s = SortedSet<str>()  s.add(\"a\") }");
-    EXPECT_TRUE(ir.find("type { i8*, i32,") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i1 @axea.less.str(i8* %a, i8* %b)") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.less.str(") != std::string::npos);
-    EXPECT_TRUE(ir.find("icmp slt i8*") == std::string::npos);
-    EXPECT_TRUE(ir.find("icmp sgt i8*") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter reads a SortedSet's .length via GEP+load field 0, not a compile-time "
-     "constant")
-{
-    auto ir = emitLlvmIr("len(s: SortedSet<i32>) -> i32 { return s.length }");
-    EXPECT_TRUE(ir.find("getelementptr {i32, %axea.SortedSetNode.0*}, "
-                        "{i32, %axea.SortedSetNode.0*}* %0, i32 0, i32 0") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level SortedSet binding by count, not contents - matches the "
-     "interpreter's own identical choice (see docs/language/0041-sorted-sets.md)")
-{
-    auto ir = emitLlvmIr("s = SortedSet<i32>()");
-    EXPECT_TRUE(ir.find("SortedSet(") != std::string::npos);
-    EXPECT_TRUE(ir.find(" entries)") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter Set<T>/SortedSet<T> add resolve to distinct emit functions despite sharing "
-     "the same method name")
-{
-    auto ir = emitLlvmIr("useSet(s: Set<i32>) { s.add(1) } "
-                         "useSortedSet(s: SortedSet<i32>) { s.add(1) }");
-    EXPECT_TRUE(ir.find("call void @axea.set.0.add(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.sortedset.0.add(") != std::string::npos);
-}
+// SortedSet<T> is a real, user-declared generic struct now (see
+// docs/language/0041-sorted-sets.md's own "2026 Update") - there is no internal-codegen-shape
+// test left here at all anymore (mirrors SortedMap<K,V>/Map<K,V>/Set<T>'s own identical,
+// already-complete removal from this file): its own monomorphized node type/add/contains/remove
+// functions are ordinary real Axea source in std/collections.ax now, compiled the same way any
+// other generic struct's own impl methods already are - already covered by this file's own
+// generic struct/generic method codegen tests elsewhere, with nothing SortedSet-specific left to
+// assert. This is the last of these internal-codegen-shape tests: every collection
+// docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real Axea
+// source.
 
 TEST("LlvmIrEmitter represents String as the exact same LLVM type as List<i8> would - a "
      "2-field {i32, i8*}* header")
@@ -1113,15 +752,6 @@ TEST("LlvmIrEmitter prints an i64/f64 struct field via the same stringifyValueOf
     EXPECT_TRUE(ir.find("call i8* @axea.f64.to_str(") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter's SortedMap<i64,f64> node type stores the key at i64 width and compares "
-     "via @axea.less.i64 - a real order, same as i32 (see docs/language/0040-sorted-maps.md)")
-{
-    auto ir = emitLlvmIr("f() { m = SortedMap<i64,f64>()  m.set(1i64, 1.5) }");
-    EXPECT_TRUE(ir.find("type { i64, double, i32,") != std::string::npos);
-    EXPECT_TRUE(ir.find("define i1 @axea.less.i64(i64 %a, i64 %b)") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i1 @axea.less.i64(") != std::string::npos);
-}
-
 TEST("LlvmIrEmitter's str `<`/`<=`/`>`/`>=` compare via a real lexicographic @axea.less.str "
      "call, not a pointer-identity icmp on i8* (see docs/language/0042-string.md)")
 {
@@ -1437,16 +1067,6 @@ TEST("LlvmIrEmitter throws a clear error printing a Result<T,E> whose payload is
                              "g() -> String { return \"{f()}\" }"));
 }
 
-TEST("LlvmIrEmitter's sentinelFor Result<T,E> case returns zeroinitializer - a byval "
-     "aggregate, for which \"null\" is invalid IR")
-{
-    auto ir = emitLlvmIr("f() -> Result<i32, i32> { "
-                         "  m: Map<i32, Result<i32,i32>> = Map<i32, Result<i32,i32>>() "
-                         "  return m.get(1) "
-                         "}");
-    EXPECT_TRUE(ir.find("zeroinitializer") != std::string::npos);
-}
-
 TEST("LlvmIrEmitter's parse<i64>() calls a single shared @axea.parse.i64 runtime function, "
      "the identical digit loop parse<i32>() uses just at 64-bit width (see "
      "docs/language/0051-numeric-widening.md)")
@@ -1534,14 +1154,6 @@ TEST("LlvmIrEmitter's print(...) of an Array<i32> routes through "
     auto ir = emitLlvmIr("f() { arr = [1, 2, 3]  print(arr) }");
     EXPECT_TRUE(ir.find("define i8* @axea.tostring.collection.0(") != std::string::npos);
     EXPECT_TRUE(ir.find("call i8* @axea.tostring.collection.0(") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter's collection stringifier for Map<K,V> is count-only, matching the "
-     "top-level binding printer's own identical fallback (no iteration support this phase)")
-{
-    auto ir = emitLlvmIr("f() { m: Map<i32,i32> = Map<i32,i32>()  print(m) }");
-    EXPECT_TRUE(ir.find("@axea.str.map_open") != std::string::npos);
-    EXPECT_TRUE(ir.find("@axea.i32.to_str") != std::string::npos);
 }
 
 TEST("LlvmIrEmitter's print(...) calls printf(\"%s\", ...) once per argument, space-separated, "

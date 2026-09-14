@@ -121,17 +121,20 @@ TEST("GenericMonomorphizer rejects an unknown generic struct name")
     EXPECT_THROWS(monomorphize("b = Frobnicate<i32> { value: 5 }"));
 }
 
-TEST("GenericMonomorphizer leaves a built-in generic collection type completely untouched")
+TEST("GenericMonomorphizer leaves a built-in generic type completely untouched")
 {
-    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> are no longer built-in (see
-    // docs/language/0006-generics.md's own port follow-up) - they're real, user-declared generic
-    // structs now (std/collections.ax), so this uses LinkedList<T> instead, one of the remaining
-    // intrinsic collections.
-    auto program = monomorphize("numbers = LinkedList<i32>()");
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>/LinkedList<T>/Map<K,V>/Set<T>/
+    // SortedMap<K,V>/SortedSet<T> are no longer built-in (see docs/language/0006-generics.md's
+    // own port follow-up, docs/language/0034-maps-and-sets.md's own "2026 Update",
+    // docs/language/0040-sorted-maps.md's own "2026 Update", and docs/language/0041-sorted-
+    // sets.md's own "2026 Update") - they're all real, user-declared generic structs now
+    // (std/collections.ax), so this uses Optional<T> instead, one of the few remaining
+    // genuinely built-in generic types (see docs/language/0052-optional.md).
+    auto program = monomorphize("f() -> Optional<i32> { return None }");
 
-    // No "LinkedList"-named StructDecl should ever be synthesized - LinkedList<T> is a
+    // No "Optional"-named StructDecl should ever be synthesized - Optional<T> is a
     // compiler intrinsic, never StructDecl-backed.
-    EXPECT_TRUE(findStruct(program, "LinkedList$i32") == nullptr);
+    EXPECT_TRUE(findStruct(program, "Optional$i32") == nullptr);
 }
 
 namespace

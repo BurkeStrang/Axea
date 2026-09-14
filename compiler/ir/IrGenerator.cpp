@@ -203,48 +203,6 @@ std::optional<int> IrScope::findArrayLength(const std::string& name) const
     return parent_ ? parent_->findArrayLength(name) : std::nullopt;
 }
 
-void IrScope::defineIsSet(const std::string& name, bool isSet)
-{
-    isSetKinds_[name] = isSet;
-}
-
-std::optional<bool> IrScope::findIsSet(const std::string& name) const
-{
-    if (const auto it = isSetKinds_.find(name); it != isSetKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsSet(name) : std::nullopt;
-}
-
-void IrScope::defineIsSortedMap(const std::string& name, bool isSortedMap)
-{
-    isSortedMapKinds_[name] = isSortedMap;
-}
-
-std::optional<bool> IrScope::findIsSortedMap(const std::string& name) const
-{
-    if (const auto it = isSortedMapKinds_.find(name); it != isSortedMapKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsSortedMap(name) : std::nullopt;
-}
-
-void IrScope::defineIsSortedSet(const std::string& name, bool isSortedSet)
-{
-    isSortedSetKinds_[name] = isSortedSet;
-}
-
-std::optional<bool> IrScope::findIsSortedSet(const std::string& name) const
-{
-    if (const auto it = isSortedSetKinds_.find(name); it != isSortedSetKinds_.end())
-    {
-        return it->second;
-    }
-    return parent_ ? parent_->findIsSortedSet(name) : std::nullopt;
-}
-
 void IrScope::defineIsBuffer(const std::string& name, bool isBuffer)
 {
     isBufferKinds_[name] = isBuffer;
@@ -305,6 +263,17 @@ void IrGenerator::emitVoid(Context& ctx, std::unique_ptr<IrInst> inst)
     ctx.out->push_back(std::move(inst));
 }
 
+int IrGenerator::lowerNullExpr(const std::string& targetTypeText, Context& ctx)
+{
+    // `targetTypeText` is stored verbatim, *not* stripped of a leading '*' - LlvmIrEmitter's own
+    // llvmType already correctly turns either shape into the right register type on its own
+    // ("*i32" -> "i32*"; a plain struct name "Node$i32" -> "%Node$i32*", since structs are
+    // already by-pointer) - see IrConstNull's own doc comment in Ir.hpp.
+    auto inst = std::make_unique<IrConstNull>();
+    inst->pointeeTypeName = targetTypeText;
+    return emit(ctx, std::move(inst));
+}
+
 void IrGenerator::registerStructs(const Program& program)
 {
     for (const auto& item : program.items)
@@ -323,7 +292,7 @@ void IrGenerator::registerStructs(const Program& program)
         {
             enums_[enumDecl->name] = enumDecl;
         }
-        // Only the return type is needed here (see isSetExpr) - not a
+        // Only the return type is needed here (see isSortedSetExpr) - not a
         // general function table, so this stays folded into registerStructs
         // rather than becoming its own pass.
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
@@ -498,176 +467,16 @@ std::optional<int> IrGenerator::arrayLengthOf(const Expr& expr,
     return std::nullopt;
 }
 
-std::optional<bool>
-IrGenerator::isSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const
-{
-    if (dynamic_cast<const SetNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const MapNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("Set<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("Map<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsSet(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("Set<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("Map<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
-
-// `List<T>`/`Stack<T>`/`PriorityQueue<T>` are all real, user-declared generic structs now (see
-// docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port follow-up), reached
-// via the general struct method dispatch this session already built - there is no
-// isStackExpr/isPriorityQueueExpr left here at all anymore.
-
-std::optional<bool> IrGenerator::isSortedMapExpr(const Expr& expr,
-                                                 const FunctionDecl* function,
-                                                 const IrScope& scope) const
-{
-    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const MapNewExpr*>(&expr) || dynamic_cast<const SetNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("SortedMap<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("Map<") || param.type.starts_with("Set<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsSortedMap(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("SortedMap<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("Map<") ||
-                it->second->returnType->starts_with("Set<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<bool> IrGenerator::isSortedSetExpr(const Expr& expr,
-                                                 const FunctionDecl* function,
-                                                 const IrScope& scope) const
-{
-    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
-    {
-        return true;
-    }
-    if (dynamic_cast<const SetNewExpr*>(&expr) || dynamic_cast<const MapNewExpr*>(&expr) ||
-        dynamic_cast<const SortedMapNewExpr*>(&expr))
-    {
-        return false;
-    }
-
-    if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
-    {
-        if (function)
-        {
-            for (const auto& param : function->params)
-            {
-                if (param.name == name->name)
-                {
-                    if (param.type.starts_with("SortedSet<"))
-                    {
-                        return true;
-                    }
-                    if (param.type.starts_with("Set<") || param.type.starts_with("Map<") ||
-                        param.type.starts_with("SortedMap<"))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        return scope.findIsSortedSet(name->name);
-    }
-
-    if (const auto* call = dynamic_cast<const CallExpr*>(&expr))
-    {
-        const auto it = functions_.find(call->callee);
-        if (it != functions_.end() && it->second->returnType)
-        {
-            if (it->second->returnType->starts_with("SortedSet<"))
-            {
-                return true;
-            }
-            if (it->second->returnType->starts_with("Set<") ||
-                it->second->returnType->starts_with("Map<") ||
-                it->second->returnType->starts_with("SortedMap<"))
-            {
-                return false;
-            }
-        }
-    }
-
-    return std::nullopt;
-}
+// `List<T>`/`Stack<T>`/`PriorityQueue<T>`/`Map<K,V>`/`Set<T>`/`SortedMap<K,V>`/`SortedSet<T>` are
+// all real, user-declared generic structs now (see docs/language/0006-generics.md's own
+// List<T>/Stack<T>/PriorityQueue<T> port follow-up, docs/language/0034-maps-and-sets.md's own
+// "2026 Update", docs/language/0040-sorted-maps.md's own "2026 Update", and
+// docs/language/0041-sorted-sets.md's own "2026 Update"), reached via the general struct method
+// dispatch this session already built - there is no
+// isStackExpr/isPriorityQueueExpr/isSetExpr/isSortedMapExpr/isSortedSetExpr left here at all
+// anymore. This is the last of these resolvers: every collection
+// docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real Axea
+// source.
 
 std::optional<bool> IrGenerator::isBufferExpr(const Expr& expr,
                                               const FunctionDecl* function,
@@ -923,6 +732,75 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             {
                 return *it->second->returnType;
             }
+        }
+    }
+    // `unsafe { raw as *T }` (see docs/language/0019-unsafe.md) - another real, previously-
+    // undiscovered bug in the exact same family as the module-qualified-call one just above,
+    // found while porting LinkedList<T>'s own self-referential `*Node<T>` pointers: a local
+    // built this way (`current = unsafe { raw as *Node }`, or `current = c` forwarding one) never
+    // got its own simpleType recorded either (this function had no CastExpr case at all), so a
+    // later `current == null`/`current.next` couldn't resolve resolveStructOrEnumType's own
+    // struct-pointee pointer type and silently fell through to lowerNullExpr("") - emitting
+    // literally malformed LLVM text ("getelementptr %, %* null, i32 0"), a hard compile failure,
+    // not a silent-wrong-value bug this time. A CastExpr's own target type is always explicit
+    // and already known - no inference needed at all, unlike every other case in this function.
+    if (const auto* cast = dynamic_cast<const CastExpr*>(&expr))
+    {
+        return cast->targetType;
+    }
+    // `*ptr` (see docs/language/0019-unsafe.md) - the same gap as CastExpr just above, found one
+    // level deeper: `node = unsafe { *ptr }` (dereferencing a struct-pointee `*Node<T>`, needed to
+    // read/mutate through a node during traversal) needs `ptr`'s own already-known pointer type
+    // (recursing through this same function) with its leading '*' stripped - deref removes
+    // exactly one level of indirection, the type-level mirror of DerefExpr's own runtime
+    // behavior. Returns nullopt (not the whole string unstripped) if `ptr`'s own type isn't
+    // pointer-shaped, matching every other "can't determine, let the caller's own null-context
+    // fallback report it" case in this function.
+    if (const auto* deref = dynamic_cast<const DerefExpr*>(&expr))
+    {
+        if (const auto pointerType = simpleTypeOfExpr(*deref->operand, function, scope);
+            pointerType && !pointerType->empty() && pointerType->front() == '*')
+        {
+            return pointerType->substr(1);
+        }
+        return std::nullopt;
+    }
+    // `ptr + i` / `ptr - i` (see docs/language/0019-unsafe.md) - pointer arithmetic never changes
+    // the pointer's own type, so this just recurses into the pointer operand (whichever side is
+    // pointer-shaped) and returns its type verbatim, one level up from DerefExpr's own "strip a
+    // star" case just below. Found while porting Map<K,V>/Set<T>'s own bucket array (see
+    // docs/language/0034-maps-and-sets.md's "2026 Update"): `*(buckets + i) = null` needs
+    // `buckets + i`'s own type (`**Entry<K,V>`) to resolve the assigned-into pointee - without
+    // this case, `simpleTypeOfExpr` had no `BinaryExpr` case at all, so pointer arithmetic's own
+    // result type was always unresolvable.
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr);
+        binary && (binary->op == TokenKind::Plus || binary->op == TokenKind::Minus))
+    {
+        if (const auto leftType = simpleTypeOfExpr(*binary->left, function, scope);
+            leftType && !leftType->empty() && leftType->front() == '*')
+        {
+            return leftType;
+        }
+        if (const auto rightType = simpleTypeOfExpr(*binary->right, function, scope);
+            rightType && !rightType->empty() && rightType->front() == '*')
+        {
+            return rightType;
+        }
+        return std::nullopt;
+    }
+    // `unsafe { raw as *T }` / `unsafe { *ptr }` (see docs/language/0019-unsafe.md) - the exact
+    // same "no inference needed" reasoning as the bare CastExpr/DerefExpr cases just above, since
+    // `unsafe { ... }`'s own body is always a BlockExpr (see UnsafeBlockExpr's own doc comment in
+    // ast/Expr.hpp) whose trailing result *is* the cast/deref - this is how every existing
+    // collection's own malloc-and-cast idiom (`raw = malloc(...) data = unsafe { raw as *T }`)
+    // and LinkedList<T>'s own node-dereference idiom actually look at the AST level, so this case
+    // is needed for either one above to ever actually fire in practice.
+    if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(&expr))
+    {
+        const auto& block = static_cast<const BlockExpr&>(*unsafeBlock->body);
+        if (block.result)
+        {
+            return simpleTypeOfExpr(*block.result, function, scope);
         }
     }
     // `.clone()` (Shared<T>) - a real bug found while testing: `other = sp.clone(); other.x`
@@ -1845,8 +1723,32 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
 
     if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
     {
-        const int lhs = lowerExpr(*binary->left, scope, ctx);
-        const int rhs = lowerExpr(*binary->right, scope, ctx);
+        // `ptr == null` / `null != ptr` (see docs/language/0019-unsafe.md and lowerNullExpr's
+        // own doc comment) - either side could be the null literal, so the *other* side's own
+        // resolved type (via simpleTypeOfExpr, the same best-effort inference IrGenerator
+        // already relies on elsewhere) is the only context available to resolve it against;
+        // lowered first (bottom-up) so its type is knowable before the null side is lowered.
+        const bool leftIsNull = dynamic_cast<const NullExpr*>(binary->left.get()) != nullptr;
+        const bool rightIsNull = dynamic_cast<const NullExpr*>(binary->right.get()) != nullptr;
+        int lhs;
+        int rhs;
+        if (leftIsNull && !rightIsNull)
+        {
+            rhs = lowerExpr(*binary->right, scope, ctx);
+            const auto pointerType = simpleTypeOfExpr(*binary->right, ctx.function, scope);
+            lhs = lowerNullExpr(pointerType.value_or(std::string()), ctx);
+        }
+        else if (rightIsNull && !leftIsNull)
+        {
+            lhs = lowerExpr(*binary->left, scope, ctx);
+            const auto pointerType = simpleTypeOfExpr(*binary->left, ctx.function, scope);
+            rhs = lowerNullExpr(pointerType.value_or(std::string()), ctx);
+        }
+        else
+        {
+            lhs = lowerExpr(*binary->left, scope, ctx);
+            rhs = lowerExpr(*binary->right, scope, ctx);
+        }
         auto inst = std::make_unique<IrBinOp>();
         inst->op = binary->op;
         inst->lhs = lhs;
@@ -1867,6 +1769,26 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
     {
         auto inst = std::make_unique<IrSizeOf>();
         inst->typeName = sizeOf->typeName;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* hashOf = dynamic_cast<const HashOfExpr*>(&expr))
+    {
+        const int value = lowerExpr(*hashOf->value, scope, ctx);
+        auto inst = std::make_unique<IrHashOf>();
+        inst->typeName = hashOf->typeName;
+        inst->value = value;
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* keyEq = dynamic_cast<const KeyEqExpr*>(&expr))
+    {
+        const int left = lowerExpr(*keyEq->left, scope, ctx);
+        const int right = lowerExpr(*keyEq->right, scope, ctx);
+        auto inst = std::make_unique<IrKeyEq>();
+        inst->typeName = keyEq->typeName;
+        inst->left = left;
+        inst->right = right;
         return emit(ctx, std::move(inst));
     }
 
@@ -1914,6 +1836,20 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         // mirrors just above) always intercept a bare `None` before it
         // would reach generic lowerExpr (see docs/language/0052-optional.md).
         return -1;
+    }
+
+    if (dynamic_cast<const NullExpr*>(&expr))
+    {
+        // Every real consumption site (struct-literal field init, call arguments,
+        // FieldAssignStmt, AssignmentStmt/ReturnStmt with a declared type, `==`/`!=`) resolves
+        // its own known target pointer type and calls lowerNullExpr directly, bypassing this
+        // generic dispatch entirely - unlike NoneExpr above, `null` type-checks standalone (see
+        // TypeChecker's own NullExpr case), so reaching here means a well-typed program used
+        // `null` somewhere with no concrete pointer type in context to lower it against (e.g. a
+        // bare `x = null` with no declared type) - a real gap, not silently swallowed.
+        throw std::runtime_error(
+            "internal error: 'null' reached IrGenerator's generic lowering without a concrete "
+            "pointer type available from context");
     }
 
     if (dynamic_cast<const OkExpr*>(&expr) || dynamic_cast<const ErrExpr*>(&expr))
@@ -2112,7 +2048,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             // scope.
             const std::optional<int> functionRef =
                 tryLowerFunctionRef(*call->arguments[i], scope, ctx);
-            int argReg = functionRef ? *functionRef : lowerExpr(*call->arguments[i], scope, ctx);
+            // `null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc comment) -
+            // the matching param's own declared type is the only context available to resolve a
+            // bare `null` argument's pointee type against.
+            const bool isNullArg = !functionRef &&
+                                   dynamic_cast<const NullExpr*>(call->arguments[i].get()) &&
+                                   calleeIt != functions_.end() &&
+                                   i < calleeIt->second->params.size();
+            int argReg = functionRef                ? *functionRef
+                        : isNullArg                  ? lowerNullExpr(calleeIt->second->params[i].type, ctx)
+                                                      : lowerExpr(*call->arguments[i], scope, ctx);
             // Implicit union wrapping (see docs/language/0065-unions.md) -
             // `f(5)`/`f("hi")` against `f(x: i32 | str)` need no wrapper
             // syntax.
@@ -2215,23 +2160,19 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(callInst));
         }
 
-        // Resolved from the AST, before lowering `object` below, since
-        // isSetExpr/isSortedMapExpr all inspect the expression shape itself (see their
-        // own doc comments) - needed only to disambiguate "contains"/
-        // "remove" between Map, Set, and SortedMap and "set"/"get" between
-        // Map and SortedMap (docs/language/0034-maps-and-sets.md,
-        // docs/language/0040-sorted-maps.md); every other method
-        // name here is unambiguous by itself - push_front/push_back/pop_front/pop_back no longer
-        // need a resolver either, now that Deque<T> is a real struct too (see that same port
-        // follow-up), leaving LinkedList<T> as the sole remaining user of those names, and
-        // push/pop/peek need no resolver anymore either, now that PriorityQueue<T> is the
-        // sole remaining user of those three names, reached via the general struct method
-        // dispatch below (see docs/language/0006-generics.md's own port follow-up).
-        const std::optional<bool> setKind = isSetExpr(*methodCall->object, ctx.function, scope);
-        const std::optional<bool> sortedMapKind =
-            isSortedMapExpr(*methodCall->object, ctx.function, scope);
-        const std::optional<bool> sortedSetKind =
-            isSortedSetExpr(*methodCall->object, ctx.function, scope);
+        // SortedMap<K,V> is a real, user-declared generic struct now too (see
+        // docs/language/0040-sorted-maps.md's own "2026 Update") - "set"/"get" need no resolver
+        // here anymore either, now that SortedSet<T> (docs/language/0041-sorted-sets.md) is the
+        // sole remaining builtin with a "contains"/"remove" method, unambiguous by itself; every
+        // other method name here is unambiguous by itself too - "add" needs no resolver anymore
+        // either, now that SortedSet<T> is the sole remaining user of that name (Map<K,V>/Set<T>
+        // are both real structs too, see docs/language/0034-maps-and-sets.md's own "2026 Update",
+        // reached via the general struct method dispatch below), push_front/push_back/
+        // pop_front/pop_back need no resolver either, now that Deque<T> and LinkedList<T> are both
+        // real structs too (see that same port follow-up), and push/pop/peek need no resolver
+        // anymore either, now that PriorityQueue<T> is the sole remaining user of those three
+        // names, reached via the general struct method dispatch below (see
+        // docs/language/0006-generics.md's own port follow-up).
         const std::optional<bool> bufferKind =
             isBufferExpr(*methodCall->object, ctx.function, scope);
         const int object = lowerExpr(*methodCall->object, scope, ctx);
@@ -2266,7 +2207,16 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
                 {
                     const std::optional<int> functionRef =
                         tryLowerFunctionRef(*methodCall->arguments[i], scope, ctx);
+                    // `null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc
+                    // comment) - the matching param's own declared type (self is params[0], so
+                    // argument i matches params[i+1]) is the only context available to resolve a
+                    // bare `null` argument's pointee type against.
+                    const bool isNullArg =
+                        !functionRef &&
+                        dynamic_cast<const NullExpr*>(methodCall->arguments[i].get()) &&
+                        i + 1 < calleeIt->second->params.size();
                     int argReg = functionRef ? *functionRef
+                                : isNullArg   ? lowerNullExpr(calleeIt->second->params[i + 1].type, ctx)
                                               : lowerExpr(*methodCall->arguments[i], scope, ctx);
                     if (!functionRef && i + 1 < calleeIt->second->params.size())
                     {
@@ -2397,42 +2347,10 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         // port follow-up), reached via the general struct method dispatch earlier in this same
         // function - there is no remaining builtin-collection user of these three names at all.
 
-        // push_front/push_back/pop_front/pop_back: Deque<T> is a real, user-declared generic
-        // struct now (see docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port
-        // follow-up), reached via the general struct method dispatch earlier in this same
-        // function - LinkedList<T> (docs/language/0036-linked-lists.md) is the sole remaining
-        // collection using these method names, so no disambiguation is needed at all anymore.
-        if (methodCall->method == "push_front")
-        {
-            auto inst = std::make_unique<IrLinkedListPushFront>();
-            inst->list = object;
-            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "push_back")
-        {
-            auto inst = std::make_unique<IrLinkedListPushBack>();
-            inst->list = object;
-            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "pop_front")
-        {
-            auto inst = std::make_unique<IrLinkedListPopFront>();
-            inst->list = object;
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "pop_back")
-        {
-            auto inst = std::make_unique<IrLinkedListPopBack>();
-            inst->list = object;
-            return emit(ctx, std::move(inst));
-        }
+        // push_front/push_back/pop_front/pop_back: Deque<T> and LinkedList<T> are both real,
+        // user-declared generic structs now (see docs/language/0006-generics.md's own port
+        // follow-up), both reached via the general struct method dispatch earlier in this same
+        // function - there is no remaining builtin-collection user of these four names at all.
 
         // Queue<T> is a real, user-declared generic struct now (see
         // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T> port
@@ -2504,124 +2422,13 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             return emit(ctx, std::move(inst));
         }
 
-        if (methodCall->method == "set")
-        {
-            // sortedMapKind is checked first - SortedMap<K,V> and Map<K,V>
-            // are the only two candidates for "set" (Set<T> has no "set"),
-            // see docs/language/0040-sorted-maps.md.
-            if (sortedMapKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSortedMapSet>();
-                inst->sortedMap = object;
-                inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
-                inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
-                consumeTrackedRegister(ctx, inst->key);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrMapSet>();
-            inst->map = object;
-            inst->key = lowerExpr(*methodCall->arguments[0], scope, ctx);
-            inst->value = lowerExpr(*methodCall->arguments[1], scope, ctx);
-            consumeTrackedRegister(ctx, inst->key);
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "get")
-        {
-            if (sortedMapKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSortedMapGet>();
-                inst->sortedMap = object;
-                inst->key = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrMapGet>();
-            inst->map = object;
-            inst->key = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "add")
-        {
-            // sortedSetKind is checked first - Set<T> and SortedSet<T> are
-            // the only two candidates for "add" (Map<K,V>/SortedMap<K,V>
-            // have no "add"), see docs/language/0041-sorted-sets.md.
-            if (sortedSetKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSortedSetAdd>();
-                inst->sortedSet = object;
-                inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-                consumeTrackedRegister(ctx, inst->value);
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrSetAdd>();
-            inst->set = object;
-            inst->value = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            consumeTrackedRegister(ctx, inst->value);
-            return emit(ctx, std::move(inst));
-        }
-
-        if (methodCall->method == "contains")
-        {
-            // sortedSetKind is checked before sortedMapKind and setKind.
-            const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-            if (sortedSetKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSortedSetContains>();
-                inst->sortedSet = object;
-                inst->value = argument;
-                return emit(ctx, std::move(inst));
-            }
-            if (sortedMapKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSortedMapContains>();
-                inst->sortedMap = object;
-                inst->key = argument;
-                return emit(ctx, std::move(inst));
-            }
-            if (setKind.value_or(false))
-            {
-                auto inst = std::make_unique<IrSetContains>();
-                inst->set = object;
-                inst->value = argument;
-                return emit(ctx, std::move(inst));
-            }
-            auto inst = std::make_unique<IrMapContains>();
-            inst->map = object;
-            inst->key = argument;
-            return emit(ctx, std::move(inst));
-        }
-
-        // TypeChecker already rejected anything but push/pop/set/get/
-        // add/contains/remove here.
-        const int argument = lowerExpr(*methodCall->arguments.front(), scope, ctx);
-        if (sortedSetKind.value_or(false))
-        {
-            auto inst = std::make_unique<IrSortedSetRemove>();
-            inst->sortedSet = object;
-            inst->value = argument;
-            return emit(ctx, std::move(inst));
-        }
-        if (sortedMapKind.value_or(false))
-        {
-            auto inst = std::make_unique<IrSortedMapRemove>();
-            inst->sortedMap = object;
-            inst->key = argument;
-            return emit(ctx, std::move(inst));
-        }
-        if (setKind.value_or(false))
-        {
-            auto inst = std::make_unique<IrSetRemove>();
-            inst->set = object;
-            inst->value = argument;
-            return emit(ctx, std::move(inst));
-        }
-        auto inst = std::make_unique<IrMapRemove>();
-        inst->map = object;
-        inst->key = argument;
-        return emit(ctx, std::move(inst));
+        // Set<T>/Map<K,V>/SortedMap<K,V>/SortedSet<T> are all real, user-declared generic structs
+        // now (see docs/language/0034-maps-and-sets.md's own "2026 Update", docs/language/0040-
+        // sorted-maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026
+        // Update") - there is no "add"/"contains"/"remove" fallback dispatch left here at all
+        // anymore; all three are already caught by the general struct method dispatch above. This
+        // is the last of these fallbacks: every collection docs/language/0029-collections.md
+        // originally scoped as a compiler intrinsic is now real Axea source.
     }
 
     if (const auto* field = dynamic_cast<const FieldExpr*>(&expr))
@@ -2700,43 +2507,6 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         return emit(ctx, std::move(inst));
     }
 
-    if (const auto* linkedListNew = dynamic_cast<const LinkedListNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrLinkedListNew>();
-        inst->elementTypeName = linkedListNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* mapNew = dynamic_cast<const MapNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrMapNew>();
-        inst->keyTypeName = mapNew->keyType;
-        inst->valueTypeName = mapNew->valueType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* setNew = dynamic_cast<const SetNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrSetNew>();
-        inst->elementTypeName = setNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* sortedMapNew = dynamic_cast<const SortedMapNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrSortedMapNew>();
-        inst->keyTypeName = sortedMapNew->keyType;
-        inst->valueTypeName = sortedMapNew->valueType;
-        return emit(ctx, std::move(inst));
-    }
-
-    if (const auto* sortedSetNew = dynamic_cast<const SortedSetNewExpr*>(&expr))
-    {
-        auto inst = std::make_unique<IrSortedSetNew>();
-        inst->elementTypeName = sortedSetNew->elementType;
-        return emit(ctx, std::move(inst));
-    }
-
     if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
     {
         auto inst = std::make_unique<IrStringNew>();
@@ -2778,20 +2548,30 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
             structs_.contains(literal->typeName) ? structs_.at(literal->typeName) : nullptr;
         for (const auto& [fieldName, fieldExpr] : literal->fields)
         {
-            const int fieldReg = lowerExpr(*fieldExpr, scope, ctx);
-            // Real memory reclamation (structs/enums only) - an existing struct/enum value
-            // stored directly into a fresh struct's own field needs its own independent
-            // reference too (see retainFieldValueIfNeeded's own comment).
+            std::string declaredFieldType;
             if (structDecl)
             {
                 for (const auto& declaredField : structDecl->fields)
                 {
                     if (declaredField.name == fieldName)
                     {
-                        retainFieldValueIfNeeded(fieldReg, *fieldExpr, declaredField.type, ctx);
+                        declaredFieldType = declaredField.type;
                         break;
                     }
                 }
+            }
+            // `null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc comment) -
+            // the declared field's own type is the only context available to resolve a bare
+            // `null` field initializer's pointee type against.
+            const int fieldReg = dynamic_cast<const NullExpr*>(fieldExpr.get())
+                                     ? lowerNullExpr(declaredFieldType, ctx)
+                                     : lowerExpr(*fieldExpr, scope, ctx);
+            // Real memory reclamation (structs/enums only) - an existing struct/enum value
+            // stored directly into a fresh struct's own field needs its own independent
+            // reference too (see retainFieldValueIfNeeded's own comment).
+            if (!declaredFieldType.empty())
+            {
+                retainFieldValueIfNeeded(fieldReg, *fieldExpr, declaredFieldType, ctx);
             }
             fields.emplace_back(fieldName, fieldReg);
         }
@@ -3015,6 +2795,11 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         const auto* errExpr = dynamic_cast<const ErrExpr*>(assignment->value.get());
         const bool isOkOrErrWithDeclaredType =
             (okExpr || errExpr) && assignment->declaredType.has_value();
+        // `x: *T = null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc comment) -
+        // same "built directly here" treatment as None/Ok/Err above.
+        const bool isNullWithDeclaredType =
+            dynamic_cast<const NullExpr*>(assignment->value.get()) != nullptr &&
+            assignment->declaredType.has_value();
         int value;
         if (isNoneWithDeclaredType)
         {
@@ -3022,6 +2807,10 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             inst->value = -1;
             inst->payloadTypeName = optionalPayloadTypeName(*assignment->declaredType);
             value = emit(ctx, std::move(inst));
+        }
+        else if (isNullWithDeclaredType)
+        {
+            value = lowerNullExpr(*assignment->declaredType, ctx);
         }
         else if (isOkOrErrWithDeclaredType)
         {
@@ -3089,7 +2878,31 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             {
                 resolvedType = *resolved;
             }
-            if (resolvedType &&
+            // `x = unsafe { *ptr }` (see docs/language/0019-unsafe.md) - a real, previously-
+            // undiscovered bug found while porting LinkedList<T>'s own node traversal: a struct
+            // value obtained by dereferencing a raw pointer is *never* independently owned - it's
+            // a view into memory the pointer itself is responsible for (part of a larger malloc'd
+            // node, still reachable through other pointers in the same structure), not a fresh
+            // allocation this binding is the sole owner of. Before resolveStructOrEnumType grew a
+            // DerefExpr case (needed for `node.next`-style field access through a dereferenced
+            // node to resolve at all), this path never triggered drop-tracking in the first
+            // place, so the bug was latent; now that it does resolve, `oldTail`/`newTailNode`-
+            // style locals were getting queued for release at scope exit like any other
+            // struct-typed local, double-freeing a node still linked into the list (confirmed via
+            // a real crash: "free(): double free detected in tcache" from `@axea.drop.Node$i32`
+            // inside `pop_back`). `unsafe` already means "you're on your own" for pointer
+            // arithmetic/malloc/free elsewhere in this language - move-semantics tracking
+            // deliberately stays out of it here too, matching that same philosophy.
+            const bool isDerefDerived = [&]
+            {
+                const Expr* value = assignment->value.get();
+                if (const auto* unsafeBlock = dynamic_cast<const UnsafeBlockExpr*>(value))
+                {
+                    value = static_cast<const BlockExpr&>(*unsafeBlock->body).result.get();
+                }
+                return value && dynamic_cast<const DerefExpr*>(value) != nullptr;
+            }();
+            if (!isDerefDerived && resolvedType &&
                 (structs_.contains(*resolvedType) || enums_.contains(*resolvedType) ||
                  resolvedType->starts_with("fn(")))
             {
@@ -3113,26 +2926,10 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
         {
             scope.defineArrayLength(assignment->name, *length);
         }
-        // Records this name's Map-vs-Set kind, if known, so a later
-        // `.contains`/`.remove` on it can be resolved unambiguously (see
-        // isSetExpr and docs/language/0034-maps-and-sets.md) - mirrors
-        // arrayLengthOf's own placement immediately above.
-        if (const auto isSet = isSetExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsSet(assignment->name, *isSet);
-        }
-        // Same reasoning again, for Map/Set-vs-SortedMap (see
-        // isSortedMapExpr and docs/language/0040-sorted-maps.md).
-        if (const auto isSortedMap = isSortedMapExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsSortedMap(assignment->name, *isSortedMap);
-        }
-        // Same reasoning again, for Set/Map/SortedMap-vs-SortedSet (see
-        // isSortedSetExpr and docs/language/0041-sorted-sets.md).
-        if (const auto isSortedSet = isSortedSetExpr(*assignment->value, ctx.function, scope))
-        {
-            scope.defineIsSortedSet(assignment->name, *isSortedSet);
-        }
+        // Map<K,V>/Set<T>/SortedMap<K,V>/SortedSet<T> are all real, user-declared generic structs
+        // now (see docs/language/0034-maps-and-sets.md's own "2026 Update", docs/language/0040-
+        // sorted-maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026
+        // Update") - there is no defineIsSet/defineIsSortedMap/defineIsSortedSet left here anymore.
         // Same reasoning again, for String-vs-Buffer (see isBufferExpr and
         // docs/language/0043-buffer.md).
         if (const auto isBuffer = isBufferExpr(*assignment->value, ctx.function, scope))
@@ -3189,6 +2986,12 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             returnStmt->value ? dynamic_cast<const ErrExpr*>(returnStmt->value.get()) : nullptr;
         const bool isOkOrErrReturn =
             (okExpr || errExpr) && ctx.function && ctx.function->returnType;
+        // `return null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc comment) -
+        // same reasoning as `return None` just above.
+        const bool isNullReturn =
+            returnStmt->value &&
+            dynamic_cast<const NullExpr*>(returnStmt->value.get()) != nullptr && ctx.function &&
+            ctx.function->returnType;
         int returnValue = -1;
         if (isNoneReturn)
         {
@@ -3196,6 +2999,10 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             noneInst->value = -1;
             noneInst->payloadTypeName = optionalPayloadTypeName(*ctx.function->returnType);
             returnValue = emit(ctx, std::move(noneInst));
+        }
+        else if (isNullReturn)
+        {
+            returnValue = lowerNullExpr(*ctx.function->returnType, ctx);
         }
         else if (isOkOrErrReturn)
         {
@@ -3240,7 +3047,6 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
     if (const auto* fieldAssign = dynamic_cast<const FieldAssignStmt*>(&stmt))
     {
         const int object = lowerExpr(*fieldAssign->object, scope, ctx);
-        const int value = lowerExpr(*fieldAssign->value, scope, ctx);
 
         // Real memory reclamation (structs/enums only) - `obj.field = value` overwrites an
         // existing, independently-owned reference (the field's own current value) with a new
@@ -3262,6 +3068,12 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
                 }
             }
         }
+        // `obj.field = null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc
+        // comment) - the declared field's own type is the only context available to resolve a
+        // bare `null` assignment's pointee type against.
+        const int value = dynamic_cast<const NullExpr*>(fieldAssign->value.get()) && declaredField
+                              ? lowerNullExpr(declaredField->type, ctx)
+                              : lowerExpr(*fieldAssign->value, scope, ctx);
         int oldValue = -1;
         if (declaredField &&
             (structs_.contains(declaredField->type) || enums_.contains(declaredField->type)))
@@ -3308,7 +3120,27 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
     if (const auto* derefAssign = dynamic_cast<const DerefAssignStmt*>(&stmt))
     {
         const int pointer = lowerExpr(*derefAssign->pointer, scope, ctx);
-        const int value = lowerExpr(*derefAssign->value, scope, ctx);
+        // `*ptr = null` (see docs/language/0019-unsafe.md and lowerNullExpr's own doc comment) -
+        // the pointer expression's own resolved type (via simpleTypeOfExpr, the same best-effort
+        // inference the `ptr == null` BinaryExpr case above already relies on) is the only context
+        // available; the pointee being assigned into is that type with one leading '*' stripped
+        // (e.g. a `**MapEntry<K,V>` bucket slot's own pointee is `*MapEntry<K,V>` - see
+        // docs/language/0034-maps-and-sets.md's own "2026 Update").
+        int value;
+        if (dynamic_cast<const NullExpr*>(derefAssign->value.get()))
+        {
+            const auto pointerType = simpleTypeOfExpr(*derefAssign->pointer, ctx.function, scope);
+            std::string pointeeType;
+            if (pointerType && !pointerType->empty() && pointerType->front() == '*')
+            {
+                pointeeType = pointerType->substr(1);
+            }
+            value = lowerNullExpr(pointeeType, ctx);
+        }
+        else
+        {
+            value = lowerExpr(*derefAssign->value, scope, ctx);
+        }
         auto inst = std::make_unique<IrDerefAssign>();
         inst->pointer = pointer;
         inst->value = value;

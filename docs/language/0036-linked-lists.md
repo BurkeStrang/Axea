@@ -1,7 +1,71 @@
 # `LinkedList<T>`: The First Genuinely Node-Based Collection
 
-**Status:** Implemented
+**Status:** Superseded — see "2026 Update: Ported to Real Axea Source" below
 **Document:** `0036-linked-lists.md`
+
+---
+
+# 2026 Update: Ported to Real Axea Source
+
+`LinkedList<T>` is no longer a compiler intrinsic. Following `List<T>`/`Stack<T>`/`Deque<T>`/
+`Queue<T>`/`PriorityQueue<T>`'s own ports (`docs/language/0033-lists.md`/`0035-stacks.md`/
+`0037-deques.md`/`0038-queues.md`/`0039-priority-queues.md`'s own "2026 Update" sections),
+`LinkedList<T>` is now a real, user-declared generic struct with a generic inherent `impl` block,
+living in `std/collections.ax` — but unlike every prior port in this series, it needed **one
+genuinely new language feature first**: a `null` pointer literal (see
+`docs/language/0019-unsafe.md`'s own "2026 Update"). Every other retired collection in this
+series is an anonymous heap header with no self-reference; `LinkedList<T>` is the first one whose
+own node type genuinely needs to point at "no node" (`prev`/`next` at either end of the list, and
+a fresh list's own `head`/`tail`), and there was no way to express that at all until `null` was
+added.
+
+```ax
+use collections
+
+s: LinkedList<i32> = collections.newLinkedList<i32>()
+s.push_front(1)
+s.push_back(2)
+front = s.pop_front()   // 1
+back = s.pop_back()     // 2
+count = s.length
+```
+
+**What changed and why:**
+
+- **Construction**: `LinkedList<i32>()` call-style sugar → `collections.newLinkedList<i32>()`, an
+  ordinary (generic) function call — identical reasoning to every prior port's own construction
+  change.
+- **A real, self-referential `*Node<T>` pointer pair, not a hand-rolled `%axea.LLNode.<id>` LLVM
+  type.** `struct Node<T> { value: T  prev: *Node<T>  next: *Node<T> }` is now ordinary Axea
+  source, `malloc`'d and cast via `unsafe { raw as *Node<T> }` exactly like every other
+  heap-allocated collection's own body. "no node here" is now a real `null` value stored in
+  `head`/`tail`/`prev`/`next`, compared via ordinary `== null`/`!= null` - the same idiom this
+  port's own prerequisite `null` feature was built for.
+- **`.length` stays a bare field** (`s.length`, no parens) — `LinkedList<T>` owns it directly,
+  matching `Deque<T>`'s own identical precedent (unlike `Stack<T>`'s `.length()` method, which
+  delegates to an internal `items` field with no bare-field syntax to expose that through).
+- **`push_front`/`push_back`/`pop_front`/`pop_back` reach the real `impl` block via general
+  struct method dispatch**, not `IrGenerator`'s old `isLinkedListExpr`-style resolver (never
+  existed — `LinkedList<T>` was already the sole remaining user of those method names once
+  `Deque<T>`'s own port replaced its `isDequeExpr` resolver, so there was nothing left to
+  disambiguate against by the time this port started).
+- **Still no `peek_front`/`peek_back`, no arbitrary-position insert/remove, no `for`-in
+  iteration** — this port is a faithful translation of the original intrinsic's own scope, not a
+  redesign; see "Known Imprecision" below, unchanged.
+- **No bounds check on an empty `pop_front`/`pop_back`** — dereferences a null node pointer,
+  matching the retired intrinsic's own documented UB-on-empty behavior in compiled mode exactly.
+  The **one** real improvement: the interpreter now throws a clear "dereferenced a null pointer"
+  error instead of silently misbehaving, the same "interpreter catches more than compiled UB does"
+  contract every other empty-collection operation in this codebase already has (see
+  `docs/language/0019-unsafe.md`'s own null-dereference handling).
+- **Top-level printing no longer special-cases `LinkedList<T>` at all.** The retired intrinsic's
+  own `LinkedList(N entries)` count-only fallback (see "Design" below) doesn't exist anymore —
+  `LinkedList<T>` prints via the same generic per-struct `@axea.tostring.<Name>` helper every
+  ordinary struct gets, showing its own real fields (`length`, and the `head`/`tail` pointers,
+  which print as `()` - pointer values have no dedicated `toString` this phase).
+- See `examples/linked_list.ax` for a worked example (verified both interpreted and compiled,
+  `-O0` and `-O1`); everything below this section documents the *original compiler-intrinsic
+  design* (now retired) for historical context.
 
 ---
 

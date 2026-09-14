@@ -79,6 +79,33 @@ namespace
                std::holds_alternative<std::shared_ptr<StringInstance>>(value);
     }
 
+    // `==`/`!=` on two `*T` values (see docs/language/0019-unsafe.md) - a real, previously-
+    // undiscovered bug found while adding `null` support: std::variant's own defaulted `==`
+    // compares `std::shared_ptr<PointerInstance>` by *C++ object identity*, not the pointer's own
+    // `(arena, offset)` value, so `p + 1 - 1 == p` (two semantically-identical pointer values,
+    // reconstructed via arithmetic into two distinct `PointerInstance` objects - see the Plus/
+    // Minus BinaryExpr cases just below, each of which always allocates a fresh one) would
+    // incorrectly compare unequal. Also the only way two null pointers (`arena == nullptr`,
+    // see NullExpr's own evaluate() case) ever compare equal to each other, since a fresh
+    // PointerInstance is likewise allocated for every `null` literal evaluated. Every other Value
+    // alternative keeps std::variant's own default (struct/enum reference-equality by identity is
+    // correct and already relied on elsewhere - see "field assignment mutates the shared struct
+    // instance").
+    bool valuesEqual(const Value& left, const Value& right)
+    {
+        if (const auto* leftPointer = std::get_if<std::shared_ptr<PointerInstance>>(&left))
+        {
+            const auto* rightPointer = std::get_if<std::shared_ptr<PointerInstance>>(&right);
+            if (!rightPointer)
+            {
+                return false;
+            }
+            return (*leftPointer)->arena.get() == (*rightPointer)->arena.get() &&
+                   (*leftPointer)->offset == (*rightPointer)->offset;
+        }
+        return left == right;
+    }
+
     // A pointer into an ArrayInstance's, SliceInstance's, or ListInstance's
     // backing storage, plus the effective length to bounds-check against - a
     // slice's `length` may in principle differ from its backing array's own
@@ -1242,6 +1269,10 @@ void Interpreter::execute(const Stmt& stmt, Environment& env)
         {
             throw std::runtime_error("'*' requires a pointer value");
         }
+        if (!(*pointer)->arena)
+        {
+            throw std::runtime_error("dereferenced a null pointer");
+        }
         auto& arena = *(*pointer)->arena;
         const auto offset = (*pointer)->offset;
         if (offset < 0 || static_cast<std::size_t>(offset) >= arena.size())
@@ -1483,6 +1514,10 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         if (!pointer)
         {
             throw std::runtime_error("'*' requires a pointer value");
+        }
+        if (!(*pointer)->arena)
+        {
+            throw std::runtime_error("dereferenced a null pointer");
         }
         const auto& arena = *(*pointer)->arena;
         const auto offset = (*pointer)->offset;
@@ -2533,31 +2568,6 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return instance;
     }
 
-    if (dynamic_cast<const LinkedListNewExpr*>(&expr))
-    {
-        return std::make_shared<LinkedListInstance>();
-    }
-
-    if (dynamic_cast<const MapNewExpr*>(&expr))
-    {
-        return std::make_shared<MapInstance>();
-    }
-
-    if (dynamic_cast<const SetNewExpr*>(&expr))
-    {
-        return std::make_shared<SetInstance>();
-    }
-
-    if (dynamic_cast<const SortedMapNewExpr*>(&expr))
-    {
-        return std::make_shared<SortedMapInstance>();
-    }
-
-    if (dynamic_cast<const SortedSetNewExpr*>(&expr))
-    {
-        return std::make_shared<SortedSetInstance>();
-    }
-
     if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
     {
         return std::make_shared<StringInstance>(
@@ -2735,18 +2745,23 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
                     throw std::runtime_error("division by zero");
                 }
                 return asInt(left) / asInt(right);
+            case TokenKind::Ampersand:
+                // Bitwise AND (see docs/language/0034-maps-and-sets.md's own "2026 Update") -
+                // TypeChecker already restricts this to i32/i64, so a plain asInt on both sides is
+                // safe (no f64 case to worry about, unlike Plus/Minus/Star/Slash above).
+                return asInt(left) & asInt(right);
             case TokenKind::EqualEqual:
                 if (isStrCoercibleValue(left))
                 {
                     return asStrContent(left) == asStrContent(right);
                 }
-                return left == right;
+                return valuesEqual(left, right);
             case TokenKind::BangEqual:
                 if (isStrCoercibleValue(left))
                 {
                     return asStrContent(left) != asStrContent(right);
                 }
-                return !(left == right);
+                return !valuesEqual(left, right);
             // Derived from a single ValueLess "less-than" the same way
             // LessEqual/Greater/GreaterEqual are standard textbook
             // derivatives of `<` for any total order.
@@ -2818,6 +2833,22 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return static_cast<std::int64_t>(axeaTypeByteSize(sizeOf->typeName));
     }
 
+    if (const auto* hashOf = dynamic_cast<const HashOfExpr*>(&expr))
+    {
+        // `ValueHash` already implements generic structural hashing over any `Value` (see its own
+        // doc comment in Interpreter.hpp) - `hash<T>()` is just a thin wrapper exposing it to
+        // Axea source, no per-type-name dispatch needed here at all.
+        const Value value = evaluate(*hashOf->value, env);
+        return static_cast<std::int64_t>(static_cast<std::int32_t>(ValueHash{}(value)));
+    }
+
+    if (const auto* keyEq = dynamic_cast<const KeyEqExpr*>(&expr))
+    {
+        const Value a = evaluate(*keyEq->left, env);
+        const Value b = evaluate(*keyEq->right, env);
+        return ValueEq{}(a, b);
+    }
+
     if (const auto* someExpr = dynamic_cast<const SomeExpr*>(&expr))
     {
         return std::make_shared<OptionalInstance>(
@@ -2833,6 +2864,18 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         // LLVM backend's {i1, T} struct literal needs a concrete T even
         // when hasValue is false).
         return std::make_shared<OptionalInstance>(OptionalInstance{false, Value{std::monostate{}}});
+    }
+
+    if (dynamic_cast<const NullExpr*>(&expr))
+    {
+        // `null` (see docs/language/0019-unsafe.md) - same "dynamically typed, no context
+        // needed" reasoning as NoneExpr just above: a null PointerInstance needs no concrete
+        // pointee type here (unlike the LLVM backend, which needs a real `<T>* null` constant -
+        // see IrGenerator/LlvmIrEmitter's own null lowering). `arena == nullptr` is the sentinel
+        // this interpreter recognizes as "null" everywhere a PointerInstance is dereferenced or
+        // compared (see DerefExpr/DerefAssignStmt's own null checks, and the dedicated pointer
+        // equality case in the EqualEqual/BangEqual BinaryExpr handling below).
+        return std::make_shared<PointerInstance>(PointerInstance{nullptr, "", 0});
     }
 
     if (const auto* okExpr = dynamic_cast<const OkExpr*>(&expr))

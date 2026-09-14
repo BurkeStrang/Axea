@@ -51,14 +51,6 @@ public:
     void defineArrayLength(const std::string& name, int length);
     std::optional<int> findArrayLength(const std::string& name) const;
 
-    // Parallel to the array-length map above, but records whether a
-    // Map<i32,i32>/Set<i32>-typed name is specifically a Set (true) or a Map
-    // (false) - needed only to disambiguate `.contains`/`.remove`, the two
-    // method names shared between Map and Set (see
-    // docs/language/0034-maps-and-sets.md and IrGenerator::isSetExpr).
-    void defineIsSet(const std::string& name, bool isSet);
-    std::optional<bool> findIsSet(const std::string& name) const;
-
     // List<T>, Stack<T>, and PriorityQueue<T> are all real, user-declared generic structs now
     // (see docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port
     // follow-up) - there is no defineIsStack/findIsStack/defineIsPriorityQueue/
@@ -66,30 +58,21 @@ public:
     // method dispatch now, with no remaining disambiguation resolver needed at all.
 
     // `push_front`/`push_back`/`pop_front`/`pop_back` no longer need a disambiguation resolver
-    // at all - Deque<T> is a real, user-declared generic struct now (see
-    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up), reached
-    // via the general struct method dispatch, so LinkedList<T> (docs/language/0036-linked-lists.md)
-    // is the sole remaining collection using those method names - there is no
-    // defineIsQueue/findIsQueue left here (Queue<T> itself was never part of this ambiguity: its
-    // own `enqueue`/`dequeue` method names are unique, needing no resolver of their own either).
-
-    // Same reasoning again, for Map<K,V>/Set<T> vs SortedMap<K,V> (true =
-    // SortedMap) - needed only to disambiguate set/get/contains/remove, the
-    // method names SortedMap<K,V> shares with Map<K,V>/Set<T> (see
-    // docs/language/0040-sorted-maps.md and IrGenerator::isSortedMapExpr).
-    // A separate map again, for the same reason isSortedMapKinds_ isn't folded
-    // into isSetKinds_.
-    void defineIsSortedMap(const std::string& name, bool isSortedMap);
-    std::optional<bool> findIsSortedMap(const std::string& name) const;
-
-    // Same reasoning again, for Set<T>/Map<K,V>/SortedMap<K,V> vs
-    // SortedSet<T> (true = SortedSet) - needed only to disambiguate
-    // add/contains/remove, the method names SortedSet<T> shares with Set<T>
-    // (add/contains/remove) and Map<K,V>/SortedMap<K,V> (contains/remove) -
-    // see docs/language/0041-sorted-sets.md and
-    // IrGenerator::isSortedSetExpr.
-    void defineIsSortedSet(const std::string& name, bool isSortedSet);
-    std::optional<bool> findIsSortedSet(const std::string& name) const;
+    // at all - Deque<T> and LinkedList<T> are both real, user-declared generic structs now (see
+    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>/
+    // LinkedList<T> port follow-up), both reached via the general struct method dispatch - there
+    // is no defineIsQueue/findIsQueue left here (Queue<T> itself was never part of this
+    // ambiguity: its own `enqueue`/`dequeue` method names are unique, needing no resolver of
+    // their own either). Map<K,V>/Set<T>/SortedMap<K,V>/SortedSet<T> are all real, user-declared
+    // generic structs now too (see docs/language/0034-maps-and-sets.md's own "2026 Update",
+    // docs/language/0040-sorted-maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - there is no defineIsSet/findIsSet/defineIsSortedMap/findIsSortedMap/
+    // defineIsSortedSet/findIsSortedSet left here either; `set`/`get`/`add`/`contains`/`remove`
+    // need no resolver at all anymore - the "set"/"get" ambiguity between Map<K,V> and
+    // SortedMap<K,V>, and the three-way "contains"/"remove" ambiguity between Set<T>/Map<K,V>/
+    // SortedSet<T>/SortedMap<K,V>, both collapsed to nothing once every one of them retired - this
+    // is the last of these resolvers: every collection docs/language/0029-collections.md
+    // originally scoped as a compiler intrinsic is now real Axea source.
 
     // Same reasoning again, for String vs Buffer (true = Buffer) - needed
     // only to disambiguate "append", the method name Buffer shares with
@@ -119,9 +102,6 @@ public:
 private:
     std::unordered_map<std::string, int> registers_;
     std::unordered_map<std::string, int> arrayLengths_;
-    std::unordered_map<std::string, bool> isSetKinds_;
-    std::unordered_map<std::string, bool> isSortedMapKinds_;
-    std::unordered_map<std::string, bool> isSortedSetKinds_;
     std::unordered_map<std::string, bool> isBufferKinds_;
     std::unordered_map<std::string, std::string> enumNames_;
     std::unordered_map<std::string, std::string> simpleTypes_;
@@ -326,6 +306,18 @@ private:
     void emitVoid(Context& ctx, std::unique_ptr<IrInst> inst);
     int freshRegister(Context& ctx);
 
+    // `null` (see docs/language/0019-unsafe.md) - emits an IrConstNull whose own pointeeTypeName
+    // is read from `pointerTypeText`, the canonical "*T" form (Parser::parseTypeNameAtom's own
+    // output - a declared/field/param type string, or the other side's own resolved type in a
+    // `==`/`!=` comparison) - the leading '*' is stripped here so every call site can just pass
+    // the pointer type text it already has on hand, unchanged. Every lowerExpr/lowerStmt call
+    // site that resolves a NullExpr sub-expression against a known target pointer type calls
+    // this directly instead of the generic lowerExpr recursion (which has no such context and
+    // throws) - mirrors AssignmentStmt/ReturnStmt's own pre-existing NoneExpr/OkExpr/ErrExpr
+    // special-casing, just at more call sites (see NullExpr's own doc comment in ast/Expr.hpp
+    // for why it needs to work in more positions than None does).
+    int lowerNullExpr(const std::string& pointerTypeText, Context& ctx);
+
     // Deliberately approximate (see docs/language/0021-axea-ir.md): only
     // recognizes a direct struct literal, or a bare reference to a
     // struct-typed parameter, as worth a Drop marker - not the result of a
@@ -390,63 +382,28 @@ private:
     std::optional<int>
     arrayLengthOf(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
-    // Best-effort resolution of whether a Map/Set-typed expression is
-    // specifically a Set (true) or a Map (false) - nullopt if it can't be
-    // determined from the shapes recognized below. Needed only for
-    // `.contains`/`.remove`, the two method names shared between
-    // Map<i32,i32> and Set<i32> (every other method - List's push/pop,
-    // Map's set/get, Set's add - is unambiguous by name alone; see
-    // docs/language/0034-maps-and-sets.md). Mirrors arrayLengthOf's own
-    // best-effort shape: recognizes a direct MapNewExpr/SetNewExpr, a
-    // Map/Set-typed function parameter, a call to a function with a
-    // Map/Set-typed return, or a name already recorded in scope's parallel
-    // isSet map (populated by lowerStmt's AssignmentStmt case).
-    std::optional<bool>
-    isSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
-
-    // List<T>, Stack<T>, and PriorityQueue<T> are all real, user-declared generic structs now
-    // (see docs/language/0006-generics.md's own List<T>/Stack<T>/PriorityQueue<T> port
-    // follow-up) - there is no isStackExpr/isPriorityQueueExpr left here; `push`/`pop`/`peek`
-    // are reached via the general struct method dispatch, with no remaining disambiguation
-    // resolver needed at all.
+    // List<T>, Stack<T>, PriorityQueue<T>, Map<K,V>, and Set<T> are all real, user-declared
+    // generic structs now (see docs/language/0006-generics.md's own List<T>/Stack<T>/
+    // PriorityQueue<T> port follow-up and docs/language/0034-maps-and-sets.md's own "2026
+    // Update") - there is no isStackExpr/isPriorityQueueExpr/isSetExpr left here; `push`/`pop`/
+    // `peek`/`set`/`get`/`add` are reached via the general struct method dispatch, with no
+    // remaining disambiguation resolver needed at all for any of them.
 
     // `push_front`/`push_back`/`pop_front`/`pop_back` need no disambiguation resolver at all
-    // anymore - Deque<T> is a real, user-declared generic struct now (see
-    // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up), reached
-    // via the general struct method dispatch, so LinkedList<T> is the sole remaining collection
-    // using those method names - there is no isQueueExpr left here (Queue<T> itself was never
-    // part of this ambiguity: its own `enqueue`/`dequeue` method names are unique).
-
-    // Best-effort resolution of whether a Map/Set/SortedMap-typed expression
-    // is specifically a SortedMap (true) or not (false) - nullopt if it
-    // can't be determined. Needed for set/get/contains/remove, the method
-    // names SortedMap<K,V> shares with Map<K,V> (set/get/contains/remove)
-    // and Set<T> (contains/remove) - see docs/language/0040-sorted-maps.md.
-    // A sibling resolver again, mirroring isSetExpr's exact shape: a literal
-    // SortedMapNewExpr vs. MapNewExpr/SetNewExpr, a
-    // SortedMap-typed function parameter (vs. Map/Set), a call to a
-    // function with that return type, or a name already recorded in
-    // scope's parallel isSortedMap map.
-    std::optional<bool>
-    isSortedMapExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
-
-    // Best-effort resolution of whether a Set/Map/SortedMap/SortedSet-typed
-    // expression is specifically a SortedSet (true) or not (false) -
-    // nullopt if it can't be determined. Needed for add/contains/remove,
-    // the method names SortedSet<T> shares with Set<T> (add/contains/
-    // remove) and Map<K,V>/SortedMap<K,V> (contains/remove) - see
-    // docs/language/0041-sorted-sets.md. A sibling resolver again, mirroring
-    // isSortedMapExpr's exact shape.
-    std::optional<bool>
-    isSortedSetExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
+    // anymore - Deque<T> and LinkedList<T> are both real, user-declared generic structs now (see
+    // docs/language/0006-generics.md's own port follow-up), both reached via the general struct
+    // method dispatch - there is no isQueueExpr left here either (Queue<T> itself was never part
+    // of this ambiguity: its own `enqueue`/`dequeue` method names are unique).
 
     // Best-effort resolution of whether a String/Buffer-typed expression is
     // specifically a Buffer (true) or a String (false) - nullopt if it
     // can't be determined. Needed only for "append", the one method name
     // Buffer shares with String (see docs/language/0043-buffer.md);
     // "append_line"/"clear"/"reserve"/"finish" are all unique names nothing
-    // else uses, so they need no resolver. A sibling resolver again,
-    // mirroring isSetExpr's exact shape.
+    // else uses, so they need no resolver. Mirrors arrayLengthOf's own
+    // best-effort shape: recognizes a direct BufferNewExpr, a Buffer-typed function parameter, a
+    // call to a function with that return type, or a name already recorded in scope's parallel
+    // isBuffer map (populated by lowerStmt's AssignmentStmt case).
     std::optional<bool>
     isBufferExpr(const Expr& expr, const FunctionDecl* function, const IrScope& scope) const;
 
@@ -455,7 +412,7 @@ private:
     // `match` scrutinee, which needs to know its own enum's declared variant *order* (to
     // compute each named arm's own numeric tag to compare against - see lowerMatchArm), the
     // one place this codebase's usual "no real type table" design genuinely needs a concrete
-    // type *name*, not just a two-way yes/no the way isBufferExpr/isSetExpr/... above need.
+    // type *name*, not just a two-way yes/no the way isBufferExpr above needs.
     // Mirrors isBufferExpr's own exact resolution order: a direct variant-construction
     // expression, a function parameter's own declared type, a tracked local (scope.findEnumName),
     // or a called function's own declared return type.

@@ -13,15 +13,18 @@ namespace
     // Every built-in generic-shaped type name already hardcoded in
     // Parser::parseTypeNameAtom/TypeChecker::resolveType - never StructDecl-backed, so a
     // reference to one of these must never be treated as a user-defined generic instantiation.
-    // "List"/"Stack" are deliberately NOT here (see docs/language/0006-generics.md's own
-    // List<T>/Stack<T> port follow-up) - both are real, user-declared generic structs now
+    // "List"/"Stack"/"Deque"/"Queue"/"PriorityQueue"/"LinkedList"/"Map"/"Set"/"SortedMap"/
+    // "SortedSet" are deliberately NOT here (see docs/language/0006-generics.md's own port
+    // follow-up, docs/language/0034-maps-and-sets.md's own "2026 Update", and
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - all ten are real, user-declared generic structs now
     // (std/collections.ax).
     bool isBuiltinGenericName(const std::string& name)
     {
         static const std::unordered_set<std::string> builtins{
-            "slice", "Set",  "LinkedList",
-            "SortedSet", "Optional",   "Shared",
-            "Map",   "Result",        "SortedMap",
+            "slice",
+            "Optional",   "Shared",
+            "Result",
         };
         return builtins.contains(name);
     }
@@ -180,8 +183,20 @@ namespace
             {
                 collectTypeRefsInExpr(*s->target, refs, callSites, moduleGenericCalls);
             }
-            // ContinueStmt, and any declaration-shaped Stmt nested in a block (none exist in this
-            // grammar today): nothing to collect.
+            // `*ptr = value` (see docs/language/0019-unsafe.md) - a real, previously-
+            // undiscovered gap found while porting LinkedList<T>'s own self-referential
+            // `*Node<T>` nodes: `*newNode = Node<T> { ... }` needs its own generic struct
+            // literal walked/rewritten the identical way FieldAssignStmt's own value already is
+            // just above, or the literal's un-mangled "Node<T>" typeName reaches TypeChecker
+            // verbatim ("unsupported type: Node<i32>") - never exercised before this port, since
+            // no earlier generic struct's own method body ever wrote through a raw pointer to a
+            // *generic* struct literal.
+            else if (auto* s = dynamic_cast<DerefAssignStmt*>(stmt.get()))
+            {
+                collectTypeRefsInExpr(*s->pointer, refs, callSites, moduleGenericCalls);
+                collectTypeRefsInExpr(*s->value, refs, callSites, moduleGenericCalls);
+            }
+            // ContinueStmt: nothing to collect.
         }
         if (block.result)
         {
@@ -206,6 +221,17 @@ namespace
         else if (auto* e = dynamic_cast<SizeOfExpr*>(&expr))
         {
             refs.push_back(&e->typeName);
+        }
+        else if (auto* e = dynamic_cast<HashOfExpr*>(&expr))
+        {
+            refs.push_back(&e->typeName);
+            collectTypeRefsInExpr(*e->value, refs, callSites, moduleGenericCalls);
+        }
+        else if (auto* e = dynamic_cast<KeyEqExpr*>(&expr))
+        {
+            refs.push_back(&e->typeName);
+            collectTypeRefsInExpr(*e->left, refs, callSites, moduleGenericCalls);
+            collectTypeRefsInExpr(*e->right, refs, callSites, moduleGenericCalls);
         }
         else if (auto* e = dynamic_cast<SomeExpr*>(&expr))
         {
@@ -338,28 +364,6 @@ namespace
                 }
             }
         }
-        else if (auto* e = dynamic_cast<MapNewExpr*>(&expr))
-        {
-            refs.push_back(&e->keyType);
-            refs.push_back(&e->valueType);
-        }
-        else if (auto* e = dynamic_cast<SortedMapNewExpr*>(&expr))
-        {
-            refs.push_back(&e->keyType);
-            refs.push_back(&e->valueType);
-        }
-        else if (auto* e = dynamic_cast<SetNewExpr*>(&expr))
-        {
-            refs.push_back(&e->elementType);
-        }
-        else if (auto* e = dynamic_cast<LinkedListNewExpr*>(&expr))
-        {
-            refs.push_back(&e->elementType);
-        }
-        else if (auto* e = dynamic_cast<SortedSetNewExpr*>(&expr))
-        {
-            refs.push_back(&e->elementType);
-        }
         else if (auto* e = dynamic_cast<StringNewExpr*>(&expr))
         {
             collectTypeRefsInExpr(*e->text, refs, callSites, moduleGenericCalls);
@@ -380,8 +384,31 @@ namespace
             }
             collectTypeRefsInExpr(*e->body, refs, callSites, moduleGenericCalls);
         }
-        // IntegerExpr/Int64Expr/FloatExpr/NameExpr/NoneExpr/BoolExpr/StringExpr/CharExpr/
-        // BufferNewExpr: leaves with no nested expression or type-string to collect.
+        // `unsafe { ... }`/`*ptr`/`&name` (see docs/language/0019-unsafe.md) - three real,
+        // previously-undiscovered gaps found while porting LinkedList<T>'s own self-referential
+        // `*Node<T>` nodes: none of these three were ever walked here at all (cloneExpr, the
+        // sibling function that deep-clones a monomorphized method body, already has all three -
+        // this function's own "IntegerExpr/.../BufferNewExpr: leaves" comment just below was
+        // simply wrong about UnsafeBlockExpr/DerefExpr/AddressOfExpr, which do carry nested
+        // expressions). Harmless before now only because no earlier collection's own `unsafe`
+        // block ever happened to contain a *generic* struct literal or reference needing
+        // mangling - `unsafe { *newNode = Node<T> { ... } }`'s own inner struct literal was
+        // silently never visited, reaching TypeChecker with its un-mangled "Node<T>" typeName
+        // still intact ("unsupported type: Node<i32>").
+        else if (auto* e = dynamic_cast<UnsafeBlockExpr*>(&expr))
+        {
+            collectTypeRefsInExpr(*e->body, refs, callSites, moduleGenericCalls);
+        }
+        else if (auto* e = dynamic_cast<DerefExpr*>(&expr))
+        {
+            collectTypeRefsInExpr(*e->operand, refs, callSites, moduleGenericCalls);
+        }
+        else if (auto* e = dynamic_cast<AddressOfExpr*>(&expr))
+        {
+            collectTypeRefsInExpr(*e->operand, refs, callSites, moduleGenericCalls);
+        }
+        // IntegerExpr/Int64Expr/FloatExpr/NameExpr/NoneExpr/NullExpr/BoolExpr/StringExpr/
+        // CharExpr/BufferNewExpr: leaves with no nested expression or type-string to collect.
     }
 
     // Deep-clones a method body (or any nested expression/statement inside one), applying
@@ -505,6 +532,17 @@ namespace
         {
             return std::make_unique<SizeOfExpr>(substituteTypeParams(e->typeName, subst));
         }
+        if (const auto* e = dynamic_cast<const HashOfExpr*>(&expr))
+        {
+            return std::make_unique<HashOfExpr>(substituteTypeParams(e->typeName, subst),
+                                                cloneExpr(*e->value, subst));
+        }
+        if (const auto* e = dynamic_cast<const KeyEqExpr*>(&expr))
+        {
+            return std::make_unique<KeyEqExpr>(substituteTypeParams(e->typeName, subst),
+                                               cloneExpr(*e->left, subst),
+                                               cloneExpr(*e->right, subst));
+        }
         if (const auto* e = dynamic_cast<const DerefExpr*>(&expr))
         {
             return std::make_unique<DerefExpr>(cloneExpr(*e->operand, subst));
@@ -524,6 +562,10 @@ namespace
         if (dynamic_cast<const NoneExpr*>(&expr))
         {
             return std::make_unique<NoneExpr>();
+        }
+        if (dynamic_cast<const NullExpr*>(&expr))
+        {
+            return std::make_unique<NullExpr>();
         }
         if (const auto* e = dynamic_cast<const ShareExpr*>(&expr))
         {
@@ -661,28 +703,6 @@ namespace
                 e->typeArgument.empty() ? std::string() : substituteTypeParams(e->typeArgument, subst);
             return std::make_unique<MethodCallExpr>(
                 cloneExpr(*e->object, subst), e->method, std::move(args), std::move(typeArgument));
-        }
-        if (const auto* e = dynamic_cast<const MapNewExpr*>(&expr))
-        {
-            return std::make_unique<MapNewExpr>(substituteTypeParams(e->keyType, subst),
-                                                substituteTypeParams(e->valueType, subst));
-        }
-        if (const auto* e = dynamic_cast<const SortedMapNewExpr*>(&expr))
-        {
-            return std::make_unique<SortedMapNewExpr>(substituteTypeParams(e->keyType, subst),
-                                                       substituteTypeParams(e->valueType, subst));
-        }
-        if (const auto* e = dynamic_cast<const SetNewExpr*>(&expr))
-        {
-            return std::make_unique<SetNewExpr>(substituteTypeParams(e->elementType, subst));
-        }
-        if (const auto* e = dynamic_cast<const LinkedListNewExpr*>(&expr))
-        {
-            return std::make_unique<LinkedListNewExpr>(substituteTypeParams(e->elementType, subst));
-        }
-        if (const auto* e = dynamic_cast<const SortedSetNewExpr*>(&expr))
-        {
-            return std::make_unique<SortedSetNewExpr>(substituteTypeParams(e->elementType, subst));
         }
         if (const auto* e = dynamic_cast<const StringNewExpr*>(&expr))
         {
@@ -869,23 +889,35 @@ namespace
     }
 } // namespace
 
-// Synthesizes a mangled clone of a generic top-level function template for one concrete call-site
-// type argument (see docs/language/0006-generics.md's own List<T> port follow-up) - deep-clones
-// params/returnType/body via the exact same `cloneExpr`/`substituteTypeParams` infra generic impl
-// methods already use, appends the clone as an ordinary top-level FunctionDecl (empty typeParams
-// of its own, picked up by every downstream pass's existing FunctionDecl handling for free), and
-// rewrites the call site's own `callee`/`typeArgument` in place. Returns the mangled name.
+// Synthesizes a mangled clone of a generic top-level function template for one-or-more concrete
+// call-site type arguments (see docs/language/0006-generics.md's own List<T> port follow-up,
+// extended to more than one type parameter by docs/language/0034-maps-and-sets.md's own "2026
+// Update", e.g. `newMap<K,V>()`) - deep-clones params/returnType/body via the exact same
+// `cloneExpr`/`substituteTypeParams` infra generic impl methods already use, appends the clone as
+// an ordinary top-level FunctionDecl (empty typeParams of its own, picked up by every downstream
+// pass's existing FunctionDecl handling for free), and rewrites the call site's own
+// `callee`/`typeArgument` in place. Returns the mangled name.
 std::string synthesizeGenericFunctionCall(Program& program,
                                           const FunctionDecl& tmpl,
                                           const std::string& typeArgument)
 {
-    if (tmpl.typeParams.size() != 1)
+    // `typeArgument` is Parser::parsePrimary's own comma-joined text ("i32" or "i32,str") - split
+    // the same bracket-depth-aware way splitGenericInstantiation splits a struct instantiation's
+    // own argument list, by treating it as that function's own argument-list text (wrapping it in
+    // a throwaway "<...>" so the existing depth-aware scanner can be reused verbatim).
+    const auto argStrings = splitGenericInstantiation("<" + typeArgument + ">").second;
+    if (argStrings.size() != tmpl.typeParams.size())
     {
-        throw std::runtime_error("'" + tmpl.name +
-                                 "' declares more than one type parameter - a call site may only "
-                                 "supply one explicit type argument this phase");
+        throw std::runtime_error("'" + tmpl.name + "' declares " +
+                                 std::to_string(tmpl.typeParams.size()) +
+                                 " type parameter(s), but the call site supplied " +
+                                 std::to_string(argStrings.size()));
     }
-    const std::string mangled = tmpl.name + "$" + mangleTypeText(typeArgument);
+    std::string mangled = tmpl.name;
+    for (const auto& arg : argStrings)
+    {
+        mangled += "$" + mangleTypeText(arg);
+    }
 
     const bool alreadySynthesized =
         std::any_of(program.items.begin(),
@@ -897,7 +929,11 @@ std::string synthesizeGenericFunctionCall(Program& program,
                    });
     if (!alreadySynthesized)
     {
-        std::unordered_map<std::string, std::string> subst{{tmpl.typeParams[0], typeArgument}};
+        std::unordered_map<std::string, std::string> subst;
+        for (std::size_t i = 0; i < tmpl.typeParams.size(); ++i)
+        {
+            subst[tmpl.typeParams[i]] = argStrings[i];
+        }
         std::vector<Param> params;
         params.reserve(tmpl.params.size());
         for (const auto& param : tmpl.params)
@@ -988,7 +1024,40 @@ void monomorphizeGenerics(Program& program)
                 continue;
             }
 
-            const auto [genericName, argStrings] = splitGenericInstantiation(*ref);
+            // `*Node<T>`/`**MapEntry<K,V>` (see docs/language/0019-unsafe.md,
+            // docs/language/0036-linked-lists.md's own 2026 self-referential-node port, and
+            // docs/language/0034-maps-and-sets.md's own 2026 update - a bucket array's own
+            // `**Entry<K,V>` field needed a *second* leading star, previously-undiscovered since
+            // LinkedList<T>'s own `*Node<T>` only ever needed one). Two real, previously-
+            // undiscovered bugs found while porting LinkedList<T>, both fixed here together (and
+            // generalized here from "at most one star" to "any number of stars" for Map<K,V>'s own
+            // sake):
+            // 1. splitGenericInstantiation on the full "*Node<T>" text (leading star(s) included)
+            //    returned genericName "*Node", which declsByName never contains (it's keyed by
+            //    the bare struct name) - "unknown generic struct '*Node'". Fixed by stripping every
+            //    leading star for this lookup only (`lookupText`).
+            // 2. Worse, and only surfacing once (1) was fixed: `mangled` (used both to *name* a
+            //    newly-synthesized struct instantiation and as `declsByName`'s own key for it)
+            //    was computed from the *un-stripped* `*ref` text - a struct's own identity has no
+            //    star (there is exactly one "Node$i32", referenced from many places, some by
+            //    value and some by pointer), but this synthesized a second, bogus struct literally
+            //    *named* "*Node$i32", whose own fields (cloned from the same template) included
+            //    another `*Node$i32`-typed field pointing at itself by that same bogus name -
+            //    genuine infinite self-reference by construction, not merely by algorithm,
+            //    crashing axeaTypeByteSize's own recursive struct-size computation with a real
+            //    stack overflow the first time anything computed `sizeof<Node<T>>()`. Fixed by
+            //    computing `mangled` from `lookupText` (star-free) too, so the struct is always
+            //    synthesized/registered under its one true bare name - the same number of leading
+            //    stars is re-applied only to `*ref` itself (the specific reference site being
+            //    rewritten), never baked into the struct's own identity.
+            std::size_t starCount = 0;
+            while (starCount < ref->size() && (*ref)[starCount] == '*')
+            {
+                ++starCount;
+            }
+            const std::string stars(starCount, '*');
+            const std::string lookupText = ref->substr(starCount);
+            const auto [genericName, argStrings] = splitGenericInstantiation(lookupText);
             if (isBuiltinGenericName(genericName))
             {
                 continue;
@@ -1011,7 +1080,7 @@ void monomorphizeGenerics(Program& program)
                     " type argument(s), got " + std::to_string(argStrings.size()));
             }
 
-            const std::string mangled = mangleTypeText(*ref);
+            const std::string mangled = mangleTypeText(lookupText);
             if (!declsByName.contains(mangled))
             {
                 std::unordered_map<std::string, std::string> subst;
@@ -1032,7 +1101,7 @@ void monomorphizeGenerics(Program& program)
                 changed = true;
             }
 
-            *ref = mangled;
+            *ref = stars + mangled;
             changed = true;
         }
     }

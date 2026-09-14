@@ -174,6 +174,18 @@ struct NoneExpr final : Expr
 {
 };
 
+// `null` (see docs/language/0019-unsafe.md) - the untyped null pointer literal. Unlike NoneExpr
+// above, needs no surrounding-context special-casing to type-check at all: TypeChecker gives it
+// its own standalone TypeKind::NullPointer unconditionally, compatible with *any* `*T` wherever
+// a pointer value is expected (assignment, struct-literal field init, a `*T`-typed call argument,
+// `==`/`!=` against a real pointer, `return`) - the ambiguity is which *T* it's compatible with,
+// not whether it type-checks at all, so it's resolved at each consumption site instead of at the
+// literal's own checkExpr time. Fielded as an empty struct, same convention as NoneExpr's own
+// no-payload shape.
+struct NullExpr final : Expr
+{
+};
+
 // `Shared(value)` - the explicit, opt-in escape hatch for genuine multi-owner sharing (the sole
 // use of runtime refcounting left in the language now that plain structs/enums use pure move
 // semantics - see the move-semantics RFC). Structurally identical to SomeExpr above: T is
@@ -651,4 +663,34 @@ struct SizeOfExpr final : Expr
     }
 
     std::string typeName;
+};
+
+// `hash<TypeName>(value)` - a builtin, not a real callable function, mirroring `sizeof<TypeName>()`'s
+// own recognition-by-literal-text shape (see docs/language/0034-maps-and-sets.md's own "2026
+// Update") - returns `value`'s structural hash as `i32`. `typeName` must resolve to a hashable
+// type (`TypeChecker::isHashable`); added as the generic-code-facing entry point into
+// `registerKeyRuntime`'s own per-type hash/equality generation, previously reachable only from
+// Map/Set's own C++-side codegen.
+struct HashOfExpr final : Expr
+{
+    HashOfExpr(std::string typeName, std::unique_ptr<Expr> value)
+        : typeName(std::move(typeName)), value(std::move(value))
+    {
+    }
+
+    std::string typeName;
+    std::unique_ptr<Expr> value;
+};
+
+// `keyEq<TypeName>(a, b)` - `hash<TypeName>()`'s own equality counterpart, returns `bool`.
+struct KeyEqExpr final : Expr
+{
+    KeyEqExpr(std::string typeName, std::unique_ptr<Expr> left, std::unique_ptr<Expr> right)
+        : typeName(std::move(typeName)), left(std::move(left)), right(std::move(right))
+    {
+    }
+
+    std::string typeName;
+    std::unique_ptr<Expr> left;
+    std::unique_ptr<Expr> right;
 };

@@ -146,42 +146,24 @@ std::string Parser::parseTypeNameAtom()
 
     const auto& name = expect(TokenKind::Identifier, "expected type name");
 
-    // "slice<elem>" (docs/language/0032-slices.md) / "Set<elem>" (docs/language/0034-maps-and-sets.md)
-    // / "LinkedList<elem>" (docs/language/0036-linked-lists.md) /
-    // "SortedSet<elem>" (docs/language/0041-sorted-sets.md)
-    // - all reuse the existing Less/Greater tokens (no lexer changes needed:
-    // '<'/'>' only mean this here because we're in type position, never
-    // expression position). "List<elem>"/"Stack<elem>"/"Deque<elem>"/"Queue<elem>"/
-    // "PriorityQueue<elem>" are deliberately NOT here (see docs/language/0006-generics.md's own
-    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up) - all five are real,
-    // user-declared generic structs now (std/collections.ax), reached via the ordinary generic
-    // fallback below like any other.
-    if ((name.text == "slice" || name.text == "Set" ||
-         name.text == "LinkedList" ||
-         name.text == "SortedSet" || name.text == "Optional" ||
-         name.text == "Shared") &&
+    // "slice<elem>" (docs/language/0032-slices.md) / "Optional<elem>"/"Shared<elem>" - all reuse
+    // the existing Less/Greater tokens (no lexer changes needed: '<'/'>' only mean this here
+    // because we're in type position, never expression position). "List<elem>"/"Stack<elem>"/
+    // "Deque<elem>"/"Queue<elem>"/"PriorityQueue<elem>"/"LinkedList<elem>"/"Map<key,value>"/
+    // "Set<elem>"/"SortedMap<key,value>"/"SortedSet<elem>" are deliberately NOT here (see
+    // docs/language/0006-generics.md's own port follow-up, docs/language/0034-maps-and-sets.md's
+    // own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026 Update") - all ten are
+    // real, user-declared generic structs now (std/collections.ax), reached via the ordinary
+    // generic fallback below like any other.
+    if ((name.text == "slice" || name.text == "Optional" || name.text == "Shared") &&
         match(TokenKind::Less))
     {
         const std::string elementType = parseTypeName();
-        expect(TokenKind::Greater,
-               "expected '>' after slice/Set/LinkedList/"
-               "SortedSet/Optional/Shared element type");
+        expect(TokenKind::Greater, "expected '>' after slice/Optional/Shared element type");
         return name.text + "<" + elementType + ">";
     }
 
-    // "Map<key,value>" - the one two-type-argument shape (every other
-    // generic-looking type here takes exactly one) - see
-    // docs/language/0034-maps-and-sets.md.
-    if (name.text == "Map" && match(TokenKind::Less))
-    {
-        const std::string keyType = parseTypeName();
-        expect(TokenKind::Comma, "expected ',' between Map key and value types");
-        const std::string valueType = parseTypeName();
-        expect(TokenKind::Greater, "expected '>' after Map value type");
-        return "Map<" + keyType + "," + valueType + ">";
-    }
-
-    // "Result<T,E>" - same two-type-argument shape as Map<K,V> above (see
+    // "Result<T,E>" - a two-type-argument shape (see
     // docs/language/0063-result.md).
     if (name.text == "Result" && match(TokenKind::Less))
     {
@@ -192,16 +174,10 @@ std::string Parser::parseTypeNameAtom()
         return "Result<" + okType + "," + errType + ">";
     }
 
-    // "SortedMap<key,value>" - same two-type-argument shape as Map<K,V>
-    // above (see docs/language/0040-sorted-maps.md).
-    if (name.text == "SortedMap" && match(TokenKind::Less))
-    {
-        const std::string keyType = parseTypeName();
-        expect(TokenKind::Comma, "expected ',' between SortedMap key and value types");
-        const std::string valueType = parseTypeName();
-        expect(TokenKind::Greater, "expected '>' after SortedMap value type");
-        return "SortedMap<" + keyType + "," + valueType + ">";
-    }
+    // "SortedMap<key,value>" is deliberately NOT recognized here anymore (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - it's a real, user-declared
+    // generic struct now (std/collections.ax), resolved by the ordinary struct lookup further
+    // down like any other.
 
     // A user-defined generic struct instantiation (see docs/language/0006-generics.md) - the
     // generic fallback none of the hardcoded, fixed-arity shapes above claimed. Arbitrary arity
@@ -374,7 +350,16 @@ bool Parser::looksLikeGenericStructLiteral() const
             case TokenKind::Less: ++depth; break;
             case TokenKind::Greater: --depth; break;
             case TokenKind::Identifier:
-            case TokenKind::Comma: break;
+            case TokenKind::Comma:
+            // `[T;N]`/`*T` as a type argument (see looksLikeGenericCall's own identical fix and
+            // its doc comment, docs/language/0034-maps-and-sets.md's own "2026 Update") - the same
+            // gap, mirrored here for consistency even though no struct-literal call site has hit
+            // it yet.
+            case TokenKind::LeftBracket:
+            case TokenKind::RightBracket:
+            case TokenKind::Semicolon:
+            case TokenKind::Integer:
+            case TokenKind::Star: break;
             default: return false;
         }
         ++offset;
@@ -397,7 +382,19 @@ bool Parser::looksLikeGenericCall() const
             case TokenKind::Less: ++depth; break;
             case TokenKind::Greater: --depth; break;
             case TokenKind::Identifier:
-            case TokenKind::Comma: break;
+            case TokenKind::Comma:
+            // `[T;N]` (a fixed array as a type argument, e.g. `newMap<i32,[i32;2]>()`) and `*T` (a
+            // raw pointer as a type argument) - a real, previously-undiscovered gap found while
+            // porting Map<K,V>: this scan never needed to look past bare identifiers/commas before,
+            // since Map<K,V>'s own construction used to have a dedicated parsing branch bypassing
+            // this lookahead entirely (see docs/language/0034-maps-and-sets.md's own "2026
+            // Update") - once it went through this general mechanism instead, an array-shaped V
+            // (`Map<i32,[i32;2]>`) was silently never recognized as a generic call at all.
+            case TokenKind::LeftBracket:
+            case TokenKind::RightBracket:
+            case TokenKind::Semicolon:
+            case TokenKind::Integer:
+            case TokenKind::Star: break;
             default: return false;
         }
         ++offset;
@@ -723,7 +720,20 @@ std::unique_ptr<Stmt> Parser::parseImplDecl()
         {
             if (i > 0)
             {
-                selfType += ", ";
+                // No space after the comma (see docs/language/0034-maps-and-sets.md's own "2026
+                // Update") - a real, previously-undiscovered bug found while porting Map<K,V>:
+                // every other multi-argument generic type text in this codebase (parseTypeName's
+                // own Map<key,value> construction, splitGenericInstantiation's own comma split)
+                // joins with a bare ',', no space - this self-type text is the one place that
+                // didn't, silently latent because no impl block ever had 2+ type params before
+                // Map<K,V>/Set<T>. The mismatch meant `self`'s own declared type text
+                // ("Pair<K, V>") never exactly matched the mangled/canonical form
+                // (splitGenericInstantiation's own comma-adjacent character becoming part of the
+                // *next* argument's own text, e.g. " V" with a leading space) - GenericMonomorphizer
+                // then treated it as a perpetually-new, never-converging ref every fixed-point
+                // iteration, growing one extra space each time forever (infinite loop, not a
+                // crash).
+                selfType += ",";
             }
             selfType += typeParams[i];
         }
@@ -1286,15 +1296,16 @@ std::unique_ptr<Expr> Parser::parseExpression(int minPrecedence, bool allowStruc
         // dereference, see docs/language/0019-unsafe.md) directly under a completed statement -
         // e.g. "total = 2\n*buf = 1" - would otherwise be silently swallowed as "total = 2 * buf"
         // (an ordinary multiplication continuing onto the next line), leaving a dangling "= 1"
-        // that fails to parse. '*' is the only operator token this language has ever given a
-        // *prefix* meaning to, so it's the only one that needs this guard: stop treating Star as
-        // infix multiplication the moment it starts on a later source line than the operand
-        // already parsed - parseBlock's own statement loop then picks it up fresh as a new
-        // dereference-led statement, exactly as intended. A deliberate multiplication spanning a
+        // that fails to parse. '*' was the only operator token this language had ever given a
+        // *prefix* meaning to until bitwise `&` joined it (see docs/language/0034-maps-and-sets.md's
+        // own "2026 Update") - both need this guard: stop treating Star/Ampersand as an infix
+        // operator the moment it starts on a later source line than the operand already parsed -
+        // parseBlock's own statement loop then picks it up fresh as a new dereference-/address-of-
+        // led statement, exactly as intended. A deliberate multiplication/bitwise-and spanning a
         // line break remains legal as long as the operator itself, not just its right operand,
         // stays on the same line as the left operand (e.g. "total = 2 *\n  buf" is unaffected).
-        if (current().kind == TokenKind::Star && index_ > 0 &&
-            current().line != tokens_[index_ - 1].line)
+        if ((current().kind == TokenKind::Star || current().kind == TokenKind::Ampersand) &&
+            index_ > 0 && current().line != tokens_[index_ - 1].line)
         {
             break;
         }
@@ -1362,21 +1373,54 @@ std::unique_ptr<Expr> Parser::parsePostfix(bool allowStructLiteral)
                     ? advance()
                     : expect(TokenKind::Identifier, "expected field name after '.'");
 
-            // `object.method<T>(args)` (see docs/language/0046-generic-methods.md)
-            // - committed to only on the exact 4-token lookahead
-            // '<' Identifier '>' '(' immediately following the method
-            // name, so an ordinary comparison like `x.field < y` (where
-            // '<' is the less-than operator, not a generic-call opener)
-            // is never misparsed: if this exact shape isn't present,
-            // nothing is consumed here and parsing falls through to the
-            // existing method-call-vs-field logic below unchanged.
+            // `object.method<T>(args)` / `object.method<T1,T2>(args)` (see
+            // docs/language/0046-generic-methods.md, extended to more than one type argument by
+            // docs/language/0034-maps-and-sets.md's own "2026 Update", e.g.
+            // `collections.newMap<K,V>()`) - committed to only once a full bracket-depth-aware
+            // lookahead (mirrors looksLikeGenericCall's own identical scan and its doc comment)
+            // confirms the brackets balance back to zero immediately followed by '(', so an
+            // ordinary comparison like `x.field < y` (where '<' is the less-than operator, not a
+            // generic-call opener) is never misparsed: if that shape isn't present, nothing is
+            // consumed here and parsing falls through to the existing method-call-vs-field logic
+            // below unchanged. Originally a fixed 4-token check ('<' Identifier '>' '(') that
+            // could only ever match a single bare-identifier type argument - a real,
+            // previously-undiscovered gap found while porting Map<K,V>: even a single *nested*
+            // type argument (e.g. `.newBox<List<i32>>()`) was already unsupported here, since
+            // peek(2) had to be '>' immediately.
             std::string typeArgument;
-            if (current().kind == TokenKind::Less && peek(1).kind == TokenKind::Identifier &&
-                peek(2).kind == TokenKind::Greater && peek(3).kind == TokenKind::LeftParen)
+            if (current().kind == TokenKind::Less)
             {
-                advance();                     // '<'
-                typeArgument = advance().text; // the type argument identifier
-                advance();                     // '>'
+                std::size_t offset = 1;
+                int depth = 1;
+                bool balanced = true;
+                while (depth > 0)
+                {
+                    switch (peek(offset).kind)
+                    {
+                        case TokenKind::Less: ++depth; break;
+                        case TokenKind::Greater: --depth; break;
+                        case TokenKind::Identifier:
+                        case TokenKind::Comma:
+                        case TokenKind::LeftBracket:
+                        case TokenKind::RightBracket:
+                        case TokenKind::Semicolon:
+                        case TokenKind::Integer:
+                        case TokenKind::Star: break;
+                        default: balanced = false; depth = 0; break;
+                    }
+                    ++offset;
+                }
+                if (balanced && peek(offset).kind == TokenKind::LeftParen)
+                {
+                    advance(); // '<'
+                    typeArgument = parseTypeName();
+                    while (current().kind == TokenKind::Comma)
+                    {
+                        advance();
+                        typeArgument += "," + parseTypeName();
+                    }
+                    expect(TokenKind::Greater, "expected '>' after method's type argument(s)");
+                }
             }
 
             // `object.method(args)` vs. `object.field` (docs/language/0033-lists.md)
@@ -1903,12 +1947,15 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
     }
 
     // `&name` (see docs/language/0019-unsafe.md) - unambiguous for the identical reason '*' is
-    // just above: '&' has never been given infix meaning anywhere in this grammar (no bitwise/
-    // logical-and operator exists), so precedence(TokenKind::Ampersand) is never consulted at all
-    // and no Star-style newline-boundary guard is needed. Operand parsed via parsePostfix, same
-    // as DerefExpr, so `&x.field`/`&arr[i]` still parse (as AddressOfExpr wrapping a FieldExpr/
-    // IndexExpr) - TypeChecker, not the parser, rejects anything but a bare NameExpr operand this
-    // phase.
+    // just above, and by the identical mechanism: this prefix case only ever fires when starting a
+    // fresh primary expression (from parsePostfix/parsePrimary), structurally distinct from
+    // parseExpression's own infix loop (which now also recognizes Ampersand as bitwise AND, see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update", with its own Star-style newline-
+    // boundary guard there) - by the time that loop's own `current().kind` check could see an
+    // Ampersand, a complete left operand has always already been parsed, so there's no case where
+    // both meanings are live at once. Operand parsed via parsePostfix, same as DerefExpr, so
+    // `&x.field`/`&arr[i]` still parse (as AddressOfExpr wrapping a FieldExpr/IndexExpr) -
+    // TypeChecker, not the parser, rejects anything but a bare NameExpr operand this phase.
     if (current().kind == TokenKind::Ampersand)
     {
         advance();
@@ -1940,38 +1987,21 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
         // `newList<T>()` generic top-level function (reached through the ordinary
         // `looksLikeGenericCall()` branch above) rather than call-style `List<elem>()` sugar.
 
-        // `Set<elem>()` construction - same trick as List<elem>() above (see
-        // docs/language/0034-maps-and-sets.md).
-        if (current().text == "Set" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'Set'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after Set element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'Set<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - Set<elem>() takes no arguments this phase");
-            return std::make_unique<SetNewExpr>(elementType);
-        }
+        // `Set<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0034-maps-and-sets.md's own "2026 Update") - Set<T> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newSet<T>()` generic top-level function.
 
         // `Stack<elem>()` construction is deliberately NOT handled here anymore (see
         // docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up) - Stack<T> is a
         // real, user-declared generic struct now (std/collections.ax), constructed via its own
         // `newStack<T>()` generic top-level function.
 
-        // `LinkedList<elem>()` construction - same trick as List<elem>()
-        // above (see docs/language/0036-linked-lists.md).
-        if (current().text == "LinkedList" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'LinkedList'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after LinkedList element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'LinkedList<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - LinkedList<elem>() takes no arguments this phase");
-            return std::make_unique<LinkedListNewExpr>(elementType);
-        }
+        // `LinkedList<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T>/Queue<T>/
+        // PriorityQueue<T>/LinkedList<T> port follow-up) - LinkedList<T> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newLinkedList<T>()` generic top-level function.
 
         // `Deque<elem>()` construction is deliberately NOT handled here anymore (see
         // docs/language/0006-generics.md's own List<T>/Stack<T>/Deque<T> port follow-up) -
@@ -1990,19 +2020,10 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
         // struct now (std/collections.ax), constructed via its own `newPriorityQueue<T>()`
         // generic top-level function.
 
-        // `SortedSet<elem>()` construction - same trick as Set<elem>()
-        // above (see docs/language/0041-sorted-sets.md).
-        if (current().text == "SortedSet" && peek().kind == TokenKind::Less)
-        {
-            advance();
-            expect(TokenKind::Less, "expected '<' after 'SortedSet'");
-            const std::string elementType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after SortedSet element type");
-            expect(TokenKind::LeftParen, "expected '(' after 'SortedSet<elem>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - SortedSet<elem>() takes no arguments this phase");
-            return std::make_unique<SortedSetNewExpr>(elementType);
-        }
+        // `SortedSet<elem>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0041-sorted-sets.md's own "2026 Update") - SortedSet<T> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newSortedSet<T>()` generic top-level function.
 
         // `String(text)` construction - unlike every collection above,
         // takes one runtime *value* argument, not a type parameter (see
@@ -2101,6 +2122,14 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<NoneExpr>();
         }
 
+        // `null` (see docs/language/0019-unsafe.md) - a special-cased bare identifier, same
+        // convention as `None`/`true`/`false` just above/below - never a reserved lexer keyword.
+        if (current().text == "null" && peek().kind != TokenKind::LeftParen)
+        {
+            advance();
+            return std::make_unique<NullExpr>();
+        }
+
         // `Buffer()` construction - always empty parens, like every
         // collection's own zero-argument constructor (see
         // docs/language/0043-buffer.md), despite Buffer not being generic
@@ -2114,7 +2143,7 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
         }
 
         // `sizeof<TypeName>()` - a builtin, not a real callable function, recognized by literal
-        // text like "Buffer"/"Map" above (see docs/language/0006-generics.md's own List<T> port
+        // text like "Buffer" above (see docs/language/0006-generics.md's own List<T> port
         // follow-up) - always exactly one type argument, empty parens.
         if (current().text == "sizeof" && peek().kind == TokenKind::Less)
         {
@@ -2127,50 +2156,67 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<SizeOfExpr>(typeName);
         }
 
-        // `Map<key,value>()` construction - the one two-type-argument
-        // constructor here (mirrors parseTypeName's own Map<key,value> shape).
-        if (current().text == "Map" && peek().kind == TokenKind::Less)
+        // `hash<TypeName>(value)`/`keyEq<TypeName>(a, b)` - builtins, not real callable functions,
+        // recognized by literal text exactly like `sizeof` above (see
+        // docs/language/0034-maps-and-sets.md's own "2026 Update").
+        if (current().text == "hash" && peek().kind == TokenKind::Less)
         {
             advance();
-            expect(TokenKind::Less, "expected '<' after 'Map'");
-            const std::string keyType = parseTypeName();
-            expect(TokenKind::Comma, "expected ',' between Map key and value types");
-            const std::string valueType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after Map value type");
-            expect(TokenKind::LeftParen, "expected '(' after 'Map<key,value>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - Map<key,value>() takes no arguments this phase");
-            return std::make_unique<MapNewExpr>(keyType, valueType);
+            expect(TokenKind::Less, "expected '<' after 'hash'");
+            const std::string typeName = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after hash's type argument");
+            expect(TokenKind::LeftParen, "expected '(' after 'hash<Type>'");
+            auto value = parseExpression();
+            expect(TokenKind::RightParen, "expected ')' after hash<Type>'s argument");
+            return std::make_unique<HashOfExpr>(typeName, std::move(value));
         }
 
-        // `SortedMap<key,value>()` construction - same two-type-argument
-        // shape as Map<key,value>() above (see
-        // docs/language/0040-sorted-maps.md).
-        if (current().text == "SortedMap" && peek().kind == TokenKind::Less)
+        if (current().text == "keyEq" && peek().kind == TokenKind::Less)
         {
             advance();
-            expect(TokenKind::Less, "expected '<' after 'SortedMap'");
-            const std::string keyType = parseTypeName();
-            expect(TokenKind::Comma, "expected ',' between SortedMap key and value types");
-            const std::string valueType = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after SortedMap value type");
-            expect(TokenKind::LeftParen, "expected '(' after 'SortedMap<key,value>'");
-            expect(TokenKind::RightParen,
-                   "expected ')' - SortedMap<key,value>() takes no arguments this phase");
-            return std::make_unique<SortedMapNewExpr>(keyType, valueType);
+            expect(TokenKind::Less, "expected '<' after 'keyEq'");
+            const std::string typeName = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after keyEq's type argument");
+            expect(TokenKind::LeftParen, "expected '(' after 'keyEq<Type>'");
+            auto left = parseExpression();
+            expect(TokenKind::Comma, "expected ',' between keyEq<Type>'s two arguments");
+            auto right = parseExpression();
+            expect(TokenKind::RightParen, "expected ')' after keyEq<Type>'s arguments");
+            return std::make_unique<KeyEqExpr>(typeName, std::move(left), std::move(right));
         }
 
-        // `name<Type>(args)` (see docs/language/0006-generics.md's own List<T> port follow-up) -
-        // an explicit call-site type argument to a generic top-level function. Checked before
-        // the plain-call branch just below (which only matches `Identifier '('` directly) and
-        // before the generic-struct-literal branch further below (which shares the same
-        // `Identifier '<'` prefix, disambiguated only by what follows the balanced '>').
+        // `Map<key,value>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0034-maps-and-sets.md's own "2026 Update") - Map<K,V> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newMap<K,V>()` generic top-level function.
+
+        // `SortedMap<key,value>()` construction is deliberately NOT handled here anymore (see
+        // docs/language/0040-sorted-maps.md's own "2026 Update") - SortedMap<K,V> is a real,
+        // user-declared generic struct now (std/collections.ax), constructed via its own
+        // `newSortedMap<K,V>()` generic top-level function.
+
+        // `name<Type>(args)` / `name<Type1,Type2>(args)` (see docs/language/0006-generics.md's own
+        // List<T> port follow-up, extended for a two-type-param generic top-level function by
+        // docs/language/0034-maps-and-sets.md's own "2026 Update", e.g. `newMap<K,V>()`) - one or
+        // more explicit call-site type arguments to a generic top-level function, comma-joined
+        // into `CallExpr::typeArgument`'s own single string field (still storage-compatible with
+        // the one-type-param case - GenericMonomorphizer is the only consumer, and its own
+        // token-scanning `substituteTypeParams` already treats ',' as an ordinary separator, so no
+        // AST field change is needed to carry more than one). Checked before the plain-call branch
+        // just below (which only matches `Identifier '('` directly) and before the generic-struct-
+        // literal branch further below (which shares the same `Identifier '<'` prefix,
+        // disambiguated only by what follows the balanced '>').
         if (peek().kind == TokenKind::Less && looksLikeGenericCall())
         {
             const auto& name = advance();
             advance(); // '<'
-            const std::string typeArgument = parseTypeName();
-            expect(TokenKind::Greater, "expected '>' after call's type argument");
+            std::string typeArgument = parseTypeName();
+            while (current().kind == TokenKind::Comma)
+            {
+                advance();
+                typeArgument += "," + parseTypeName();
+            }
+            expect(TokenKind::Greater, "expected '>' after call's type argument(s)");
             expect(TokenKind::LeftParen, "expected '(' after function name");
             auto args = parseArgumentList();
             expect(TokenKind::RightParen, "expected ')' after arguments");
@@ -2233,6 +2279,15 @@ int Parser::precedence(TokenKind kind) const
         case TokenKind::LessEqual:
         case TokenKind::Greater:
         case TokenKind::GreaterEqual: return 7;
+        // Bitwise AND (see docs/language/0034-maps-and-sets.md's own "2026 Update") - added as a
+        // real infix operator for the first time, needed for a hash table's own bucket-index
+        // computation (`hash & (bucketCount - 1)`, the same AND-mask idiom the retired Map<K,V>/
+        // Set<T> intrinsic's own LLVM templates already used internally). Placed looser than
+        // comparisons/arithmetic (mirrors C's own relative bitwise-vs-arithmetic precedence,
+        // scaled down since this language has no other bitwise operators to rank against yet) -
+        // every real use in this codebase wraps the right operand in parens regardless, so the
+        // exact value mostly just needs to be internally consistent.
+        case TokenKind::Ampersand: return 8;
         case TokenKind::Plus:
         case TokenKind::Minus: return 10;
         case TokenKind::Star:

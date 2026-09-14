@@ -236,8 +236,8 @@ namespace
         {
             collectCallExprsInExpr(*e->body, calls);
         }
-        // IntegerExpr/Int64Expr/FloatExpr/NameExpr/NoneExpr/BoolExpr/StringExpr/CharExpr/
-        // MapNewExpr/SortedMapNewExpr/SetNewExpr/LinkedListNewExpr/QueueNewExpr/
+        // IntegerExpr/Int64Expr/FloatExpr/NameExpr/NoneExpr/NullExpr/BoolExpr/StringExpr/
+        // CharExpr/MapNewExpr/SortedMapNewExpr/SetNewExpr/LinkedListNewExpr/QueueNewExpr/
         // PriorityQueueNewExpr/SortedSetNewExpr/BufferNewExpr/SizeOfExpr: leaves with no nested
         // expression to walk into.
     }
@@ -311,6 +311,16 @@ namespace
     }
 } // namespace
 
+std::vector<CallExpr*> collectAllCallExprs(std::vector<std::unique_ptr<Stmt>>& items)
+{
+    std::vector<CallExpr*> calls;
+    for (auto& item : items)
+    {
+        collectCallExprsInStmt(*item, calls);
+    }
+    return calls;
+}
+
 void resolveUnqualifiedCalls(Program& merged, const std::vector<std::string>& usedModules)
 {
     if (usedModules.empty())
@@ -320,11 +330,7 @@ void resolveUnqualifiedCalls(Program& merged, const std::vector<std::string>& us
 
     const BareNameIndex index = buildBareNameIndex(merged, usedModules);
 
-    std::vector<CallExpr*> calls;
-    for (auto& item : merged.items)
-    {
-        collectCallExprsInStmt(*item, calls);
-    }
+    std::vector<CallExpr*> calls = collectAllCallExprs(merged.items);
 
     for (CallExpr* call : calls)
     {
@@ -370,11 +376,7 @@ void resolveUnqualifiedConstructorCalls(Program& merged,
 
     const BareNameIndex index = buildBareNameIndex(merged, usedModules);
 
-    std::vector<CallExpr*> calls;
-    for (auto& item : merged.items)
-    {
-        collectCallExprsInStmt(*item, calls);
-    }
+    std::vector<CallExpr*> calls = collectAllCallExprs(merged.items);
 
     for (CallExpr* call : calls)
     {

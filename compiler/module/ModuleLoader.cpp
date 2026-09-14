@@ -56,6 +56,46 @@ namespace
     // the entry file's own top-level code is meant to run.
     void mergeModule(Program& merged, Program source, const std::string& moduleName)
     {
+        // A real, previously-undiscovered bug found while porting SortedMap<K,V> (see
+        // docs/language/0040-sorted-maps.md's own "2026 Update"): a module's own *private*
+        // (non-`pub`) top-level generic function calling ANOTHER private top-level function in
+        // that same module, by bare (unqualified) name - e.g. an `impl<K,V> SortedMap<K,V>`
+        // method calling its own module's `sortedMapInsertNode<K,V>(...)` helper - never
+        // resolved. The loop just below renames every plain top-level FunctionDecl's own
+        // *declaration* to "moduleName.originalName", but nothing ever rewrote the matching bare
+        // *call sites* to match - UnqualifiedCallResolver::resolveUnqualifiedCalls (which runs
+        // later, on the fully merged program) only ever indexes a used module's own `pub`
+        // functions as resolution candidates, by design (it exists to expose a module's own
+        // public API unqualified to *external* callers, not to fix up a module's own internal
+        // cross-references). So GenericMonomorphizer's later functionTemplatesByName lookup
+        // (keyed on the now-qualified name) never found the still-bare callee, throwing
+        // "'sortedMapInsertNode' is not a known generic function" - a real bug, not specific to
+        // SortedMap<K,V> itself (nothing in this file's own Map<K,V>/Set<T> ever had one
+        // top-level function call a *different* top-level function - only `self.resize()`-style
+        // method calls and `hash<K>()`/`keyEq<K>()` builtin intrinsics - so this gap was never
+        // triggered before). Fixed here, narrowly scoped to `source`'s own not-yet-merged items
+        // (this exact module's own plain top-level function names only, collected before any of
+        // them are renamed below) - zero cross-module ambiguity risk, unlike broadening
+        // resolveUnqualifiedCalls' own pub-only index would have been.
+        std::unordered_set<std::string> ownFunctionNames;
+        for (const auto& item : source.items)
+        {
+            if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
+            {
+                ownFunctionNames.insert(function->name);
+            }
+        }
+        if (!moduleName.empty() && !ownFunctionNames.empty())
+        {
+            for (CallExpr* call : collectAllCallExprs(source.items))
+            {
+                if (ownFunctionNames.contains(call->callee))
+                {
+                    call->callee = moduleName + "." + call->callee;
+                }
+            }
+        }
+
         for (auto& item : source.items)
         {
             if (auto* function = dynamic_cast<FunctionDecl*>(item.get()))

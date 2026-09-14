@@ -326,7 +326,7 @@ void CapabilityChecker::inferExpr(const Expr& expr, const FunctionDecl& function
         return;
     }
 
-    // NoneExpr: no sub-expressions, no capability effect.
+    // NoneExpr/NullExpr: no sub-expressions, no capability effect.
 
     if (const auto* ifExpr = dynamic_cast<const IfExpr*>(&expr))
     {

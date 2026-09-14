@@ -789,16 +789,6 @@ TEST("Parser builds Stack<T> push/pop/peek method-call expressions")
     EXPECT_TRUE(peekResult->arguments.empty());
 }
 
-TEST("Parser builds a LinkedList<T> construction expression")
-{
-    auto program = parseOne("x = LinkedList<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* linkedListNew = dynamic_cast<LinkedListNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(linkedListNew != nullptr);
-    EXPECT_EQ(linkedListNew->elementType, "i32");
-}
-
 TEST("Parser parses a LinkedList<T> parameter type into the canonical form")
 {
     auto program = parseOne("useLinkedList(s: LinkedList<i32>) -> i32 { return s.length }");
@@ -924,46 +914,6 @@ TEST("Parser builds PriorityQueue<T> push/pop/peek method-call expressions")
     EXPECT_TRUE(peekResult->arguments.empty());
 }
 
-TEST("Parser builds a Map<K,V> construction expression")
-{
-    auto program = parseOne("x = Map<i32,i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* mapNew = dynamic_cast<MapNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(mapNew != nullptr);
-    EXPECT_EQ(mapNew->keyType, "i32");
-    EXPECT_EQ(mapNew->valueType, "i32");
-}
-
-TEST("Parser builds a Set<T> construction expression")
-{
-    auto program = parseOne("x = Set<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* setNew = dynamic_cast<SetNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(setNew != nullptr);
-    EXPECT_EQ(setNew->elementType, "i32");
-}
-
-TEST("Parser builds nested construction syntax for List/Map/Set (K/V can themselves be generic)")
-{
-    // A single Identifier token isn't enough here - the value type is
-    // itself a nested generic shape (see
-    // docs/language/0034-maps-and-sets.md's generic rewrite).
-    auto program = parseOne("x = Map<i32, List<i32>>()  z = Set<[i32;3]>()");
-
-    auto* mapAssign = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* mapNew = dynamic_cast<MapNewExpr*>(mapAssign->value.get());
-    EXPECT_TRUE(mapNew != nullptr);
-    EXPECT_EQ(mapNew->keyType, "i32");
-    EXPECT_EQ(mapNew->valueType, "List<i32>");
-
-    auto* setAssign = dynamic_cast<AssignmentStmt*>(program.items.at(1).get());
-    auto* setNew2 = dynamic_cast<SetNewExpr*>(setAssign->value.get());
-    EXPECT_TRUE(setNew2 != nullptr);
-    EXPECT_EQ(setNew2->elementType, "[i32;3]");
-}
-
 TEST("Parser parses Map<K,V> and Set<T> parameter types into the canonical form")
 {
     auto program = parseOne("useMap(m: Map<i32,i32>) -> i32 { return m.length } "
@@ -998,19 +948,13 @@ TEST("Parser builds Map/Set method-call expressions")
     EXPECT_EQ(setAddResult->arguments.size(), static_cast<std::size_t>(1));
 }
 
-TEST("Parser builds a SortedMap<K,V> construction expression")
-{
-    auto program = parseOne("x = SortedMap<i32,i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* sortedMapNew = dynamic_cast<SortedMapNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(sortedMapNew != nullptr);
-    EXPECT_EQ(sortedMapNew->keyType, "i32");
-    EXPECT_EQ(sortedMapNew->valueType, "i32");
-}
-
 TEST("Parser parses a SortedMap<K,V> parameter type into the canonical form")
 {
+    // SortedMap<K,V> is a real, user-declared generic struct now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - a param's own type text is
+    // ordinary generic type parsing, no different from any other two-type-argument generic
+    // struct's own param type (mirrors "Parser parses Map<K,V> and Set<T> parameter types into
+    // the canonical form" above).
     auto program = parseOne("useSortedMap(m: SortedMap<i32,i32>) -> i32 { return m.length }");
 
     auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
@@ -1020,6 +964,11 @@ TEST("Parser parses a SortedMap<K,V> parameter type into the canonical form")
 
 TEST("Parser builds SortedMap<K,V> set/get/contains/remove method-call expressions")
 {
+    // SortedMap<K,V> is a real, user-declared generic struct now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update") - `SortedMap<i32,i32>()` parses as
+    // ordinary generic-call construction-sugar text (mirrors "Parser builds Map/Set method-call
+    // expressions" above), resolved downstream, not asserted on here; only the subsequent
+    // `.set`/`.get` method-call shapes are checked.
     auto program = parseOne("f() { m = SortedMap<i32,i32>()  m.set(1, 2)  m.get(1) }");
 
     auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
@@ -1038,18 +987,13 @@ TEST("Parser builds SortedMap<K,V> set/get/contains/remove method-call expressio
     EXPECT_EQ(getResult->arguments.size(), static_cast<std::size_t>(1));
 }
 
-TEST("Parser builds a SortedSet<T> construction expression")
-{
-    auto program = parseOne("x = SortedSet<i32>()");
-
-    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
-    auto* sortedSetNew = dynamic_cast<SortedSetNewExpr*>(assignment->value.get());
-    EXPECT_TRUE(sortedSetNew != nullptr);
-    EXPECT_EQ(sortedSetNew->elementType, "i32");
-}
-
 TEST("Parser parses a SortedSet<T> parameter type into the canonical form")
 {
+    // SortedSet<T> is a real, user-declared generic struct now (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - a param's own type text is
+    // ordinary generic type parsing, no different from any other single-type-argument generic
+    // struct's own param type (mirrors "Parser parses a SortedMap<K,V> parameter type into the
+    // canonical form" above).
     auto program = parseOne("useSortedSet(s: SortedSet<i32>) -> i32 { return s.length }");
 
     auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
@@ -1059,6 +1003,11 @@ TEST("Parser parses a SortedSet<T> parameter type into the canonical form")
 
 TEST("Parser builds SortedSet<T> add/contains/remove method-call expressions")
 {
+    // SortedSet<T> is a real, user-declared generic struct now (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - `SortedSet<i32>()` parses as
+    // ordinary generic-call construction-sugar text (mirrors "Parser builds SortedMap<K,V>
+    // set/get/contains/remove method-call expressions" above), resolved downstream, not asserted
+    // on here; only the subsequent `.add`/`.contains` method-call shapes are checked.
     auto program = parseOne("f() { s = SortedSet<i32>()  s.add(1)  s.contains(1) }");
 
     auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());

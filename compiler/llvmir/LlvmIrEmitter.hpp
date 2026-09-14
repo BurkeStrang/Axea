@@ -232,75 +232,34 @@ private:
     bool isListType(const std::string& type) const;
     // "{i32, T*}*" -> "T".
     std::string listElementType(const std::string& type) const;
-    // Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's generic
-    // rewrite) are now many distinct monomorphized instantiations, each with
-    // its own numbered entry type (`%axea.MapEntry.<id>`/`%axea.SetEntry.<id>`)
-    // - so unlike the old single-fixed-shape exact-string match, these check
-    // the shared structural shape every instantiation's header has. Checked
-    // *before* isListType at every call site that could see either: a
-    // Map/Set header is also "{...}*"-shaped (3 fields, not 2), so it would
-    // otherwise spuriously match isListType's own looser test.
-    bool isMapType(const std::string& type) const;
-    bool isSetType(const std::string& type) const;
-    // "{i32, i32, %axea.MapEntry.<id>**}*" -> id (as text). Parsed straight
-    // out of the type string itself - no separate reverse-lookup table
-    // needed to go from "which register" to "which instantiation" once the
-    // register's own LLVM type is already known.
-    std::string mapSetInstantiationId(const std::string& type) const;
-    // LinkedList<T> (see docs/language/0036-linked-lists.md) - same
-    // "structural-shape, not exact-string" reasoning as isMapType/isSetType
-    // above, checked *before* isListType for the same reason (a LinkedList
-    // header is also "{i32, ...}*"-shaped). Distinguished from Map/Set's own
-    // "{i32, i32, ...}" shape by its second field being a node *pointer*
-    // (%axea.LLNode.<id>*), not a plain i32 bucketCount.
-    bool isLinkedListType(const std::string& type) const;
-    // "{i32, %axea.LLNode.<id>*, %axea.LLNode.<id>*}*" -> id (as text).
-    std::string linkedListInstantiationId(const std::string& type) const;
-    // A LinkedList instantiation's element type doesn't appear anywhere in
-    // its own header type string either (same problem as Map's V above,
-    // mapValueLlvmType) - pop_front/pop_back's own dest register needs it
-    // directly, so registerLinkedListInstantiation records it per ID here.
-    std::string linkedListElementLlvmType(const std::string& linkedListHeaderType) const;
+    // Map<K,V>/Set<T> are real, user-declared generic structs now (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - there is no isMapType/isSetType/
+    // mapSetInstantiationId left here (their own former self-referential entry types,
+    // `%axea.MapEntry.<id>`/`%axea.SetEntry.<id>`, are ordinary named struct types now, already
+    // handled generically by every other struct, mirroring LinkedList<T>'s own identical port).
+    // LinkedList<T> is a real, user-declared generic struct now too (see
+    // docs/language/0006-generics.md's own port follow-up and std/collections.ax) - there is no
+    // isLinkedListType/linkedListInstantiationId/linkedListElementLlvmType left here either (its
+    // own header is an ordinary named struct type, %LinkedList$T*, already handled generically by
+    // every other struct).
     // Deque<T> (see docs/language/0037-deques.md) - a pointer to a small
     // anonymous 3-field heap header {count, start, data}, no named type at
-    // all (unlike Map/Set/LinkedList: its third field is a plain T*, not a
-    // self-referential entry pointer). Checked *before* isListType for the
-    // same "explicit, not accidental" reason every other 3-field collection
-    // is; distinguished from Map/Set's own "{i32, i32, %axea.*Entry.<id>**}*"
-    // shape by excluding the "%axea." prefix explicitly - checking for a
-    // trailing "**}*" instead would misfire on Deque<str> (str is itself
-    // "i8*", so Deque<str>'s own data field type is "i8**", the same
-    // double-star suffix Map/Set's own entry-pointer-pointer field has).
+    // all. Checked *before* isListType for the same "explicit, not accidental" reason every
+    // other 3-field collection is - checking for a trailing "**}*" instead
+    // would misfire on Deque<str> (str is itself "i8*", so Deque<str>'s own data field type is
+    // "i8**", the same double-star suffix a named entry-pointer-pointer field has).
     bool isDequeType(const std::string& type) const;
     // "{i32, i32, T*}*" -> "T".
     std::string dequeElementType(const std::string& type) const;
-    // SortedMap<K,V> (see docs/language/0040-sorted-maps.md): a pointer to a
-    // small anonymous 2-field heap header {count, root}, mirroring List<T>'s
-    // own "always by pointer, mutated in place" header shape - but its
-    // second field is a *named*, self-referential node pointer
-    // (%axea.SortedMapNode.<id>*, declared by registerSortedMapInstantiation),
-    // not a plain T* the way List<T>'s own data field is. Checked *before*
-    // isListType for the same "explicit, not accidental" reason
-    // isLinkedListType/isMapType/isSetType/isDequeType already are - a
-    // SortedMap header is also "{i32, ...}*"-shaped, so it would otherwise
-    // spuriously match isListType's own looser test.
-    bool isSortedMapType(const std::string& type) const;
-    // "{i32, %axea.SortedMapNode.<id>*}*" -> id (as text).
-    std::string sortedMapInstantiationId(const std::string& type) const;
-    // A SortedMap instantiation's V doesn't appear anywhere in its own
-    // header type string (same problem as Map's own V, mapValueLlvmType) -
-    // `.get()`'s own dest register needs it directly, so
-    // registerSortedMapInstantiation records it per ID here.
-    std::string sortedMapValueLlvmType(const std::string& sortedMapHeaderType) const;
-    // SortedSet<T> (see docs/language/0041-sorted-sets.md) - same reasoning
-    // as isSortedMapType, with %axea.SortedSetNode.<id> (key, height, left,
-    // right - no value field) in place of %axea.SortedMapNode.<id>.
-    // Checked *before* isListType for the same reason. No value-type
-    // side-table needed (unlike SortedMap<K,V>'s own): a set has no V at
-    // all.
-    bool isSortedSetType(const std::string& type) const;
-    // "{i32, %axea.SortedSetNode.<id>*}*" -> id (as text).
-    std::string sortedSetInstantiationId(const std::string& type) const;
+    // SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - there is no isSortedMapType/sortedMapInstantiationId/
+    // sortedMapValueLlvmType/isSortedSetType/sortedSetInstantiationId left here either; their old
+    // "{i32, ...}*" header shapes' own "checked before isListType" ordering concern no longer
+    // applies (ordinary %SortedMap$K$V*/%SortedSet$T* struct pointers, handled generically by
+    // every other struct) - this is the last of these predicates: every collection
+    // docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real
+    // Axea source.
     // String (see docs/language/0042-string.md) - a single concrete type,
     // not generic, so unlike every collection above this needs neither a
     // registerXInstantiation call nor an id-parsing helper: llvmType
@@ -329,11 +288,6 @@ private:
     // from a plain i32 one, something no textual "i32 vs i32" comparison
     // could ever do.
     bool isCharType(const std::string& type) const;
-    // A Map instantiation's V doesn't appear anywhere in its own header type
-    // string (unlike K, which every runtime function call site already gets
-    // via typeOf on the key register) - `.get()`'s own dest register needs
-    // it directly, so registerMapInstantiation records it per ID here.
-    std::string mapValueLlvmType(const std::string& mapHeaderType) const;
     std::string typeOf(int reg, const FunctionContext& fctx) const;
     // Resolves `reg` to an i8* SSA value ref, extracting the data pointer
     // from a String header first if `reg` isn't already a bare str -
@@ -409,7 +363,7 @@ private:
     // its input, only encode it.
     std::string encodeCharUtf8(const std::string& codepointRef, FunctionContext& fctx);
     // Lazily registers (memoized by target type, mirroring
-    // registerMapInstantiation's own "register once" pattern) a single
+    // registerOptionalInstantiationForLlvmPayload's own "register once" pattern) a single
     // shared `@axea.parse.i32`/`@axea.parse.i64`/`@axea.parse.f64`/
     // `@axea.parse.bool` runtime function for `.parse<T>()` (see
     // docs/language/0046-generic-methods.md), appended to
@@ -591,9 +545,7 @@ private:
     void emitStructRefcountHelpers(const IrProgram& program);
     // `@axea.tostring.<kind>.<id>(ptr) -> i8*` for a fixed array, List/
     // Stack/PriorityQueue (share List's own representation), Deque/Queue
-    // (share Deque's), Map/Set/LinkedList/SortedMap/SortedSet
-    // (count-only, matching the top-level binding printer's own
-    // identical fallback for these) - dispatches on `llvmType`'s own
+    // (share Deque's) - dispatches on `llvmType`'s own
     // structural shape, memoized by that full LLVM type string (mirrors
     // registerOptionalInstantiationForLlvmPayload's own "no Axea-level
     // name available at this layer" reasoning).
@@ -648,49 +600,20 @@ private:
     // property. Returns the function's own name ("@axea.utf8.char_at").
     std::string registerUtf8CharAtRuntime();
 
-    // Registers (if not already registered, memoized by the canonical
-    // "Map<K,V>"/"Set<T>" Axea string) a fresh monomorphized instantiation:
-    // assigns the next sequential ID, appends
-    // `%axea.MapEntry.<id> = type { K, V, %axea.MapEntry.<id>* }` to
-    // mapSetTypeDeclsText_, and appends that instantiation's own
-    // `@axea.map.<id>.set/get/contains/remove/resize` functions to
-    // mapSetRuntimeText_ (calling out to registerKeyRuntime for K's
-    // hash/equality). Returns the full header type string
-    // ("{i32, i32, %axea.MapEntry.<id>**}*"). See
-    // docs/language/0034-maps-and-sets.md.
-    std::string registerMapInstantiation(const std::string& keyAxeaType,
-                                         const std::string& valueAxeaType);
-    std::string registerSetInstantiation(const std::string& elementAxeaType);
-    // Registers (if not already registered, memoized by canonical
-    // "LinkedList<elem>" Axea string) a fresh monomorphized node type +
-    // push_front/push_back/pop_front/pop_back runtime functions - mirrors
-    // registerMapInstantiation/registerSetInstantiation's own lazy-
-    // registration pattern (see docs/language/0036-linked-lists.md). Returns
-    // the full header type string ("{i32, %axea.LLNode.<id>*, %axea.LLNode.<id>*}*").
-    std::string registerLinkedListInstantiation(const std::string& elementAxeaType);
-    // Registers (if not already registered, memoized by canonical
-    // "SortedMap<K,V>" Axea string) a fresh monomorphized node type +
-    // height/rotateLeft/rotateRight/insertNode/minValueNode/removeNode/set/
-    // get/contains/remove runtime functions - mirrors
-    // registerMapInstantiation/registerLinkedListInstantiation's own lazy-
-    // registration pattern (see docs/language/0040-sorted-maps.md). K needs
-    // no hash/equality runtime the way Map<K,V>'s own key does (it's
-    // restricted to i32, compared directly via icmp); V needs no runtime at
-    // all (never compared, only stored, exactly like Map<K,V>'s own V).
-    // Returns the full header type string
-    // ("{i32, %axea.SortedMapNode.<id>*}*").
-    std::string registerSortedMapInstantiation(const std::string& keyAxeaType,
-                                               const std::string& valueAxeaType);
-    // Registers (if not already registered, memoized by canonical
-    // "SortedSet<T>" Axea string) a fresh monomorphized node type +
-    // height/rotateLeft/rotateRight/insertNode/minValueNode/removeNode/add/
-    // contains/remove runtime functions - mirrors
-    // registerSortedMapInstantiation's own lazy-registration pattern (see
-    // docs/language/0041-sorted-sets.md), with a 4-field node (key, height,
-    // left, right - no value field) in place of SortedMap's own 5-field one.
-    // Returns the full header type string
-    // ("{i32, %axea.SortedSetNode.<id>*}*").
-    std::string registerSortedSetInstantiation(const std::string& elementAxeaType);
+    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T>/LinkedList<T>/Map<K,V>/Set<T> are all
+    // real, user-declared generic structs now (see docs/language/0006-generics.md's own port
+    // follow-up and docs/language/0034-maps-and-sets.md's own "2026 Update") - there is no
+    // registerMapInstantiation/registerSetInstantiation/registerLinkedListInstantiation left
+    // here; each one's own former per-instantiation entry/node type + runtime functions are now
+    // ordinary real Axea source in std/collections.ax, compiled the same way any other struct's
+    // own impl methods already are. `registerKeyRuntime` (below) stays alive, repurposed as
+    // `hash<T>()`/`keyEq<T>()`'s own backing instead of Map<K,V>/Set<T>'s own former internal
+    // caller. SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now too
+    // (see docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-
+    // sets.md's own "2026 Update") - there is no registerSortedMapInstantiation/
+    // registerSortedSetInstantiation left here either. This is the last of these registration
+    // functions: every collection docs/language/0029-collections.md originally scoped as a
+    // compiler intrinsic is now real Axea source.
     // Registers (if not already registered, memoized by canonical Axea key
     // type string) the hash/equality function pair for a given key type,
     // returning their names (e.g. ("@axea.hash.i32", "@axea.eq.i32")).
@@ -708,18 +631,17 @@ private:
     // element/key type string) a strict less-than function for a given
     // orderable type, returning its name (e.g. "@axea.less.i32"). Only
     // ever called with a type TypeChecker::isOrderableKind accepts (i32,
-    // char, str) - SortedMap<K,V>/SortedSet<T>'s own generated AVL templates
-    // (`<<LESSFN>>`) are the remaining consumer (PriorityQueue<T> is a real,
-    // user-declared generic struct now - see docs/language/0006-generics.md's own port
-    // follow-up - so its own sift comparisons are ordinary Axea `<` expressions, lowered
-    // through the same shared BinOp/icmp/@axea.less.str path every other `<` in the language
-    // already uses, not through this registration function directly), mirroring how
-    // registerKeyRuntime's hash/eq pair is shared by Map<K,V>/Set<T>. i32/
-    // char each reduce to one `icmp slt` instruction; str is a hand-rolled
+    // i64, f64, char, str). Now that this backend's own last hand-generated AVL templates
+    // (SortedMap<K,V>/SortedSet<T>, both real, user-declared generic structs now - see
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") are gone, the only remaining caller is the ordinary Axea `<`/`>`
+    // BinaryExpr case for str - i32/i64/f64/char lower straight to `icmp`/`fcmp` there, never
+    // through this function, so their own branches below stay structurally reachable but are
+    // never actually invoked. str is a hand-rolled
     // byte-walk lexicographic compare, matching registerKeyRuntime's own
     // @axea.eq.str byte-walk style (unsigned byte comparison, stopping at
     // the first difference or either string's nul terminator - the same
-    // semantics a textbook strcmp has). See docs/language/0040-sorted-maps.md.
+    // semantics a textbook strcmp has). See docs/language/0041-sorted-sets.md.
     std::string registerOrderRuntime(const std::string& axeaKeyType);
 
     void inferTypes(const IrFunction& function, FunctionContext& fctx);
@@ -855,53 +777,20 @@ private:
     // does, just inlined here since this Buffer has no Axea-level
     // register/variable of its own to call IrBufferFinish against.
     void emitJoin(const IrJoin& join, FunctionContext& fctx);
-    // `List<T>`/`Stack<T>` are real, user-declared generic structs now, not compiler
-    // intrinsics (see docs/language/0006-generics.md's own List<T>/Stack<T> port follow-up and
+    // `List<T>`/`Stack<T>`/`Map<K,V>`/`Set<T>` are real, user-declared generic structs now, not
+    // compiler intrinsics (see docs/language/0006-generics.md's own List<T>/Stack<T> port
+    // follow-up, docs/language/0034-maps-and-sets.md's own "2026 Update", and
     // std/collections.ax) - there is no emitListNew/emitListPush/emitListPop/emitStackNew/
-    // emitStackPush/emitStackPop/emitStackPeek anymore. PriorityQueue<T> below remains
-    // intrinsic, sharing only `ensureListCapacity`'s growth algorithm.
-    // A fresh {count: 0, bucketCount: 8, buckets: <8 nulls>} heap header (see
-    // docs/language/0034-maps-and-sets.md) - same malloc + null-GEP sizeof
-    // idiom as emitPriorityQueueNew, plus a second malloc for the initial bucket
-    // array, zeroed via 8 unrolled stores (8 is a compile-time constant, so
-    // this is cheaper than a real loop).
-    void emitMapNew(const IrMapNew& mapNew, FunctionContext& fctx);
-    void emitSetNew(const IrSetNew& setNew, FunctionContext& fctx);
-    // Each of these is a single `call` into that instantiation's own shared
-    // runtime functions (registerMapInstantiation/registerSetInstantiation
-    // already emitted once, memoized per distinct (K,V)/(T) shape - see
-    // docs/language/0034-maps-and-sets.md's generic rewrite for why Map/Set
-    // don't inline their logic at each call site the way List's push/pop
-    // do).
-    void emitMapSet(const IrMapSet& mapSet, FunctionContext& fctx);
-    void emitMapGet(const IrMapGet& mapGet, FunctionContext& fctx);
-    void emitMapContains(const IrMapContains& mapContains, FunctionContext& fctx);
-    void emitMapRemove(const IrMapRemove& mapRemove, FunctionContext& fctx);
-    void emitSetAdd(const IrSetAdd& setAdd, FunctionContext& fctx);
-    void emitSetContains(const IrSetContains& setContains, FunctionContext& fctx);
-    void emitSetRemove(const IrSetRemove& setRemove, FunctionContext& fctx);
-    // A fresh {count: 0, root: null} heap header (see
-    // docs/language/0040-sorted-maps.md) - same malloc + null-GEP sizeof
-    // idiom as emitPriorityQueueNew (2 fields, no bucket array unlike
-    // Map/Set's own 3-field header - a tree needs no initial bucket
-    // allocation). Direct C++ emission, not template text, mirroring
-    // emitMapNew/emitSetNew's own choice.
-    void emitSortedMapNew(const IrSortedMapNew& sortedMapNew, FunctionContext& fctx);
-    // Each of these is a single `call` into that instantiation's own shared
-    // runtime functions (registerSortedMapInstantiation already emitted
-    // once, memoized per distinct (K,V) shape) - mirrors emitMapSet/
-    // emitMapGet etc. exactly.
-    void emitSortedMapSet(const IrSortedMapSet& sortedMapSet, FunctionContext& fctx);
-    void emitSortedMapGet(const IrSortedMapGet& sortedMapGet, FunctionContext& fctx);
-    void emitSortedMapContains(const IrSortedMapContains& sortedMapContains, FunctionContext& fctx);
-    void emitSortedMapRemove(const IrSortedMapRemove& sortedMapRemove, FunctionContext& fctx);
-    // A fresh {count: 0, root: null} heap header (see
-    // docs/language/0041-sorted-sets.md) - mirrors emitSortedMapNew exactly,
-    // just with the SortedSet node type in place of SortedMap's own.
-    void emitSortedSetNew(const IrSortedSetNew& sortedSetNew, FunctionContext& fctx);
-    void emitSortedSetAdd(const IrSortedSetAdd& sortedSetAdd, FunctionContext& fctx);
-    void emitSortedSetContains(const IrSortedSetContains& sortedSetContains, FunctionContext& fctx);
-    void emitSortedSetRemove(const IrSortedSetRemove& sortedSetRemove, FunctionContext& fctx);
+    // emitStackPush/emitStackPop/emitStackPeek/emitMapNew/emitMapSet/emitMapGet/
+    // emitMapContains/emitMapRemove/emitSetNew/emitSetAdd/emitSetContains/emitSetRemove anymore.
+    // PriorityQueue<T> below remains intrinsic, sharing only `ensureListCapacity`'s growth
+    // algorithm; SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now too
+    // (see docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-
+    // sets.md's own "2026 Update") - there is no emitSortedMapNew/Set/Get/Contains/Remove or
+    // emitSortedSetNew/Add/Contains/Remove left here either (`registerKeyRuntime` itself stays
+    // alive, repurposed as `hash<T>()`/`keyEq<T>()`'s own backing instead). This is the last of
+    // these emit functions: every collection docs/language/0029-collections.md originally scoped
+    // as a compiler intrinsic is now real Axea source.
     // String (see docs/language/0042-string.md) - the first collection
     // here whose "push"-equivalent needs a *runtime-computed* copy length
     // (via @strlen - str has no length field of its own, unlike every
@@ -945,35 +834,19 @@ private:
     // no byte copy at all, the cheapest possible correct implementation of
     // "hand this content over."
     void emitBufferFinish(const IrBufferFinish& bufferFinish, FunctionContext& fctx);
-    // A fresh {length: 0, head: null, tail: null} heap header (see
-    // docs/language/0036-linked-lists.md) - direct inline emission (not
-    // template text, unlike push/pop below): straight-line, no branching, so
-    // it needs none of the named-register machinery push/pop do. Same
-    // malloc + null-GEP sizeof idiom as emitListNew/emitMapNew.
-    void emitLinkedListNew(const IrLinkedListNew& linkedListNew, FunctionContext& fctx);
-    // Each of these is a single `call` into that instantiation's own shared
-    // runtime function (registerLinkedListInstantiation already emitted once,
-    // memoized per distinct element type) - mirrors emitMapSet/emitMapGet
-    // etc. exactly, for the same reason: maintaining the head/tail invariant
-    // on an empty-list transition needs a real `br i1`, which named LLVM
-    // registers (used in these template-text functions) support far more
-    // easily than this backend's own strictly-numbered anonymous registers
-    // would (see docs/language/0036-linked-lists.md).
-    void emitLinkedListPushFront(const IrLinkedListPushFront& pushFront, FunctionContext& fctx);
-    void emitLinkedListPushBack(const IrLinkedListPushBack& pushBack, FunctionContext& fctx);
-    void emitLinkedListPopFront(const IrLinkedListPopFront& popFront, FunctionContext& fctx);
-    void emitLinkedListPopBack(const IrLinkedListPopBack& popBack, FunctionContext& fctx);
-    // `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>` are all real, user-declared
-    // generic structs now, not compiler intrinsics (see docs/language/0006-generics.md's own
-    // List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up and
-    // std/collections.ax) - there is no emitDequeNew/emitDequePushFront/emitDequePushBack/
-    // emitDequePopFront/emitDequePopBack/emitQueueNew/emitQueueEnqueue/emitQueueDequeue/
-    // emitDequeCopyForPush/emitPriorityQueueNew/emitPriorityQueuePush/emitPriorityQueuePop/
-    // emitPriorityQueuePeek anymore - every one of those method calls now reaches its own real
+    // `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>`/`LinkedList<T>` are all real,
+    // user-declared generic structs now, not compiler intrinsics (see
+    // docs/language/0006-generics.md's own port follow-up and std/collections.ax) - there is no
+    // emitDequeNew/emitDequePushFront/emitDequePushBack/emitDequePopFront/emitDequePopBack/
+    // emitQueueNew/emitQueueEnqueue/emitQueueDequeue/emitDequeCopyForPush/emitPriorityQueueNew/
+    // emitPriorityQueuePush/emitPriorityQueuePop/emitPriorityQueuePeek/emitLinkedListNew/
+    // emitLinkedListPushFront/emitLinkedListPushBack/emitLinkedListPopFront/
+    // emitLinkedListPopBack anymore - every one of those method calls now reaches its own real
     // Axea-source method via the general struct method dispatch (an ordinary IrCall), including
     // PriorityQueue<T>'s own hand-rolled sift-up/sift-down loops (see
-    // docs/language/0039-priority-queues.md), which are ordinary `loop`/`if` Axea source now,
-    // not hand-emitted LLVM basic blocks.
+    // docs/language/0039-priority-queues.md) and LinkedList<T>'s own self-referential
+    // `*Node<T>`-pointer push/pop traversal (see docs/language/0036-linked-lists.md), which are
+    // ordinary `loop`/`if`/`unsafe` Axea source now, not hand-emitted LLVM basic blocks.
     void emitBranch(const IrBranch& branch, FunctionContext& fctx);
     // `while`/`loop`. See docs/language/0028-loops.md: loop-carried
     // variables become alloca/load/store (not phi), re-read at the top of
@@ -1006,29 +879,20 @@ private:
     std::unordered_map<std::string, std::string> stringGlobalByLiteral_;
     int nextGlobal_ = 0;
 
-    // Map<K,V>/Set<T> monomorphization (see docs/language/0034-maps-and-sets.md's
-    // generic rewrite). mapInstantiationIds_/setInstantiationIds_: canonical
-    // "Map<K,V>"/"Set<T>" Axea string -> assigned sequential ID (mirrors
-    // stringGlobalByLiteral_'s own dedup-by-content pattern above).
-    // mapSetTypeDeclsText_/mapSetRuntimeText_ accumulate every registered
-    // instantiation's named type + runtime functions, in registration order;
-    // snapshotted into the final module text only once every function and
-    // topLevel has been through inferTypes (which is what drives
-    // registration - see llvmType), so registration order relative to
-    // *writing* the final text doesn't matter.
-    std::unordered_map<std::string, int> mapInstantiationIds_;
-    // Map instantiation ID -> that instantiation's V, in LLVM type-string
-    // form - see mapValueLlvmType.
-    std::unordered_map<int, std::string> mapValueLlvmTypeById_;
-    std::unordered_map<std::string, int> setInstantiationIds_;
-    int nextMapInstantiationId_ = 0;
-    int nextSetInstantiationId_ = 0;
+    // Map<K,V>/Set<T> are real, user-declared generic structs now (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - there is no mapInstantiationIds_/
+    // setInstantiationIds_/mapValueLlvmTypeById_/nextMapInstantiationId_/nextSetInstantiationId_
+    // left here anymore. mapSetTypeDeclsText_/mapSetRuntimeText_ stay alive, repurposed: nothing
+    // writes to mapSetTypeDeclsText_ anymore (it's always empty now), but mapSetRuntimeText_ is
+    // still `registerKeyRuntime`'s own output buffer, now serving `hash<T>()`/`keyEq<T>()`
+    // directly instead of Map<K,V>/Set<T>'s own former internal `set`/`get`/`contains`/`remove`
+    // callers.
     std::ostringstream mapSetTypeDeclsText_;
     std::ostringstream mapSetRuntimeText_;
 
     // Optional<T> monomorphization (see docs/language/0052-optional.md) -
     // same lazy-registration/dedup-by-content shape as
-    // mapInstantiationIds_/mapSetTypeDeclsText_ above, at the smallest
+    // sortedMapInstantiationIds_ below, at the smallest
     // scale here (a single type-decl line, no runtime functions). Keyed by
     // the payload's own LLVM type text (not an Axea type name string, the
     // way every other instantiation map above is) - see
@@ -1036,9 +900,8 @@ private:
     // this is what lets Optional<i32> reached via `.parse<i32>()`,
     // Some(x: i32), or a declared `Optional<i32>` all collapse onto the
     // same LLVM named type. optionalPayloadTypeById_: assigned ID -> that
-    // instantiation's payload, in LLVM type-string form (mirrors
-    // mapValueLlvmTypeById_'s own by-ID lookup, needed at IrOptionalUnwrap
-    // emission time).
+    // instantiation's payload, in LLVM type-string form, needed at IrOptionalUnwrap
+    // emission time.
     std::unordered_map<std::string, int> optionalInstantiationIds_;
     std::unordered_map<int, std::string> optionalPayloadTypeById_;
     int nextOptionalInstantiationId_ = 0;
@@ -1095,50 +958,35 @@ private:
 
     // Order (strict less-than) runtime (see registerOrderRuntime): canonical
     // Axea type string -> its lessFnName, memoized the same way
-    // keyRuntimeFns_ above memoizes hash/eq, so a type reused across several
-    // PriorityQueue<T>/SortedMap<K,V>/SortedSet<T> instantiations only gets
-    // one less-than implementation.
+    // keyRuntimeFns_ above memoizes hash/eq. The ordinary Axea `<`/`>` BinaryExpr case for str is
+    // its only live caller now (see registerOrderRuntime's own updated comment) - reached by
+    // PriorityQueue<T>/SortedMap<K,V>/SortedSet<T>'s own real struct methods the same way any
+    // other str comparison in the language is.
     std::unordered_map<std::string, std::string> orderRuntimeFns_;
 
-    // LinkedList<T> monomorphization (see docs/language/0036-linked-lists.md)
-    // - same lazy-registration-by-canonical-string pattern as
-    // mapInstantiationIds_/mapSetTypeDeclsText_ above, kept in its own
-    // buffers rather than shared with Map/Set's (separate collection,
-    // separate node shape - "separate over shared").
-    std::unordered_map<std::string, int> linkedListInstantiationIds_;
-    // LinkedList instantiation ID -> that instantiation's element type, in
-    // LLVM type-string form - see linkedListElementLlvmType.
-    std::unordered_map<int, std::string> linkedListElementLlvmTypeById_;
-    int nextLinkedListInstantiationId_ = 0;
-    std::ostringstream linkedListTypeDeclsText_;
-    std::ostringstream linkedListRuntimeText_;
+    // LinkedList<T> is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own port follow-up) - there is no
+    // linkedListInstantiationIds_/linkedListElementLlvmTypeById_/nextLinkedListInstantiationId_/
+    // linkedListTypeDeclsText_/linkedListRuntimeText_ left here; its own former per-instantiation
+    // node type and push/pop runtime functions are compiled the same way any other struct's own
+    // impl methods already are.
 
-    // SortedMap<K,V> monomorphization (see docs/language/0040-sorted-maps.md)
-    // - same lazy-registration-by-canonical-string pattern as
-    // linkedListInstantiationIds_/linkedListTypeDeclsText_ above, kept in
-    // its own buffers ("separate over shared").
-    std::unordered_map<std::string, int> sortedMapInstantiationIds_;
-    // SortedMap instantiation ID -> that instantiation's V, in LLVM
-    // type-string form - see sortedMapValueLlvmType.
-    std::unordered_map<int, std::string> sortedMapValueLlvmTypeById_;
-    int nextSortedMapInstantiationId_ = 0;
-    std::ostringstream sortedMapTypeDeclsText_;
-    std::ostringstream sortedMapRuntimeText_;
-
-    // SortedSet<T> monomorphization (see docs/language/0041-sorted-sets.md)
-    // - same lazy-registration-by-canonical-string pattern as
-    // sortedMapInstantiationIds_/sortedMapTypeDeclsText_ above, kept in its
-    // own buffers ("separate over shared"). No value-type side-table
-    // needed (unlike SortedMap<K,V>'s own) - a set has no V at all.
-    std::unordered_map<std::string, int> sortedSetInstantiationIds_;
-    int nextSortedSetInstantiationId_ = 0;
-    std::ostringstream sortedSetTypeDeclsText_;
-    std::ostringstream sortedSetRuntimeText_;
+    // SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - there is no sortedMapInstantiationIds_/sortedMapValueLlvmTypeById_/
+    // nextSortedMapInstantiationId_/sortedMapTypeDeclsText_/sortedMapRuntimeText_ or
+    // sortedSetInstantiationIds_/nextSortedSetInstantiationId_/sortedSetTypeDeclsText_/
+    // sortedSetRuntimeText_ left here; their own former per-instantiation node types and
+    // set/get/contains/remove/add runtime functions are ordinary real Axea source in
+    // std/collections.ax now, compiled the same way any other struct's own impl methods already
+    // are. This is the last of these instantiation-keyed storage groups: every collection
+    // docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real Axea
+    // source.
 
     // `.parse<T>()` (see docs/language/0046-generic-methods.md) - only two
     // possible target types this phase, so plain flags rather than a
     // dedup-by-string map/set are enough (mirrors the same "register
-    // once" pattern as mapInstantiationIds_ above, at the smallest scale
+    // once" pattern as sortedMapInstantiationIds_ above, at the smallest scale
     // that pattern comes in).
     bool parseI32Registered_ = false;
     bool parseI64Registered_ = false;

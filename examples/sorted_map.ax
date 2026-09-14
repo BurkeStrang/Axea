@@ -1,6 +1,8 @@
+use collections
+
 build() -> SortedMap<i32,i32>
 {
-    scores = SortedMap<i32,i32>()
+    scores: SortedMap<i32,i32> = collections.newSortedMap<i32,i32>()
     scores.set(93, 1)
     scores.set(87, 2)
     scores.set(98, 3)

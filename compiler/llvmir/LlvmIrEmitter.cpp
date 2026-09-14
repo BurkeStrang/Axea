@@ -287,62 +287,30 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
         const std::string elementName = axeaTypeName.substr(6, axeaTypeName.size() - 7);
         return "{i32, " + llvmType(elementName) + "*, i32}*";
     }
-    if (axeaTypeName.starts_with("Map<"))
-    {
-        // Map<K,V> (see docs/language/0034-maps-and-sets.md's generic
-        // rewrite): a pointer to a small anonymous 3-field heap header
-        // {count, bucketCount, buckets}, mirroring List's own "always by
-        // pointer, mutated in place" header. Each distinct (K,V) pair gets
-        // its own named, numbered entry type (%axea.MapEntry.<id>, declared
-        // by registerMapInstantiation) - named, not anonymous, because its
-        // own self-reference (its `next` field points to another
-        // %axea.MapEntry.<id>) can only be expressed in LLVM through a named
-        // type, the one thing every other collection here avoided needing.
-        const std::string args = axeaTypeName.substr(4, axeaTypeName.size() - 5);
-        const auto comma = findTopLevelComma(args);
-        return registerMapInstantiation(args.substr(0, comma), args.substr(comma + 1));
-    }
-    if (axeaTypeName.starts_with("Set<"))
-    {
-        // Set<T> - same reasoning as Map<K,V> above, with %axea.SetEntry.<id>
-        // (key, next - no value field) in place of %axea.MapEntry.<id>.
-        return registerSetInstantiation(axeaTypeName.substr(4, axeaTypeName.size() - 5));
-    }
-    if (axeaTypeName.starts_with("SortedMap<"))
-    {
-        // SortedMap<K,V> (see docs/language/0040-sorted-maps.md): a pointer
-        // to a small anonymous 2-field heap header {count, root}, mirroring
-        // List<T>'s own "always by pointer, mutated in place" header - but
-        // its second field is a *named* self-referential node pointer
-        // (%axea.SortedMapNode.<id>*, declared by
-        // registerSortedMapInstantiation), needed for the same reason
-        // Map/Set's own entry type is: a node's own `left`/`right` fields
-        // point at another node of the identical shape.
-        const std::string args = axeaTypeName.substr(10, axeaTypeName.size() - 11);
-        const auto comma = findTopLevelComma(args);
-        return registerSortedMapInstantiation(args.substr(0, comma), args.substr(comma + 1));
-    }
-    if (axeaTypeName.starts_with("SortedSet<"))
-    {
-        // SortedSet<T> (see docs/language/0041-sorted-sets.md): same
-        // reasoning as SortedMap<K,V> above, with %axea.SortedSetNode.<id>
-        // (key, height, left, right - no value field) in place of
-        // %axea.SortedMapNode.<id>.
-        return registerSortedSetInstantiation(axeaTypeName.substr(10, axeaTypeName.size() - 11));
-    }
-    if (axeaTypeName.starts_with("LinkedList<"))
-    {
-        // LinkedList<T> (see docs/language/0036-linked-lists.md): a pointer
-        // to a small anonymous 3-field heap header {length, head, tail},
-        // mirroring List's own "always by pointer, mutated in place" header.
-        // Each distinct element type gets its own named, numbered node type
-        // (%axea.LLNode.<id>, declared by registerLinkedListInstantiation) -
-        // named, not anonymous, because its own self-reference (`prev`/`next`
-        // pointing at another node of the same type) can only be expressed
-        // in LLVM through a named type, exactly like Map/Set's own entry
-        // type above.
-        return registerLinkedListInstantiation(axeaTypeName.substr(11, axeaTypeName.size() - 12));
-    }
+    // `Map<K,V>`/`Set<T>` are real, user-declared generic structs now (see
+    // docs/language/0034-maps-and-sets.md's own "2026 Update") - a monomorphized instance
+    // reaches this function under its own mangled struct name ("%Map$i32$i32*"), never as raw
+    // "Map<...>"/"Set<...>" text, so unlike Stack<T>'s own vestigial branch above, this one is
+    // deleted outright: the old and new header shapes genuinely differ (the old anonymous
+    // 3-field-header-plus-named-entry-type shape vs. an ordinary named struct reference now),
+    // matching LinkedList<T>'s own identical port decision.
+    // `SortedMap<K,V>`/`SortedSet<T>` are both real, user-declared generic structs now too (see
+    // docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+    // own "2026 Update") - same reasoning as Map<K,V>/Set<T> just above, deleted outright rather
+    // than left vestigial: the old anonymous 2-field-header-plus-named-node-type shape genuinely
+    // differs from an ordinary named struct reference now. This is the last of these branches:
+    // every collection docs/language/0029-collections.md originally scoped as a compiler intrinsic
+    // is now real Axea source.
+    // `LinkedList<T>` is a real, user-declared generic struct now (see
+    // docs/language/0006-generics.md's own port follow-up and std/collections.ax), reaching this
+    // function under its own mangled struct name in practice, not raw "LinkedList<...>" text -
+    // deleted outright, unlike its own sibling "vestigial" branches just below, because unlike
+    // Stack<T>/PriorityQueue<T> (both LLVM-identical to List<T> both before and after their own
+    // ports), LinkedList<T>'s own former self-referential node header (%axea.LLNode.<id>,
+    // "{i32, node*, node*}*") is nothing like its new representation (an ordinary struct
+    // pointer, "%LinkedList$T*") - there is no single formula that stays correct across both,
+    // so keeping the old one "just in case" would be silently wrong if this branch were ever
+    // actually reached, not merely harmless.
     if (axeaTypeName.starts_with("Deque<"))
     {
         // Vestigial: `Deque<T>` is a real, user-declared generic struct now (see
@@ -413,6 +381,10 @@ std::string LlvmIrEmitter::binOpMnemonic(TokenKind op) const
         case TokenKind::Minus: return "sub";
         case TokenKind::Star: return "mul";
         case TokenKind::Slash: return "sdiv";
+        // Bitwise AND (see docs/language/0034-maps-and-sets.md's own "2026 Update") - i32/i64
+        // only (TypeChecker already rejects f64), so floatBinOpMnemonic below needs no case at
+        // all.
+        case TokenKind::Ampersand: return "and";
         case TokenKind::Less: return "icmp slt";
         case TokenKind::LessEqual: return "icmp sle";
         case TokenKind::Greater: return "icmp sgt";
@@ -623,7 +595,13 @@ std::string LlvmIrEmitter::structNameFromPointerType(const std::string& pointerT
 
 bool LlvmIrEmitter::isNamedStructPointerType(const std::string& type) const
 {
-    return type.size() > 1 && type.front() == '%' && type.back() == '*';
+    // A real, previously-undiscovered bug found while porting LinkedList<T>'s own self-
+    // referential `*Node<T>` pointers: this used to match "%Node**" (a genuine raw pointer *to*
+    // a struct, see isPointerType's own identical distinction) the same as "%Node*" (an ordinary
+    // struct reference) - excluded here the identical way, by rejecting anything still ending in
+    // '*' after stripping exactly one trailing star.
+    return type.size() > 1 && type.front() == '%' && type.back() == '*' &&
+           type[type.size() - 2] != '*';
 }
 
 std::string LlvmIrEmitter::arrayElementType(const std::string& pointerType) const
@@ -830,19 +808,34 @@ std::string LlvmIrEmitter::sliceElementType(const std::string& type) const
 
 bool LlvmIrEmitter::isPointerType(const std::string& type) const
 {
-    // A raw Axea `*T` pointer to a *primitive* pointee renders as exactly one of "i32*"/"i64*"/
-    // "double*"/"i1*"/"i24*" (see docs/language/0019-unsafe.md) - unlike every existing
-    // heap-backed collection/struct/array/String/Buffer/closure type here, each of which has its
-    // own distinctive structural prefix ('{'/'['/'%') checked by the isXType helper above/below
-    // it. Explicitly excludes "i8*" (str/cstr's own canonical representation) since neither is a
-    // real `*T` pointer at the Axea type level - this only matters for a hypothetical `*i8`
-    // (pointer to a raw byte), which isn't resolvable this phase anyway ("i8" itself isn't yet a
-    // supported primitive - see resolveType's own primitives map) - documented, not fixed, as a
-    // follow-up risk. Also excludes '%'/'{'/'['-prefixed text (a struct-pointee `*StructName`
-    // renders as "%StructName**" - see llvmType's own comment on why that case is untested/out of
-    // scope this milestone).
-    return type.size() > 1 && type.back() == '*' && type != "i8*" && type.front() != '{' &&
-           type.front() != '[' && type.front() != '%';
+    // A raw Axea `*T` pointer renders as a '*'-suffixed type - unlike every heap-backed
+    // collection/array/String/Buffer/closure type here, each of which has its own distinctive
+    // structural prefix ('{'/'[') checked by the isXType helper above/below it, so any
+    // '*'-suffixed text *not* starting with '{'/'[' is a real `*T` pointer at the Axea type
+    // level: "i32*"/"i64*"/"double*"/"i1*"/"i24*" (a pointer to a primitive,
+    // docs/language/0019-unsafe.md), and also "i8**"/"i32**"/etc - a pointer *to* a primitive
+    // pointer (e.g. a `List<str>`'s own `data: *str` field, str already being "i8*"). Explicitly
+    // excludes "i8*" itself (str/cstr's own canonical representation) since that's not a real
+    // `*T` pointer at the Axea type level - this only matters for a hypothetical `*i8` (pointer
+    // to a raw byte), which isn't resolvable this phase anyway ("i8" itself isn't yet a supported
+    // primitive - see resolveType's own primitives map) - documented, not fixed, as a follow-up
+    // risk.
+    if (type.size() <= 1 || type.back() != '*' || type == "i8*")
+    {
+        return false;
+    }
+    if (type.front() == '%')
+    {
+        // A raw Axea `*T` pointer to a *struct* pointee (see docs/language/0036-linked-lists.md's
+        // own 2026 self-referential-node port) - a struct value already renders as one star
+        // ("%Node$i32*", structs are always by-pointer - see llvmType's own struct fallback), so
+        // a genuine raw pointer *to* one renders with one star *more* than that, "%Node$i32**".
+        // This is what distinguishes a real struct-pointee `*T` from a plain struct reference
+        // itself ("%Node$i32*", exactly one star) - previously excluded here outright (a real
+        // limitation, not fixed until this port actually needed it).
+        return type.size() > 2 && type[type.size() - 2] == '*';
+    }
+    return type.front() != '{' && type.front() != '[';
 }
 
 std::string LlvmIrEmitter::pointerElementType(const std::string& type) const
@@ -863,43 +856,11 @@ std::string LlvmIrEmitter::listElementType(const std::string& type) const
     return type.substr(6, type.size() - 6 - std::string("*, i32}*").size());
 }
 
-bool LlvmIrEmitter::isMapType(const std::string& type) const
-{
-    return type.starts_with("{i32, i32, %axea.MapEntry.") && type.ends_with("**}*");
-}
-
-bool LlvmIrEmitter::isSetType(const std::string& type) const
-{
-    return type.starts_with("{i32, i32, %axea.SetEntry.") && type.ends_with("**}*");
-}
-
-std::string LlvmIrEmitter::mapSetInstantiationId(const std::string& type) const
-{
-    // "{i32, i32, %axea.MapEntry.<id>**}*"/"...SetEntry.<id>**}*" - the id
-    // sits between the last '.' and the trailing "**}*".
-    const auto lastDot = type.rfind('.');
-    return type.substr(lastDot + 1, type.size() - lastDot - 1 - std::string("**}*").size());
-}
-
-bool LlvmIrEmitter::isLinkedListType(const std::string& type) const
-{
-    return type.starts_with("{i32, %axea.LLNode.");
-}
-
-std::string LlvmIrEmitter::linkedListInstantiationId(const std::string& type) const
-{
-    // "{i32, %axea.LLNode.<id>*, %axea.LLNode.<id>*}*" - the id sits between
-    // the first "%axea.LLNode." and the '*' right after it.
-    const auto start = type.find("%axea.LLNode.") + std::string("%axea.LLNode.").size();
-    const auto starPos = type.find('*', start);
-    return type.substr(start, starPos - start);
-}
-
 bool LlvmIrEmitter::isDequeType(const std::string& type) const
 {
     // Excludes "%axea." explicitly, not just a trailing "**}*" check -
     // Deque<str>'s own data field is "i8**" (str is itself "i8*"), the same
-    // double-star suffix Map/Set's own entry-pointer-pointer field has, so a
+    // double-star suffix a named entry-pointer-pointer field has, so a
     // suffix-only check would misfire on that case.
     return type.starts_with("{i32, i32, ") && type.ends_with("}*") &&
            !type.starts_with("{i32, i32, %axea.");
@@ -909,37 +870,6 @@ std::string LlvmIrEmitter::dequeElementType(const std::string& type) const
 {
     // "{i32, i32, T*}*" - strip the leading "{i32, i32, " and trailing "*}*".
     return type.substr(11, type.size() - 11 - std::string("*}*").size());
-}
-
-bool LlvmIrEmitter::isSortedMapType(const std::string& type) const
-{
-    return type.starts_with("{i32, %axea.SortedMapNode.");
-}
-
-std::string LlvmIrEmitter::sortedMapInstantiationId(const std::string& type) const
-{
-    // "{i32, %axea.SortedMapNode.<id>*}*" - the id sits between the last
-    // '.' and the trailing "*}*".
-    const auto lastDot = type.rfind('.');
-    return type.substr(lastDot + 1, type.size() - lastDot - 1 - std::string("*}*").size());
-}
-
-std::string LlvmIrEmitter::sortedMapValueLlvmType(const std::string& sortedMapHeaderType) const
-{
-    return sortedMapValueLlvmTypeById_.at(std::stoi(sortedMapInstantiationId(sortedMapHeaderType)));
-}
-
-bool LlvmIrEmitter::isSortedSetType(const std::string& type) const
-{
-    return type.starts_with("{i32, %axea.SortedSetNode.");
-}
-
-std::string LlvmIrEmitter::sortedSetInstantiationId(const std::string& type) const
-{
-    // "{i32, %axea.SortedSetNode.<id>*}*" - the id sits between the last
-    // '.' and the trailing "*}*".
-    const auto lastDot = type.rfind('.');
-    return type.substr(lastDot + 1, type.size() - lastDot - 1 - std::string("*}*").size());
 }
 
 bool LlvmIrEmitter::isStringType(const std::string& type) const
@@ -955,17 +885,6 @@ bool LlvmIrEmitter::isBufferType(const std::string& type) const
 bool LlvmIrEmitter::isCharType(const std::string& type) const
 {
     return type == "i24";
-}
-
-std::string LlvmIrEmitter::mapValueLlvmType(const std::string& mapHeaderType) const
-{
-    return mapValueLlvmTypeById_.at(std::stoi(mapSetInstantiationId(mapHeaderType)));
-}
-
-std::string LlvmIrEmitter::linkedListElementLlvmType(const std::string& linkedListHeaderType) const
-{
-    return linkedListElementLlvmTypeById_.at(
-        std::stoi(linkedListInstantiationId(linkedListHeaderType)));
 }
 
 std::string LlvmIrEmitter::typeOf(int reg, const FunctionContext& fctx) const
@@ -2260,12 +2179,6 @@ std::string LlvmIrEmitter::registerCollectionToStrRuntime(const std::string& llv
 @axea.str.openbracket = private unnamed_addr constant [2 x i8] c"[\00"
 @axea.str.closebracket = private unnamed_addr constant [2 x i8] c"]\00"
 @axea.str.collcomma = private unnamed_addr constant [3 x i8] c", \00"
-@axea.str.map_open = private unnamed_addr constant [5 x i8] c"Map(\00"
-@axea.str.set_open = private unnamed_addr constant [5 x i8] c"Set(\00"
-@axea.str.linkedlist_open = private unnamed_addr constant [12 x i8] c"LinkedList(\00"
-@axea.str.sortedmap_open = private unnamed_addr constant [11 x i8] c"SortedMap(\00"
-@axea.str.sortedset_open = private unnamed_addr constant [11 x i8] c"SortedSet(\00"
-@axea.str.entries_close = private unnamed_addr constant [10 x i8] c" entries)\00"
 )";
     }
 
@@ -2288,53 +2201,18 @@ std::string LlvmIrEmitter::registerCollectionToStrRuntime(const std::string& llv
         "getelementptr ([3 x i8], [3 x i8]* @axea.str.collcomma, i64 0, i64 0)";
 
     // Dispatch order mirrors the top-level binding printer's own exact
-    // ordering (see e.g. isLinkedListType's own comment) - Map/Set/
-    // LinkedList/SortedMap/SortedSet's headers are all "{i32, ...}*"-
-    // shaped too, so they must be checked before the looser
-    // isDequeType/isListType tests below.
-    if (isMapType(llvmType) || isSetType(llvmType) || isLinkedListType(llvmType) ||
-        isSortedMapType(llvmType) || isSortedSetType(llvmType))
-    {
-        // Count-only, matching the top-level binding printer's own
-        // identical fallback for these (no iteration support this phase -
-        // see docs/language/0034-maps-and-sets.md/0036-linked-lists.md/
-        // 0040-sorted-maps.md/0041-sorted-sets.md).
-        const std::string prefix =
-            isMapType(llvmType)
-                ? "getelementptr ([5 x i8], [5 x i8]* @axea.str.map_open, i64 0, i64 0)"
-            : isSetType(llvmType)
-                ? "getelementptr ([5 x i8], [5 x i8]* @axea.str.set_open, i64 0, i64 0)"
-            : isLinkedListType(llvmType)
-                ? "getelementptr ([12 x i8], [12 x i8]* @axea.str.linkedlist_open, i64 0, i64 0)"
-            : isSortedMapType(llvmType)
-                ? "getelementptr ([11 x i8], [11 x i8]* @axea.str.sortedmap_open, i64 0, i64 0)"
-                : "getelementptr ([11 x i8], [11 x i8]* @axea.str.sortedset_open, i64 0, i64 0)";
-        const std::string suffix =
-            "getelementptr ([10 x i8], [10 x i8]* @axea.str.entries_close, i64 0, i64 0)";
-        registerI32ToStrRuntime();
-
-        const std::string headerType = llvmType.substr(0, llvmType.size() - 1);
-        body << "define i8* " << fnName << "(" << llvmType << " %v) {\n";
-        body << "entry:\n";
-        body << "  %buf = call {i32, i32, i8*}* @axea.strbuf.new()\n";
-        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << prefix << ")\n";
-        body << "  %countPtr = getelementptr " << headerType << ", " << llvmType
-             << " %v, i32 0, i32 0\n";
-        body << "  %count = load i32, i32* %countPtr\n";
-        body << "  %countStr = call i8* @axea.i32.to_str(i32 %count)\n";
-        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* %countStr)\n";
-        body << "  call void @axea.strbuf.append({i32, i32, i8*}* %buf, i8* " << suffix << ")\n";
-        body << "  %result = call i8* @axea.strbuf.finish({i32, i32, i8*}* %buf)\n";
-        body << "  ret i8* %result\n";
-        body << "}\n";
-
-        toStrRuntimeText_ << "\n" << body.str();
-        return fnName;
-    }
+    // ordering. LinkedList<T>/Map<K,V>/Set<T>/SortedMap<K,V>/SortedSet<T> are all
+    // real, user-declared generic structs now (see docs/language/0006-generics.md's own port
+    // follow-up, docs/language/0034-maps-and-sets.md's own "2026 Update", docs/language/0040-
+    // sorted-maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026
+    // Update") - their own headers are ordinary named struct types (isNamedStructPointerType,
+    // checked earlier in this same function), reached via the general per-struct
+    // @axea.tostring.<Name> helper (emitStructToStringHelpers) like any other struct, not any
+    // count-only fallback anymore - there is no such fallback left in this function at all.
 
     if (isDequeType(llvmType))
     {
-        // Full bracket printing (unlike Map/Set/etc. above) - Deque<T>'s
+        // Full bracket printing - Deque<T>'s
         // growable-array-with-a-start-offset representation directly
         // supports it, same reasoning as the top-level binding printer's
         // own identical Deque branch (see docs/language/0037-deques.md).
@@ -2608,11 +2486,11 @@ std::string LlvmIrEmitter::stringifyValueOfType(const std::string& type,
     }
     if (!type.empty() && (type.front() == '{' || type.front() == '['))
     {
-        // A collection - List/Stack/PriorityQueue/Deque/Queue/Map/Set/
-        // LinkedList/SortedMap/SortedSet, or a fixed array (see
+        // A collection - List/Stack/PriorityQueue/Deque/Queue/
+        // LinkedList/Map/Set/SortedMap/SortedSet, or a fixed array (see
         // docs/language/0054-collection-printing.md) -
         // registerCollectionToStrRuntime's own dispatch chain covers all
-        // of them, keyed structurally exactly like isListType/isMapType/
+        // of them, keyed structurally exactly like isListType/isDequeType/
         // etc. already are.
         const std::string fnName = registerCollectionToStrRuntime(type);
         const int destReg = allocateRegister(fctx);
@@ -2657,6 +2535,14 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[sizeOf->dest] = "i64";
         }
+        else if (const auto* hashOf = dynamic_cast<const IrHashOf*>(inst.get()))
+        {
+            fctx.registerTypes[hashOf->dest] = "i32";
+        }
+        else if (const auto* keyEq = dynamic_cast<const IrKeyEq*>(inst.get()))
+        {
+            fctx.registerTypes[keyEq->dest] = "i1";
+        }
         else if (const auto* constBool = dynamic_cast<const IrConstBool*>(inst.get()))
         {
             fctx.registerTypes[constBool->dest] = "i1";
@@ -2668,6 +2554,14 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         else if (const auto* constChar = dynamic_cast<const IrConstChar*>(inst.get()))
         {
             fctx.registerTypes[constChar->dest] = "i24";
+        }
+        else if (const auto* constNull = dynamic_cast<const IrConstNull*>(inst.get()))
+        {
+            // llvmType already turns either shape of `pointeeTypeName` into the right *register*
+            // type directly - "*i32" -> "i32*" (a raw pointer register's own natural type), or a
+            // plain struct name "Node$i32" -> "%Node$i32*" (structs are always by-pointer) - see
+            // IrConstNull's own doc comment in Ir.hpp. No "+ '*'" needed here either way.
+            fctx.registerTypes[constNull->dest] = llvmType(constNull->pointeeTypeName);
         }
         else if (const auto* strSlice = dynamic_cast<const IrStrSlice*>(inst.get()))
         {
@@ -2823,23 +2717,28 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         else if (const auto* fieldGet = dynamic_cast<const IrFieldGet*>(inst.get()))
         {
             const std::string objectType = typeOf(fieldGet->object, fctx);
-            if (isSliceType(objectType) || isListType(objectType) || isMapType(objectType) ||
-                isSetType(objectType) || isLinkedListType(objectType) || isDequeType(objectType) ||
-                isSortedMapType(objectType) || isSortedSetType(objectType) || objectType == "i8*" ||
+            if (isSliceType(objectType) || isListType(objectType) ||
+                isDequeType(objectType) || objectType == "i8*" ||
                 isStringType(objectType) || isBufferType(objectType))
             {
                 // Only "length"/"bytes"/"capacity" ever reach a slice,
-                // List, Map, Set, LinkedList, Deque, SortedMap, SortedSet,
+                // List, Deque,
                 // str, String, or Buffer via IrFieldGet, and all of them
                 // are i32 - TypeChecker already guarantees this (see
                 // docs/language/0032-slices.md, 0033-lists.md,
-                // 0034-maps-and-sets.md, 0036-linked-lists.md,
-                // 0037-deques.md, 0040-sorted-maps.md, 0041-sorted-sets.md,
+                // 0037-deques.md,
                 // 0047-unicode.md). str/String/Buffer are explicitly listed
                 // (not left to fall into isDequeType's own coincidental
                 // structural match the way Buffer's raw header shape
                 // would) for the same "explicit, not accidental" reasoning
-                // docs/language/0043-buffer.md already established.
+                // docs/language/0043-buffer.md already established. LinkedList<T>/Map<K,V>/
+                // Set<T>/SortedMap<K,V>/SortedSet<T> are all real, user-declared generic structs
+                // now (see docs/language/0006-generics.md's own port follow-up, docs/language/
+                // 0034-maps-and-sets.md's own "2026 Update", docs/language/0040-sorted-maps.md's
+                // own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026 Update") -
+                // their own `.length` is an ordinary struct field, reached via the `else` branch
+                // just below like any other struct field, not this fixed-i32-collections list
+                // anymore.
                 fctx.registerTypes[fieldGet->dest] = "i32";
             }
             else
@@ -2848,97 +2747,6 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
                 fctx.registerTypes[fieldGet->dest] =
                     fieldIndexAndType(structName, fieldGet->field).second;
             }
-        }
-        else if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(inst.get()))
-        {
-            // Drives registration (see registerLinkedListInstantiation) -
-            // same reasoning as IrMapNew/IrSetNew above.
-            fctx.registerTypes[linkedListNew->dest] =
-                llvmType("LinkedList<" + linkedListNew->elementTypeName + ">");
-        }
-        else if (dynamic_cast<const IrLinkedListPushFront*>(inst.get()) ||
-                 dynamic_cast<const IrLinkedListPushBack*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrListPush above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (const auto* popFront = dynamic_cast<const IrLinkedListPopFront*>(inst.get()))
-        {
-            fctx.registerTypes[popFront->dest] =
-                linkedListElementLlvmType(typeOf(popFront->list, fctx));
-        }
-        else if (const auto* popBack = dynamic_cast<const IrLinkedListPopBack*>(inst.get()))
-        {
-            fctx.registerTypes[popBack->dest] =
-                linkedListElementLlvmType(typeOf(popBack->list, fctx));
-        }
-        else if (const auto* mapNew = dynamic_cast<const IrMapNew*>(inst.get()))
-        {
-            // Drives registration (see registerMapInstantiation) - this is
-            // what guarantees every instantiation is known by the time
-            // emit() appends mapSetTypeDeclsText_/mapSetRuntimeText_.
-            fctx.registerTypes[mapNew->dest] =
-                llvmType("Map<" + mapNew->keyTypeName + "," + mapNew->valueTypeName + ">");
-        }
-        else if (const auto* setNew = dynamic_cast<const IrSetNew*>(inst.get()))
-        {
-            fctx.registerTypes[setNew->dest] = llvmType("Set<" + setNew->elementTypeName + ">");
-        }
-        else if (dynamic_cast<const IrMapSet*>(inst.get()) ||
-                 dynamic_cast<const IrMapRemove*>(inst.get()) ||
-                 dynamic_cast<const IrSetAdd*>(inst.get()) ||
-                 dynamic_cast<const IrSetRemove*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrListPush above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (const auto* mapGet = dynamic_cast<const IrMapGet*>(inst.get()))
-        {
-            fctx.registerTypes[mapGet->dest] = mapValueLlvmType(typeOf(mapGet->map, fctx));
-        }
-        else if (dynamic_cast<const IrMapContains*>(inst.get()) ||
-                 dynamic_cast<const IrSetContains*>(inst.get()))
-        {
-            fctx.registerTypes[inst->dest] = "i1";
-        }
-        else if (const auto* sortedMapNew = dynamic_cast<const IrSortedMapNew*>(inst.get()))
-        {
-            // Drives registration (see registerSortedMapInstantiation) -
-            // same reasoning as IrMapNew above.
-            fctx.registerTypes[sortedMapNew->dest] = llvmType(
-                "SortedMap<" + sortedMapNew->keyTypeName + "," + sortedMapNew->valueTypeName + ">");
-        }
-        else if (dynamic_cast<const IrSortedMapSet*>(inst.get()) ||
-                 dynamic_cast<const IrSortedMapRemove*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrMapSet/IrMapRemove above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (const auto* sortedMapGet = dynamic_cast<const IrSortedMapGet*>(inst.get()))
-        {
-            fctx.registerTypes[sortedMapGet->dest] =
-                sortedMapValueLlvmType(typeOf(sortedMapGet->sortedMap, fctx));
-        }
-        else if (dynamic_cast<const IrSortedMapContains*>(inst.get()))
-        {
-            fctx.registerTypes[inst->dest] = "i1";
-        }
-        else if (const auto* sortedSetNew = dynamic_cast<const IrSortedSetNew*>(inst.get()))
-        {
-            // Drives registration (see registerSortedSetInstantiation) -
-            // same reasoning as IrSetNew above.
-            fctx.registerTypes[sortedSetNew->dest] =
-                llvmType("SortedSet<" + sortedSetNew->elementTypeName + ">");
-        }
-        else if (dynamic_cast<const IrSortedSetAdd*>(inst.get()) ||
-                 dynamic_cast<const IrSortedSetRemove*>(inst.get()))
-        {
-            // Unit-typed, same reasoning as IrSetAdd/IrSetRemove above.
-            fctx.registerTypes[inst->dest] = "void";
-        }
-        else if (dynamic_cast<const IrSortedSetContains*>(inst.get()))
-        {
-            fctx.registerTypes[inst->dest] = "i1";
         }
         else if (const auto* stringNew = dynamic_cast<const IrStringNew*>(inst.get()))
         {
@@ -3158,1489 +2966,6 @@ void LlvmIrEmitter::emitStructTypeDecls(std::ostringstream& out)
     }
 }
 
-namespace
-{
-    // Substitutes every occurrence of each `<<TOKEN>>` placeholder with its
-    // replacement text, longest-token-first (defensive against one token
-    // being a substring of another, though none of the tokens actually used
-    // below collide this way). Shared by registerMapInstantiation/
-    // registerSetInstantiation to turn the hand-verified template text (see
-    // docs/language/0034-maps-and-sets.md) into a concrete instantiation's
-    // runtime functions.
-    std::string fillTemplate(std::string text,
-                             const std::vector<std::pair<std::string, std::string>>& substitutions)
-    {
-        for (const auto& [token, value] : substitutions)
-        {
-            std::size_t pos = 0;
-            while ((pos = text.find(token, pos)) != std::string::npos)
-            {
-                text.replace(pos, token.size(), value);
-                pos += value.size();
-            }
-        }
-        return text;
-    }
-
-    // The not-found sentinel Map<K,V>.get returns in compiled code (the
-    // interpreter throws instead - see docs/language/0034-maps-and-sets.md).
-    // Depends on V's own LLVM shape: i32's own min-int, i1's false, or null
-    // for every pointer-shaped V (str/struct/array/List/Map/Set).
-    std::string sentinelFor(const std::string& valueLlvmType)
-    {
-        if (valueLlvmType == "i32")
-        {
-            return "-2147483648";
-        }
-        if (valueLlvmType == "i64")
-        {
-            return "-9223372036854775808";
-        }
-        if (valueLlvmType == "double")
-        {
-            // Plain decimal, not formatDoubleLiteral's own hex form - 0.0
-            // is exactly representable in decimal, so LLVM's parser
-            // accepts it directly (see formatDoubleLiteral's own comment
-            // for why every *other* double constant in this backend uses
-            // the hex form instead).
-            return "0.0";
-        }
-        if (valueLlvmType == "i1")
-        {
-            return "0";
-        }
-        if (valueLlvmType.starts_with("%axea.Optional."))
-        {
-            // A byval aggregate (see docs/language/0052-optional.md), not
-            // a pointer - "null" is invalid IR for it. All-zero bits
-            // constructs exactly None (hasValue = i1 0, payload = 0),
-            // itself a perfectly valid "value not present" sentinel.
-            return "zeroinitializer";
-        }
-        if (valueLlvmType.starts_with("%axea.Result."))
-        {
-            // Same reasoning as Optional's own case just above (see
-            // docs/language/0063-result.md) - all-zero bits constructs a
-            // structurally valid Err(<zero>) (isOk = i1 0), not a
-            // meaningful real error, but a perfectly fine "value not
-            // present" sentinel for the identical reason.
-            return "zeroinitializer";
-        }
-        return "null"; // every other valid V is pointer-shaped
-    }
-
-    const char* const kMapResizeTemplate = R"(
-define void @axea.<<KIND>>.<<ID>>.resize(<<HEADERPTR>> %h) {
-entry:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %oldBucketCount = load i32, i32* %bcptr
-  %oldBuckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %newBucketCount = mul i32 %oldBucketCount, 2
-  %sizePtr = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> null, i32 1
-  %elemSize = ptrtoint <<ENTRYPTRPTR>> %sizePtr to i64
-  %newBucketCount64 = zext i32 %newBucketCount to i64
-  %newBytes = mul i64 %newBucketCount64, %elemSize
-  %rawNew = call i8* @malloc(i64 %newBytes)
-  %newBuckets = bitcast i8* %rawNew to <<ENTRYPTRPTR>>
-  %zi = alloca i32
-  store i32 0, i32* %zi
-  br label %zero.header
-zero.header:
-  %z0 = load i32, i32* %zi
-  %z1 = icmp slt i32 %z0, %newBucketCount
-  br i1 %z1, label %zero.body, label %zero.done
-zero.body:
-  %z2 = load i32, i32* %zi
-  %z3 = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %newBuckets, i32 %z2
-  store <<ENTRYPTR>> null, <<ENTRYPTRPTR>> %z3
-  %z4 = add i32 %z2, 1
-  store i32 %z4, i32* %zi
-  br label %zero.header
-zero.done:
-  %oi = alloca i32
-  store i32 0, i32* %oi
-  br label %outer.header
-outer.header:
-  %o0 = load i32, i32* %oi
-  %o1 = icmp slt i32 %o0, %oldBucketCount
-  br i1 %o1, label %outer.body, label %outer.done
-outer.body:
-  %o2 = load i32, i32* %oi
-  %o3 = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %oldBuckets, i32 %o2
-  %o4 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %o3
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %o4, <<ENTRYPTRPTR>> %cur
-  br label %inner.header
-inner.header:
-  %i0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %i1 = icmp eq <<ENTRYPTR>> %i0, null
-  br i1 %i1, label %inner.done, label %inner.body
-inner.body:
-  %i2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %i0, i32 0, i32 <<NEXTIDX>>
-  %i3 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %i2
-  %i4 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %i0, i32 0, i32 0
-  %i5 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %i4
-  %i6 = call i32 <<HASHFN>>(<<KEYTYPE>> %i5)
-  %i7 = sub i32 %newBucketCount, 1
-  %i8 = and i32 %i6, %i7
-  %i9 = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %newBuckets, i32 %i8
-  %i10 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %i9
-  store <<ENTRYPTR>> %i10, <<ENTRYPTRPTR>> %i2
-  store <<ENTRYPTR>> %i0, <<ENTRYPTRPTR>> %i9
-  store <<ENTRYPTR>> %i3, <<ENTRYPTRPTR>> %cur
-  br label %inner.header
-inner.done:
-  %o5 = load i32, i32* %oi
-  %o6 = add i32 %o5, 1
-  store i32 %o6, i32* %oi
-  br label %outer.header
-outer.done:
-  store i32 %newBucketCount, i32* %bcptr
-  store <<ENTRYPTRPTR>> %newBuckets, <<ENTRYPTRPTRPTR>> %bptr
-  ret void
-}
-)";
-
-    const char* const kMapSetTemplate = R"(
-define void @axea.map.<<ID>>.set(<<HEADERPTR>> %h, <<KEYTYPE>> %key, <<VALUETYPE>> %value) {
-entry:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %key)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  br label %search.header
-search.header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %insert, label %search.check
-search.check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %key)
-  br i1 %c4, label %update, label %search.next
-search.next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 <<NEXTIDX>>
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %search.header
-update:
-  %c7 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %c7
-  ret void
-insert:
-  %sizePtr2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> null, i32 1
-  %sizeInt = ptrtoint <<ENTRYPTR>> %sizePtr2 to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newEntry = bitcast i8* %raw to <<ENTRYPTR>>
-  %kp = getelementptr <<ENTRY>>, <<ENTRYPTR>> %newEntry, i32 0, i32 0
-  store <<KEYTYPE>> %key, <<KEYTYPEPTR>> %kp
-  %vp = getelementptr <<ENTRY>>, <<ENTRYPTR>> %newEntry, i32 0, i32 1
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %vp
-  %np = getelementptr <<ENTRY>>, <<ENTRYPTR>> %newEntry, i32 0, i32 <<NEXTIDX>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %np
-  store <<ENTRYPTR>> %newEntry, <<ENTRYPTRPTR>> %bucketSlot
-  %oldCount = load i32, i32* %cptr
-  %newCount = add i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  %lhs = mul i32 %newCount, 4
-  %rhs = mul i32 %bucketCount, 3
-  %needResize = icmp sgt i32 %lhs, %rhs
-  br i1 %needResize, label %doresize, label %done
-doresize:
-  call void @axea.map.<<ID>>.resize(<<HEADERPTR>> %h)
-  br label %done
-done:
-  ret void
-}
-)";
-
-    const char* const kMapGetTemplate = R"(
-define <<VALUETYPE>> @axea.map.<<ID>>.get(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %key)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  br label %header
-header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %notfound, label %check
-check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %key)
-  br i1 %c4, label %found, label %next
-next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 <<NEXTIDX>>
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %header
-found:
-  %c7 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  %c8 = load <<VALUETYPE>>, <<VALUETYPEPTR>> %c7
-  ret <<VALUETYPE>> %c8
-notfound:
-  ret <<VALUETYPE>> <<SENTINEL>>
-}
-)";
-
-    const char* const kMapContainsTemplate = R"(
-define i1 @axea.map.<<ID>>.contains(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %key)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  br label %header
-header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %notfound, label %check
-check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %key)
-  br i1 %c4, label %found, label %next
-next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 <<NEXTIDX>>
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %header
-found:
-  ret i1 1
-notfound:
-  ret i1 0
-}
-)";
-
-    const char* const kMapRemoveTemplate = R"(
-define void @axea.map.<<ID>>.remove(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %key)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  %prev = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> null, <<ENTRYPTRPTR>> %prev
-  br label %header
-header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %notfound, label %check
-check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %key)
-  br i1 %c4, label %found, label %next
-next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 <<NEXTIDX>>
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c0, <<ENTRYPTRPTR>> %prev
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %header
-found:
-  %p0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %prev
-  %n0 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 <<NEXTIDX>>
-  %n1 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %n0
-  %hasPrev = icmp eq <<ENTRYPTR>> %p0, null
-  br i1 %hasPrev, label %unlink.head, label %unlink.mid
-unlink.head:
-  store <<ENTRYPTR>> %n1, <<ENTRYPTRPTR>> %bucketSlot
-  br label %unlink.done
-unlink.mid:
-  %pn = getelementptr <<ENTRY>>, <<ENTRYPTR>> %p0, i32 0, i32 <<NEXTIDX>>
-  store <<ENTRYPTR>> %n1, <<ENTRYPTRPTR>> %pn
-  br label %unlink.done
-unlink.done:
-  %oldCount = load i32, i32* %cptr
-  %newCount = sub i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  ret void
-notfound:
-  ret void
-}
-)";
-
-    // Set<T> add/contains/remove mirror Map<K,V>'s own set/contains/remove
-    // exactly - just no value field, and "next" sits at field index 1
-    // instead of 2 (handled via <<NEXTIDX>> above too, shared with the Map
-    // templates - Set's own resize reuses kMapResizeTemplate directly, since
-    // it never touches a value field either).
-    const char* const kSetAddTemplate = R"(
-define void @axea.set.<<ID>>.add(<<HEADERPTR>> %h, <<KEYTYPE>> %value) {
-entry:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %value)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  br label %search.header
-search.header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %insert, label %search.check
-search.check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %value)
-  br i1 %c4, label %already, label %search.next
-search.next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %search.header
-already:
-  ret void
-insert:
-  %sizePtr2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> null, i32 1
-  %sizeInt = ptrtoint <<ENTRYPTR>> %sizePtr2 to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newEntry = bitcast i8* %raw to <<ENTRYPTR>>
-  %kp = getelementptr <<ENTRY>>, <<ENTRYPTR>> %newEntry, i32 0, i32 0
-  store <<KEYTYPE>> %value, <<KEYTYPEPTR>> %kp
-  %np = getelementptr <<ENTRY>>, <<ENTRYPTR>> %newEntry, i32 0, i32 1
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %np
-  store <<ENTRYPTR>> %newEntry, <<ENTRYPTRPTR>> %bucketSlot
-  %oldCount = load i32, i32* %cptr
-  %newCount = add i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  %lhs = mul i32 %newCount, 4
-  %rhs = mul i32 %bucketCount, 3
-  %needResize = icmp sgt i32 %lhs, %rhs
-  br i1 %needResize, label %doresize, label %done
-doresize:
-  call void @axea.set.<<ID>>.resize(<<HEADERPTR>> %h)
-  br label %done
-done:
-  ret void
-}
-)";
-
-    const char* const kSetContainsTemplate = R"(
-define i1 @axea.set.<<ID>>.contains(<<HEADERPTR>> %h, <<KEYTYPE>> %value) {
-entry:
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %value)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  br label %header
-header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %notfound, label %check
-check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %value)
-  br i1 %c4, label %found, label %next
-next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %header
-found:
-  ret i1 1
-notfound:
-  ret i1 0
-}
-)";
-
-    const char* const kSetRemoveTemplate = R"(
-define void @axea.set.<<ID>>.remove(<<HEADERPTR>> %h, <<KEYTYPE>> %value) {
-entry:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %bcptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %bptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %bucketCount = load i32, i32* %bcptr
-  %buckets = load <<ENTRYPTRPTR>>, <<ENTRYPTRPTRPTR>> %bptr
-  %hv = call i32 <<HASHFN>>(<<KEYTYPE>> %value)
-  %mask = sub i32 %bucketCount, 1
-  %bucketIdx = and i32 %hv, %mask
-  %bucketSlot = getelementptr <<ENTRYPTR>>, <<ENTRYPTRPTR>> %buckets, i32 %bucketIdx
-  %head = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %bucketSlot
-  %cur = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> %head, <<ENTRYPTRPTR>> %cur
-  %prev = alloca <<ENTRYPTR>>
-  store <<ENTRYPTR>> null, <<ENTRYPTRPTR>> %prev
-  br label %header
-header:
-  %c0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %cur
-  %c1 = icmp eq <<ENTRYPTR>> %c0, null
-  br i1 %c1, label %notfound, label %check
-check:
-  %c2 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 0
-  %c3 = load <<KEYTYPE>>, <<KEYTYPEPTR>> %c2
-  %c4 = call i1 <<EQFN>>(<<KEYTYPE>> %c3, <<KEYTYPE>> %value)
-  br i1 %c4, label %found, label %next
-next:
-  %c5 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  %c6 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %c5
-  store <<ENTRYPTR>> %c0, <<ENTRYPTRPTR>> %prev
-  store <<ENTRYPTR>> %c6, <<ENTRYPTRPTR>> %cur
-  br label %header
-found:
-  %p0 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %prev
-  %n0 = getelementptr <<ENTRY>>, <<ENTRYPTR>> %c0, i32 0, i32 1
-  %n1 = load <<ENTRYPTR>>, <<ENTRYPTRPTR>> %n0
-  %hasPrev = icmp eq <<ENTRYPTR>> %p0, null
-  br i1 %hasPrev, label %unlink.head, label %unlink.mid
-unlink.head:
-  store <<ENTRYPTR>> %n1, <<ENTRYPTRPTR>> %bucketSlot
-  br label %unlink.done
-unlink.mid:
-  %pn = getelementptr <<ENTRY>>, <<ENTRYPTR>> %p0, i32 0, i32 1
-  store <<ENTRYPTR>> %n1, <<ENTRYPTRPTR>> %pn
-  br label %unlink.done
-unlink.done:
-  %oldCount = load i32, i32* %cptr
-  %newCount = sub i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  ret void
-notfound:
-  ret void
-}
-)";
-
-    // LinkedList<T> (see docs/language/0036-linked-lists.md). Each of the
-    // four templates below needs exactly one `br i1` to decide whether the
-    // *opposite* end pointer also needs updating (is the list currently
-    // empty, for push; does it become empty, for pop) - the reason these are
-    // template-text runtime functions (named %registers, real control flow)
-    // rather than inlined the way List<T>.push/.pop are: named LLVM
-    // registers don't have this backend's own "strictly increasing anonymous
-    // register" constraint, unlike the straight-line/loop-only code List's
-    // own emitListPush/emitListPop hand-roll directly. Hand-verified against
-    // real clang (-O0/-O1) in an isolated .ll file before being written here
-    // - see the LinkedList<T> plan/task history.
-    const char* const kLinkedListPushFrontTemplate = R"(
-define void @axea.linkedlist.<<ID>>.push_front(<<HEADERPTR>> %h, <<VALUETYPE>> %value) {
-entry:
-  %sizePtr = getelementptr <<NODE>>, <<NODEPTR>> null, i32 1
-  %sizeInt = ptrtoint <<NODEPTR>> %sizePtr to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newNode = bitcast i8* %raw to <<NODEPTR>>
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 0
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %vp
-  %hp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %oldHead = load <<NODEPTR>>, <<NODEPTRPTR>> %hp
-  %pp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 1
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %pp
-  %np = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 2
-  store <<NODEPTR>> %oldHead, <<NODEPTRPTR>> %np
-  %isEmpty = icmp eq <<NODEPTR>> %oldHead, null
-  br i1 %isEmpty, label %emptycase, label %nonemptycase
-emptycase:
-  %tp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %tp
-  br label %merge
-nonemptycase:
-  %ohpp = getelementptr <<NODE>>, <<NODEPTR>> %oldHead, i32 0, i32 1
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %ohpp
-  br label %merge
-merge:
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %hp
-  %lp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldLen = load i32, i32* %lp
-  %newLen = add i32 %oldLen, 1
-  store i32 %newLen, i32* %lp
-  ret void
-}
-)";
-
-    const char* const kLinkedListPushBackTemplate = R"(
-define void @axea.linkedlist.<<ID>>.push_back(<<HEADERPTR>> %h, <<VALUETYPE>> %value) {
-entry:
-  %sizePtr = getelementptr <<NODE>>, <<NODEPTR>> null, i32 1
-  %sizeInt = ptrtoint <<NODEPTR>> %sizePtr to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newNode = bitcast i8* %raw to <<NODEPTR>>
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 0
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %vp
-  %tp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %oldTail = load <<NODEPTR>>, <<NODEPTRPTR>> %tp
-  %np = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 2
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %np
-  %pp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 1
-  store <<NODEPTR>> %oldTail, <<NODEPTRPTR>> %pp
-  %isEmpty = icmp eq <<NODEPTR>> %oldTail, null
-  br i1 %isEmpty, label %emptycase, label %nonemptycase
-emptycase:
-  %hp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %hp
-  br label %merge
-nonemptycase:
-  %otnp = getelementptr <<NODE>>, <<NODEPTR>> %oldTail, i32 0, i32 2
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %otnp
-  br label %merge
-merge:
-  store <<NODEPTR>> %newNode, <<NODEPTRPTR>> %tp
-  %lp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldLen = load i32, i32* %lp
-  %newLen = add i32 %oldLen, 1
-  store i32 %newLen, i32* %lp
-  ret void
-}
-)";
-
-    const char* const kLinkedListPopFrontTemplate = R"(
-define <<VALUETYPE>> @axea.linkedlist.<<ID>>.pop_front(<<HEADERPTR>> %h) {
-entry:
-  %hp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %oldHead = load <<NODEPTR>>, <<NODEPTRPTR>> %hp
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %oldHead, i32 0, i32 0
-  %value = load <<VALUETYPE>>, <<VALUETYPEPTR>> %vp
-  %np = getelementptr <<NODE>>, <<NODEPTR>> %oldHead, i32 0, i32 2
-  %newHead = load <<NODEPTR>>, <<NODEPTRPTR>> %np
-  %isNowEmpty = icmp eq <<NODEPTR>> %newHead, null
-  br i1 %isNowEmpty, label %emptycase, label %nonemptycase
-emptycase:
-  %tp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %tp
-  br label %merge
-nonemptycase:
-  %nhpp = getelementptr <<NODE>>, <<NODEPTR>> %newHead, i32 0, i32 1
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %nhpp
-  br label %merge
-merge:
-  store <<NODEPTR>> %newHead, <<NODEPTRPTR>> %hp
-  %lp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldLen = load i32, i32* %lp
-  %newLen = sub i32 %oldLen, 1
-  store i32 %newLen, i32* %lp
-  ret <<VALUETYPE>> %value
-}
-)";
-
-    const char* const kLinkedListPopBackTemplate = R"(
-define <<VALUETYPE>> @axea.linkedlist.<<ID>>.pop_back(<<HEADERPTR>> %h) {
-entry:
-  %tp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 2
-  %oldTail = load <<NODEPTR>>, <<NODEPTRPTR>> %tp
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %oldTail, i32 0, i32 0
-  %value = load <<VALUETYPE>>, <<VALUETYPEPTR>> %vp
-  %pp = getelementptr <<NODE>>, <<NODEPTR>> %oldTail, i32 0, i32 1
-  %newTail = load <<NODEPTR>>, <<NODEPTRPTR>> %pp
-  %isNowEmpty = icmp eq <<NODEPTR>> %newTail, null
-  br i1 %isNowEmpty, label %emptycase, label %nonemptycase
-emptycase:
-  %hp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %hp
-  br label %merge
-nonemptycase:
-  %ntnp = getelementptr <<NODE>>, <<NODEPTR>> %newTail, i32 0, i32 2
-  store <<NODEPTR>> null, <<NODEPTRPTR>> %ntnp
-  br label %merge
-merge:
-  store <<NODEPTR>> %newTail, <<NODEPTRPTR>> %tp
-  %lp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldLen = load i32, i32* %lp
-  %newLen = sub i32 %oldLen, 1
-  store i32 %newLen, i32* %lp
-  ret <<VALUETYPE>> %value
-}
-)";
-
-    // SortedMap<K,V> (see docs/language/0040-sorted-maps.md) - a real AVL
-    // tree. Node layout: { key, value, height, left, right } (field indices
-    // 0-4). K is always i32 (the only orderable type this phase, enforced by
-    // TypeChecker), so every comparison below is a direct `icmp slt`/`icmp
-    // sgt i32`, not a generic comparator call the way Map<K,V>'s own
-    // hash/equality is. Like every other loop in this backend, no `phi` -
-    // mutable loop-carried state (minValueNode's own descent, the two
-    // out-parameters insertNode/removeNode use to report back whether they
-    // actually inserted/removed) lives in `alloca`d slots, read/written via
-    // named (not numbered) registers - the same convention
-    // kMapSetTemplate/kLinkedListPushFrontTemplate above already establish
-    // for hand-written runtime-function text. Unlike every push/pop in this
-    // backend, `remove` never calls `free` on the unlinked node - matches
-    // this codebase's established "leak, don't free" policy (see
-    // kMapRemoveTemplate above: Map<K,V>.remove doesn't free its entry
-    // either).
-    const char* const kSortedMapHeightTemplate = R"(
-define i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %n) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %n, null
-  br i1 %isnull, label %isnullcase, label %notnullcase
-isnullcase:
-  ret i32 0
-notnullcase:
-  %hp = getelementptr <<NODE>>, <<NODEPTR>> %n, i32 0, i32 2
-  %h = load i32, i32* %hp
-  ret i32 %h
-}
-)";
-
-    // Classic single right rotation: y is the unbalanced node, x = y.left
-    // becomes the new subtree root.
-    const char* const kSortedMapRotateRightTemplate = R"(
-define <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %y) {
-entry:
-  %ylp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 3
-  %x = load <<NODEPTR>>, <<NODEPTR>>* %ylp
-  %xlp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 3
-  %xl = load <<NODEPTR>>, <<NODEPTR>>* %xlp
-  %xrp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 4
-  %t2 = load <<NODEPTR>>, <<NODEPTR>>* %xrp
-  %yrp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 4
-  %yr = load <<NODEPTR>>, <<NODEPTR>>* %yrp
-  store <<NODEPTR>> %y, <<NODEPTR>>* %xrp
-  store <<NODEPTR>> %t2, <<NODEPTR>>* %ylp
-  %ylh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %t2)
-  %yrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %yr)
-  %ycmp = icmp sgt i32 %ylh, %yrh
-  %ymax = select i1 %ycmp, i32 %ylh, i32 %yrh
-  %ynewh = add i32 %ymax, 1
-  %yhp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 2
-  store i32 %ynewh, i32* %yhp
-  %xlh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %xl)
-  %xrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %y)
-  %xcmp = icmp sgt i32 %xlh, %xrh
-  %xmax = select i1 %xcmp, i32 %xlh, i32 %xrh
-  %xnewh = add i32 %xmax, 1
-  %xhp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 2
-  store i32 %xnewh, i32* %xhp
-  ret <<NODEPTR>> %x
-}
-)";
-
-    // Mirror image of rotateRight above: x is the unbalanced node, y = x.right
-    // becomes the new subtree root.
-    const char* const kSortedMapRotateLeftTemplate = R"(
-define <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %x) {
-entry:
-  %xrp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 4
-  %y = load <<NODEPTR>>, <<NODEPTR>>* %xrp
-  %yrp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 4
-  %yr = load <<NODEPTR>>, <<NODEPTR>>* %yrp
-  %ylp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 3
-  %t2 = load <<NODEPTR>>, <<NODEPTR>>* %ylp
-  %xlp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 3
-  %xl = load <<NODEPTR>>, <<NODEPTR>>* %xlp
-  store <<NODEPTR>> %x, <<NODEPTR>>* %ylp
-  store <<NODEPTR>> %t2, <<NODEPTR>>* %xrp
-  %xlh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %xl)
-  %xrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %t2)
-  %xcmp = icmp sgt i32 %xlh, %xrh
-  %xmax = select i1 %xcmp, i32 %xlh, i32 %xrh
-  %xnewh = add i32 %xmax, 1
-  %xhp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 2
-  store i32 %xnewh, i32* %xhp
-  %ylh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %x)
-  %yrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %yr)
-  %ycmp = icmp sgt i32 %ylh, %yrh
-  %ymax = select i1 %ycmp, i32 %ylh, i32 %yrh
-  %ynewh = add i32 %ymax, 1
-  %yhp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 2
-  store i32 %ynewh, i32* %yhp
-  ret <<NODEPTR>> %y
-}
-)";
-
-    // Recursive AVL insert: descends by key, updates (rather than
-    // duplicating) an existing key, then rebalances on the way back up.
-    // *isNewOut is set exactly once, at whichever base case is reached
-    // (fresh node -> 1, update-in-place -> 0), and threaded unchanged
-    // through every recursive call above it.
-    const char* const kSortedMapInsertNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedmap.<<ID>>.insertNode(<<NODEPTR>> %node, <<KEYTYPE>> %key, <<VALUETYPE>> %value, i1* %isNewOut) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %node, null
-  br i1 %isnull, label %createNew, label %compare
-createNew:
-  %sizePtr = getelementptr <<NODE>>, <<NODEPTR>> null, i32 1
-  %sizeInt = ptrtoint <<NODEPTR>> %sizePtr to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newNode = bitcast i8* %raw to <<NODEPTR>>
-  %kp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 0
-  store <<KEYTYPE>> %key, <<KEYTYPEPTR>> %kp
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 1
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %vp
-  %hp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 2
-  store i32 1, i32* %hp0
-  %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 3
-  store <<NODEPTR>> null, <<NODEPTR>>* %lp0
-  %rp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 4
-  store <<NODEPTR>> null, <<NODEPTR>>* %rp0
-  store i1 1, i1* %isNewOut
-  ret <<NODEPTR>> %newNode
-compare:
-  %kp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp1
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %updateValue
-updateValue:
-  %vp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 1
-  store <<VALUETYPE>> %value, <<VALUETYPEPTR>> %vp1
-  store i1 0, i1* %isNewOut
-  ret <<NODEPTR>> %node
-goLeft:
-  %lp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %oldLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp1
-  %newLeft = call <<NODEPTR>> @axea.sortedmap.<<ID>>.insertNode(<<NODEPTR>> %oldLeft, <<KEYTYPE>> %key, <<VALUETYPE>> %value, i1* %isNewOut)
-  store <<NODEPTR>> %newLeft, <<NODEPTR>>* %lp1
-  br label %rebalance
-goRight:
-  %rp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 4
-  %oldRight = load <<NODEPTR>>, <<NODEPTR>>* %rp1
-  %newRight = call <<NODEPTR>> @axea.sortedmap.<<ID>>.insertNode(<<NODEPTR>> %oldRight, <<KEYTYPE>> %key, <<VALUETYPE>> %value, i1* %isNewOut)
-  store <<NODEPTR>> %newRight, <<NODEPTR>>* %rp1
-  br label %rebalance
-rebalance:
-  %lp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %curLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp2
-  %rp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 4
-  %curRight = load <<NODEPTR>>, <<NODEPTR>>* %rp2
-  %lh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %curLeft)
-  %rh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %curRight)
-  %hcmp = icmp sgt i32 %lh, %rh
-  %hmax = select i1 %hcmp, i32 %lh, i32 %rh
-  %newHeight = add i32 %hmax, 1
-  %hp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  store i32 %newHeight, i32* %hp1
-  %balance = sub i32 %lh, %rh
-  %leftHeavy = icmp sgt i32 %balance, 1
-  br i1 %leftHeavy, label %checkLL, label %checkRightHeavy
-checkLL:
-  %llkp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 0
-  %llkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %llkp
-  %isLL = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %llkey)
-  br i1 %isLL, label %doLL, label %doLR
-doLL:
-  %resultLL = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLL
-doLR:
-  %rotatedLeft = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %curLeft)
-  store <<NODEPTR>> %rotatedLeft, <<NODEPTR>>* %lp2
-  %resultLR = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLR
-checkRightHeavy:
-  %rightHeavy = icmp slt i32 %balance, -1
-  br i1 %rightHeavy, label %checkRR, label %noRebalance
-checkRR:
-  %rrkp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 0
-  %rrkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %rrkp
-  %isRR = call i1 <<LESSFN>>(<<KEYTYPE>> %rrkey, <<KEYTYPE>> %key)
-  br i1 %isRR, label %doRR, label %doRL
-doRR:
-  %resultRR = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRR
-doRL:
-  %rotatedRight = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %curRight)
-  store <<NODEPTR>> %rotatedRight, <<NODEPTR>>* %rp2
-  %resultRL = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRL
-noRebalance:
-  ret <<NODEPTR>> %node
-}
-)";
-
-    // Iterative descent to the leftmost (smallest-key) node of a subtree -
-    // only ever called with a non-null argument (removeNode's own
-    // two-children case, on a subtree it already knows is non-empty).
-    const char* const kSortedMapMinValueNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedmap.<<ID>>.minValueNode(<<NODEPTR>> %node) {
-entry:
-  %cur = alloca <<NODEPTR>>
-  store <<NODEPTR>> %node, <<NODEPTR>>* %cur
-  br label %header
-header:
-  %c0 = load <<NODEPTR>>, <<NODEPTR>>* %cur
-  %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
-  %l = load <<NODEPTR>>, <<NODEPTR>>* %lp
-  %hasLeft = icmp ne <<NODEPTR>> %l, null
-  br i1 %hasLeft, label %body, label %done
-body:
-  store <<NODEPTR>> %l, <<NODEPTR>>* %cur
-  br label %header
-done:
-  ret <<NODEPTR>> %c0
-}
-)";
-
-    // Recursive AVL delete: descends by key; on the found node, splices it
-    // out (0 or 1 child) or replaces its key/value with its in-order
-    // successor and recursively removes that successor from the right
-    // subtree instead (2 children) - then rebalances on the way back up,
-    // the same shape insertNode's own rebalance uses but checking the
-    // *child's own* balance (balanceOf) rather than comparing against a
-    // just-inserted key, since deletion has no such key to compare against.
-    // *isRemovedOut is set only at the "found" point - never touched on a
-    // not-found (null) path or by the internal successor-removal call
-    // (which passes its own throwaway `i1* %dummy` instead).
-    const char* const kSortedMapRemoveNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedmap.<<ID>>.removeNode(<<NODEPTR>> %node, <<KEYTYPE>> %key, i1* %isRemovedOut) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %node, null
-  br i1 %isnull, label %notfound, label %compare
-notfound:
-  ret <<NODEPTR>> null
-compare:
-  %kp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp0
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %foundHere
-goLeft:
-  %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %oldLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp0
-  %newLeft = call <<NODEPTR>> @axea.sortedmap.<<ID>>.removeNode(<<NODEPTR>> %oldLeft, <<KEYTYPE>> %key, i1* %isRemovedOut)
-  store <<NODEPTR>> %newLeft, <<NODEPTR>>* %lp0
-  br label %rebalance
-goRight:
-  %rp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 4
-  %oldRight = load <<NODEPTR>>, <<NODEPTR>>* %rp0
-  %newRight = call <<NODEPTR>> @axea.sortedmap.<<ID>>.removeNode(<<NODEPTR>> %oldRight, <<KEYTYPE>> %key, i1* %isRemovedOut)
-  store <<NODEPTR>> %newRight, <<NODEPTR>>* %rp0
-  br label %rebalance
-foundHere:
-  store i1 1, i1* %isRemovedOut
-  %lp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %left = load <<NODEPTR>>, <<NODEPTR>>* %lp1
-  %rp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 4
-  %right = load <<NODEPTR>>, <<NODEPTR>>* %rp1
-  %leftNull = icmp eq <<NODEPTR>> %left, null
-  br i1 %leftNull, label %noLeft, label %hasLeft
-noLeft:
-  ret <<NODEPTR>> %right
-hasLeft:
-  %rightNull = icmp eq <<NODEPTR>> %right, null
-  br i1 %rightNull, label %onlyLeft, label %twoChildren
-onlyLeft:
-  ret <<NODEPTR>> %left
-twoChildren:
-  %successor = call <<NODEPTR>> @axea.sortedmap.<<ID>>.minValueNode(<<NODEPTR>> %right)
-  %skp = getelementptr <<NODE>>, <<NODEPTR>> %successor, i32 0, i32 0
-  %successorKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %skp
-  %svp = getelementptr <<NODE>>, <<NODEPTR>> %successor, i32 0, i32 1
-  %successorValue = load <<VALUETYPE>>, <<VALUETYPEPTR>> %svp
-  store <<KEYTYPE>> %successorKey, <<KEYTYPEPTR>> %kp0
-  %vp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 1
-  store <<VALUETYPE>> %successorValue, <<VALUETYPEPTR>> %vp0
-  %dummy = alloca i1
-  %newRight2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.removeNode(<<NODEPTR>> %right, <<KEYTYPE>> %successorKey, i1* %dummy)
-  store <<NODEPTR>> %newRight2, <<NODEPTR>>* %rp1
-  br label %rebalance
-rebalance:
-  %lp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %curLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp2
-  %rp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 4
-  %curRight = load <<NODEPTR>>, <<NODEPTR>>* %rp2
-  %lh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %curLeft)
-  %rh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %curRight)
-  %hcmp = icmp sgt i32 %lh, %rh
-  %hmax = select i1 %hcmp, i32 %lh, i32 %rh
-  %newHeight = add i32 %hmax, 1
-  %hp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  store i32 %newHeight, i32* %hp1
-  %balance = sub i32 %lh, %rh
-  %leftHeavy = icmp sgt i32 %balance, 1
-  br i1 %leftHeavy, label %checkLeftBalance, label %checkRightHeavy
-checkLeftBalance:
-  %cllp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 3
-  %cll = load <<NODEPTR>>, <<NODEPTR>>* %cllp
-  %clrp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 4
-  %clr = load <<NODEPTR>>, <<NODEPTR>>* %clrp
-  %cllh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %cll)
-  %clrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %clr)
-  %leftBalance = sub i32 %cllh, %clrh
-  %isLL2 = icmp sge i32 %leftBalance, 0
-  br i1 %isLL2, label %doLL2, label %doLR2
-doLL2:
-  %resultLL2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLL2
-doLR2:
-  %rotatedLeft2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %curLeft)
-  store <<NODEPTR>> %rotatedLeft2, <<NODEPTR>>* %lp2
-  %resultLR2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLR2
-checkRightHeavy:
-  %rightHeavy = icmp slt i32 %balance, -1
-  br i1 %rightHeavy, label %checkRightBalance, label %noRebalance2
-checkRightBalance:
-  %crlp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 3
-  %crl = load <<NODEPTR>>, <<NODEPTR>>* %crlp
-  %crrp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 4
-  %crr = load <<NODEPTR>>, <<NODEPTR>>* %crrp
-  %crlh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %crl)
-  %crrh = call i32 @axea.sortedmap.<<ID>>.height(<<NODEPTR>> %crr)
-  %rightBalance = sub i32 %crlh, %crrh
-  %isRR2 = icmp sle i32 %rightBalance, 0
-  br i1 %isRR2, label %doRR2, label %doRL2
-doRR2:
-  %resultRR2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRR2
-doRL2:
-  %rotatedRight2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateRight(<<NODEPTR>> %curRight)
-  store <<NODEPTR>> %rotatedRight2, <<NODEPTR>>* %rp2
-  %resultRL2 = call <<NODEPTR>> @axea.sortedmap.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRL2
-noRebalance2:
-  ret <<NODEPTR>> %node
-}
-)";
-
-    const char* const kSortedMapSetTemplate = R"(
-define void @axea.sortedmap.<<ID>>.set(<<HEADERPTR>> %h, <<KEYTYPE>> %key, <<VALUETYPE>> %value) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %isNew = alloca i1
-  store i1 0, i1* %isNew
-  %newRoot = call <<NODEPTR>> @axea.sortedmap.<<ID>>.insertNode(<<NODEPTR>> %root, <<KEYTYPE>> %key, <<VALUETYPE>> %value, i1* %isNew)
-  store <<NODEPTR>> %newRoot, <<NODEPTR>>* %rootp
-  %wasNew = load i1, i1* %isNew
-  br i1 %wasNew, label %incCount, label %done
-incCount:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldCount = load i32, i32* %cptr
-  %newCount = add i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  br label %done
-done:
-  ret void
-}
-)";
-
-    const char* const kSortedMapGetTemplate = R"(
-define <<VALUETYPE>> @axea.sortedmap.<<ID>>.get(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %cur = alloca <<NODEPTR>>
-  store <<NODEPTR>> %root, <<NODEPTR>>* %cur
-  br label %header
-header:
-  %c0 = load <<NODEPTR>>, <<NODEPTR>>* %cur
-  %isnull = icmp eq <<NODEPTR>> %c0, null
-  br i1 %isnull, label %notfound, label %check
-check:
-  %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %found
-goLeft:
-  %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
-  %l = load <<NODEPTR>>, <<NODEPTR>>* %lp
-  store <<NODEPTR>> %l, <<NODEPTR>>* %cur
-  br label %header
-goRight:
-  %rp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 4
-  %r = load <<NODEPTR>>, <<NODEPTR>>* %rp
-  store <<NODEPTR>> %r, <<NODEPTR>>* %cur
-  br label %header
-found:
-  %vp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 1
-  %v = load <<VALUETYPE>>, <<VALUETYPEPTR>> %vp
-  ret <<VALUETYPE>> %v
-notfound:
-  ret <<VALUETYPE>> <<SENTINEL>>
-}
-)";
-
-    const char* const kSortedMapContainsTemplate = R"(
-define i1 @axea.sortedmap.<<ID>>.contains(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %cur = alloca <<NODEPTR>>
-  store <<NODEPTR>> %root, <<NODEPTR>>* %cur
-  br label %header
-header:
-  %c0 = load <<NODEPTR>>, <<NODEPTR>>* %cur
-  %isnull = icmp eq <<NODEPTR>> %c0, null
-  br i1 %isnull, label %notfound, label %check
-check:
-  %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %found
-goLeft:
-  %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
-  %l = load <<NODEPTR>>, <<NODEPTR>>* %lp
-  store <<NODEPTR>> %l, <<NODEPTR>>* %cur
-  br label %header
-goRight:
-  %rp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 4
-  %r = load <<NODEPTR>>, <<NODEPTR>>* %rp
-  store <<NODEPTR>> %r, <<NODEPTR>>* %cur
-  br label %header
-found:
-  ret i1 1
-notfound:
-  ret i1 0
-}
-)";
-
-    const char* const kSortedMapRemoveTemplate = R"(
-define void @axea.sortedmap.<<ID>>.remove(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %isRemoved = alloca i1
-  store i1 0, i1* %isRemoved
-  %newRoot = call <<NODEPTR>> @axea.sortedmap.<<ID>>.removeNode(<<NODEPTR>> %root, <<KEYTYPE>> %key, i1* %isRemoved)
-  store <<NODEPTR>> %newRoot, <<NODEPTR>>* %rootp
-  %wasRemoved = load i1, i1* %isRemoved
-  br i1 %wasRemoved, label %decCount, label %done
-decCount:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldCount = load i32, i32* %cptr
-  %newCount = sub i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  br label %done
-done:
-  ret void
-}
-)";
-
-    // SortedSet<T> (see docs/language/0041-sorted-sets.md) - the same real
-    // AVL tree SortedMap<K,V> uses above, minus the value field: node
-    // layout is { key, height, left, right } (field indices 0-3, shifted
-    // down by one from SortedMap<K,V>'s own 0-1-3-4 since there's no value
-    // at index 1). `insertNode`'s "already present" base case needs no
-    // update-in-place step (there's no value to update) - it just reports
-    // "not new" and returns the node unchanged. Every other shape (rotation
-    // primitives, rebalance logic, successor-splicing two-children removal,
-    // no `free`, no `phi`) is identical to SortedMap<K,V>'s own; see that
-    // type's own Design section for the full explanation.
-    const char* const kSortedSetHeightTemplate = R"(
-define i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %n) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %n, null
-  br i1 %isnull, label %isnullcase, label %notnullcase
-isnullcase:
-  ret i32 0
-notnullcase:
-  %hp = getelementptr <<NODE>>, <<NODEPTR>> %n, i32 0, i32 1
-  %h = load i32, i32* %hp
-  ret i32 %h
-}
-)";
-
-    const char* const kSortedSetRotateRightTemplate = R"(
-define <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %y) {
-entry:
-  %ylp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 2
-  %x = load <<NODEPTR>>, <<NODEPTR>>* %ylp
-  %xlp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 2
-  %xl = load <<NODEPTR>>, <<NODEPTR>>* %xlp
-  %xrp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 3
-  %t2 = load <<NODEPTR>>, <<NODEPTR>>* %xrp
-  %yrp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 3
-  %yr = load <<NODEPTR>>, <<NODEPTR>>* %yrp
-  store <<NODEPTR>> %y, <<NODEPTR>>* %xrp
-  store <<NODEPTR>> %t2, <<NODEPTR>>* %ylp
-  %ylh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %t2)
-  %yrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %yr)
-  %ycmp = icmp sgt i32 %ylh, %yrh
-  %ymax = select i1 %ycmp, i32 %ylh, i32 %yrh
-  %ynewh = add i32 %ymax, 1
-  %yhp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 1
-  store i32 %ynewh, i32* %yhp
-  %xlh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %xl)
-  %xrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %y)
-  %xcmp = icmp sgt i32 %xlh, %xrh
-  %xmax = select i1 %xcmp, i32 %xlh, i32 %xrh
-  %xnewh = add i32 %xmax, 1
-  %xhp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 1
-  store i32 %xnewh, i32* %xhp
-  ret <<NODEPTR>> %x
-}
-)";
-
-    const char* const kSortedSetRotateLeftTemplate = R"(
-define <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %x) {
-entry:
-  %xrp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 3
-  %y = load <<NODEPTR>>, <<NODEPTR>>* %xrp
-  %yrp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 3
-  %yr = load <<NODEPTR>>, <<NODEPTR>>* %yrp
-  %ylp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 2
-  %t2 = load <<NODEPTR>>, <<NODEPTR>>* %ylp
-  %xlp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 2
-  %xl = load <<NODEPTR>>, <<NODEPTR>>* %xlp
-  store <<NODEPTR>> %x, <<NODEPTR>>* %ylp
-  store <<NODEPTR>> %t2, <<NODEPTR>>* %xrp
-  %xlh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %xl)
-  %xrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %t2)
-  %xcmp = icmp sgt i32 %xlh, %xrh
-  %xmax = select i1 %xcmp, i32 %xlh, i32 %xrh
-  %xnewh = add i32 %xmax, 1
-  %xhp = getelementptr <<NODE>>, <<NODEPTR>> %x, i32 0, i32 1
-  store i32 %xnewh, i32* %xhp
-  %ylh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %x)
-  %yrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %yr)
-  %ycmp = icmp sgt i32 %ylh, %yrh
-  %ymax = select i1 %ycmp, i32 %ylh, i32 %yrh
-  %ynewh = add i32 %ymax, 1
-  %yhp = getelementptr <<NODE>>, <<NODEPTR>> %y, i32 0, i32 1
-  store i32 %ynewh, i32* %yhp
-  ret <<NODEPTR>> %y
-}
-)";
-
-    const char* const kSortedSetInsertNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedset.<<ID>>.insertNode(<<NODEPTR>> %node, <<KEYTYPE>> %key, i1* %isNewOut) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %node, null
-  br i1 %isnull, label %createNew, label %compare
-createNew:
-  %sizePtr = getelementptr <<NODE>>, <<NODEPTR>> null, i32 1
-  %sizeInt = ptrtoint <<NODEPTR>> %sizePtr to i64
-  %raw = call i8* @malloc(i64 %sizeInt)
-  %newNode = bitcast i8* %raw to <<NODEPTR>>
-  %kp = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 0
-  store <<KEYTYPE>> %key, <<KEYTYPEPTR>> %kp
-  %hp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 1
-  store i32 1, i32* %hp0
-  %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 2
-  store <<NODEPTR>> null, <<NODEPTR>>* %lp0
-  %rp0 = getelementptr <<NODE>>, <<NODEPTR>> %newNode, i32 0, i32 3
-  store <<NODEPTR>> null, <<NODEPTR>>* %rp0
-  store i1 1, i1* %isNewOut
-  ret <<NODEPTR>> %newNode
-compare:
-  %kp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp1
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %alreadyPresent
-alreadyPresent:
-  store i1 0, i1* %isNewOut
-  ret <<NODEPTR>> %node
-goLeft:
-  %lp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  %oldLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp1
-  %newLeft = call <<NODEPTR>> @axea.sortedset.<<ID>>.insertNode(<<NODEPTR>> %oldLeft, <<KEYTYPE>> %key, i1* %isNewOut)
-  store <<NODEPTR>> %newLeft, <<NODEPTR>>* %lp1
-  br label %rebalance
-goRight:
-  %rp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %oldRight = load <<NODEPTR>>, <<NODEPTR>>* %rp1
-  %newRight = call <<NODEPTR>> @axea.sortedset.<<ID>>.insertNode(<<NODEPTR>> %oldRight, <<KEYTYPE>> %key, i1* %isNewOut)
-  store <<NODEPTR>> %newRight, <<NODEPTR>>* %rp1
-  br label %rebalance
-rebalance:
-  %lp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  %curLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp2
-  %rp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %curRight = load <<NODEPTR>>, <<NODEPTR>>* %rp2
-  %lh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %curLeft)
-  %rh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %curRight)
-  %hcmp = icmp sgt i32 %lh, %rh
-  %hmax = select i1 %hcmp, i32 %lh, i32 %rh
-  %newHeight = add i32 %hmax, 1
-  %hp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 1
-  store i32 %newHeight, i32* %hp1
-  %balance = sub i32 %lh, %rh
-  %leftHeavy = icmp sgt i32 %balance, 1
-  br i1 %leftHeavy, label %checkLL, label %checkRightHeavy
-checkLL:
-  %llkp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 0
-  %llkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %llkp
-  %isLL = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %llkey)
-  br i1 %isLL, label %doLL, label %doLR
-doLL:
-  %resultLL = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLL
-doLR:
-  %rotatedLeft = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %curLeft)
-  store <<NODEPTR>> %rotatedLeft, <<NODEPTR>>* %lp2
-  %resultLR = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLR
-checkRightHeavy:
-  %rightHeavy = icmp slt i32 %balance, -1
-  br i1 %rightHeavy, label %checkRR, label %noRebalance
-checkRR:
-  %rrkp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 0
-  %rrkey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %rrkp
-  %isRR = call i1 <<LESSFN>>(<<KEYTYPE>> %rrkey, <<KEYTYPE>> %key)
-  br i1 %isRR, label %doRR, label %doRL
-doRR:
-  %resultRR = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRR
-doRL:
-  %rotatedRight = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %curRight)
-  store <<NODEPTR>> %rotatedRight, <<NODEPTR>>* %rp2
-  %resultRL = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRL
-noRebalance:
-  ret <<NODEPTR>> %node
-}
-)";
-
-    const char* const kSortedSetMinValueNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedset.<<ID>>.minValueNode(<<NODEPTR>> %node) {
-entry:
-  %cur = alloca <<NODEPTR>>
-  store <<NODEPTR>> %node, <<NODEPTR>>* %cur
-  br label %header
-header:
-  %c0 = load <<NODEPTR>>, <<NODEPTR>>* %cur
-  %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 2
-  %l = load <<NODEPTR>>, <<NODEPTR>>* %lp
-  %hasLeft = icmp ne <<NODEPTR>> %l, null
-  br i1 %hasLeft, label %body, label %done
-body:
-  store <<NODEPTR>> %l, <<NODEPTR>>* %cur
-  br label %header
-done:
-  ret <<NODEPTR>> %c0
-}
-)";
-
-    const char* const kSortedSetRemoveNodeTemplate = R"(
-define <<NODEPTR>> @axea.sortedset.<<ID>>.removeNode(<<NODEPTR>> %node, <<KEYTYPE>> %key, i1* %isRemovedOut) {
-entry:
-  %isnull = icmp eq <<NODEPTR>> %node, null
-  br i1 %isnull, label %notfound, label %compare
-notfound:
-  ret <<NODEPTR>> null
-compare:
-  %kp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp0
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %foundHere
-goLeft:
-  %lp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  %oldLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp0
-  %newLeft = call <<NODEPTR>> @axea.sortedset.<<ID>>.removeNode(<<NODEPTR>> %oldLeft, <<KEYTYPE>> %key, i1* %isRemovedOut)
-  store <<NODEPTR>> %newLeft, <<NODEPTR>>* %lp0
-  br label %rebalance
-goRight:
-  %rp0 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %oldRight = load <<NODEPTR>>, <<NODEPTR>>* %rp0
-  %newRight = call <<NODEPTR>> @axea.sortedset.<<ID>>.removeNode(<<NODEPTR>> %oldRight, <<KEYTYPE>> %key, i1* %isRemovedOut)
-  store <<NODEPTR>> %newRight, <<NODEPTR>>* %rp0
-  br label %rebalance
-foundHere:
-  store i1 1, i1* %isRemovedOut
-  %lp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  %left = load <<NODEPTR>>, <<NODEPTR>>* %lp1
-  %rp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %right = load <<NODEPTR>>, <<NODEPTR>>* %rp1
-  %leftNull = icmp eq <<NODEPTR>> %left, null
-  br i1 %leftNull, label %noLeft, label %hasLeft
-noLeft:
-  ret <<NODEPTR>> %right
-hasLeft:
-  %rightNull = icmp eq <<NODEPTR>> %right, null
-  br i1 %rightNull, label %onlyLeft, label %twoChildren
-onlyLeft:
-  ret <<NODEPTR>> %left
-twoChildren:
-  %successor = call <<NODEPTR>> @axea.sortedset.<<ID>>.minValueNode(<<NODEPTR>> %right)
-  %skp = getelementptr <<NODE>>, <<NODEPTR>> %successor, i32 0, i32 0
-  %successorKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %skp
-  store <<KEYTYPE>> %successorKey, <<KEYTYPEPTR>> %kp0
-  %dummy = alloca i1
-  %newRight2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.removeNode(<<NODEPTR>> %right, <<KEYTYPE>> %successorKey, i1* %dummy)
-  store <<NODEPTR>> %newRight2, <<NODEPTR>>* %rp1
-  br label %rebalance
-rebalance:
-  %lp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 2
-  %curLeft = load <<NODEPTR>>, <<NODEPTR>>* %lp2
-  %rp2 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 3
-  %curRight = load <<NODEPTR>>, <<NODEPTR>>* %rp2
-  %lh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %curLeft)
-  %rh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %curRight)
-  %hcmp = icmp sgt i32 %lh, %rh
-  %hmax = select i1 %hcmp, i32 %lh, i32 %rh
-  %newHeight = add i32 %hmax, 1
-  %hp1 = getelementptr <<NODE>>, <<NODEPTR>> %node, i32 0, i32 1
-  store i32 %newHeight, i32* %hp1
-  %balance = sub i32 %lh, %rh
-  %leftHeavy = icmp sgt i32 %balance, 1
-  br i1 %leftHeavy, label %checkLeftBalance, label %checkRightHeavy
-checkLeftBalance:
-  %cllp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 2
-  %cll = load <<NODEPTR>>, <<NODEPTR>>* %cllp
-  %clrp = getelementptr <<NODE>>, <<NODEPTR>> %curLeft, i32 0, i32 3
-  %clr = load <<NODEPTR>>, <<NODEPTR>>* %clrp
-  %cllh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %cll)
-  %clrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %clr)
-  %leftBalance = sub i32 %cllh, %clrh
-  %isLL2 = icmp sge i32 %leftBalance, 0
-  br i1 %isLL2, label %doLL2, label %doLR2
-doLL2:
-  %resultLL2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLL2
-doLR2:
-  %rotatedLeft2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %curLeft)
-  store <<NODEPTR>> %rotatedLeft2, <<NODEPTR>>* %lp2
-  %resultLR2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultLR2
-checkRightHeavy:
-  %rightHeavy = icmp slt i32 %balance, -1
-  br i1 %rightHeavy, label %checkRightBalance, label %noRebalance2
-checkRightBalance:
-  %crlp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 2
-  %crl = load <<NODEPTR>>, <<NODEPTR>>* %crlp
-  %crrp = getelementptr <<NODE>>, <<NODEPTR>> %curRight, i32 0, i32 3
-  %crr = load <<NODEPTR>>, <<NODEPTR>>* %crrp
-  %crlh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %crl)
-  %crrh = call i32 @axea.sortedset.<<ID>>.height(<<NODEPTR>> %crr)
-  %rightBalance = sub i32 %crlh, %crrh
-  %isRR2 = icmp sle i32 %rightBalance, 0
-  br i1 %isRR2, label %doRR2, label %doRL2
-doRR2:
-  %resultRR2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRR2
-doRL2:
-  %rotatedRight2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateRight(<<NODEPTR>> %curRight)
-  store <<NODEPTR>> %rotatedRight2, <<NODEPTR>>* %rp2
-  %resultRL2 = call <<NODEPTR>> @axea.sortedset.<<ID>>.rotateLeft(<<NODEPTR>> %node)
-  ret <<NODEPTR>> %resultRL2
-noRebalance2:
-  ret <<NODEPTR>> %node
-}
-)";
-
-    const char* const kSortedSetAddTemplate = R"(
-define void @axea.sortedset.<<ID>>.add(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %isNew = alloca i1
-  store i1 0, i1* %isNew
-  %newRoot = call <<NODEPTR>> @axea.sortedset.<<ID>>.insertNode(<<NODEPTR>> %root, <<KEYTYPE>> %key, i1* %isNew)
-  store <<NODEPTR>> %newRoot, <<NODEPTR>>* %rootp
-  %wasNew = load i1, i1* %isNew
-  br i1 %wasNew, label %incCount, label %done
-incCount:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldCount = load i32, i32* %cptr
-  %newCount = add i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  br label %done
-done:
-  ret void
-}
-)";
-
-    const char* const kSortedSetContainsTemplate = R"(
-define i1 @axea.sortedset.<<ID>>.contains(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %cur = alloca <<NODEPTR>>
-  store <<NODEPTR>> %root, <<NODEPTR>>* %cur
-  br label %header
-header:
-  %c0 = load <<NODEPTR>>, <<NODEPTR>>* %cur
-  %isnull = icmp eq <<NODEPTR>> %c0, null
-  br i1 %isnull, label %notfound, label %check
-check:
-  %kp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 0
-  %nodeKey = load <<KEYTYPE>>, <<KEYTYPEPTR>> %kp
-  %lessThan = call i1 <<LESSFN>>(<<KEYTYPE>> %key, <<KEYTYPE>> %nodeKey)
-  br i1 %lessThan, label %goLeft, label %checkGreater
-checkGreater:
-  %greaterThan = call i1 <<LESSFN>>(<<KEYTYPE>> %nodeKey, <<KEYTYPE>> %key)
-  br i1 %greaterThan, label %goRight, label %found
-goLeft:
-  %lp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 2
-  %l = load <<NODEPTR>>, <<NODEPTR>>* %lp
-  store <<NODEPTR>> %l, <<NODEPTR>>* %cur
-  br label %header
-goRight:
-  %rp = getelementptr <<NODE>>, <<NODEPTR>> %c0, i32 0, i32 3
-  %r = load <<NODEPTR>>, <<NODEPTR>>* %rp
-  store <<NODEPTR>> %r, <<NODEPTR>>* %cur
-  br label %header
-found:
-  ret i1 1
-notfound:
-  ret i1 0
-}
-)";
-
-    const char* const kSortedSetRemoveTemplate = R"(
-define void @axea.sortedset.<<ID>>.remove(<<HEADERPTR>> %h, <<KEYTYPE>> %key) {
-entry:
-  %rootp = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 1
-  %root = load <<NODEPTR>>, <<NODEPTR>>* %rootp
-  %isRemoved = alloca i1
-  store i1 0, i1* %isRemoved
-  %newRoot = call <<NODEPTR>> @axea.sortedset.<<ID>>.removeNode(<<NODEPTR>> %root, <<KEYTYPE>> %key, i1* %isRemoved)
-  store <<NODEPTR>> %newRoot, <<NODEPTR>>* %rootp
-  %wasRemoved = load i1, i1* %isRemoved
-  br i1 %wasRemoved, label %decCount, label %done
-decCount:
-  %cptr = getelementptr <<HEADERTYPE>>, <<HEADERPTR>> %h, i32 0, i32 0
-  %oldCount = load i32, i32* %cptr
-  %newCount = sub i32 %oldCount, 1
-  store i32 %newCount, i32* %cptr
-  br label %done
-done:
-  ret void
-}
-)";
-} // namespace
-
 std::pair<std::string, std::string>
 LlvmIrEmitter::registerKeyRuntime(const std::string& axeaKeyType)
 {
@@ -4754,10 +3079,9 @@ notequal:
     if (structs_.contains(axeaKeyType))
     {
         // Name-based, not numeric - struct names are already unique valid
-        // identifiers, and a struct used as a key in several different
-        // Map/Set instantiations should only ever get one hash/equality
-        // implementation, generated once (mirrors registerKeyRuntime's own
-        // memoization above). Recurses into each field's own
+        // identifiers, and a struct used as a key across several different
+        // `hash<T>()`/`keyEq<T>()` call sites should only ever get one hash/equality
+        // implementation, generated once (mirrors registerKeyRuntime's own memoization above). Recurses into each field's own
         // registerKeyRuntime - safe from infinite recursion on a self-/
         // mutually-recursive struct chain, since TypeChecker::isHashable
         // already rejected any key type where that's possible before this
@@ -4832,10 +3156,8 @@ notequal:
     if (!axeaKeyType.empty() && axeaKeyType.front() == '[')
     {
         // "[elem;N]" - a key *shape*, not a named type, so a synthetic
-        // numeric ID (own ID space, separate from Map/Set's own
-        // instantiation IDs - see nextArrayKeyId_). N is compile-time-known,
-        // so - like emitMapNew's 8-slot bucket zero-init - this unrolls
-        // rather than looping.
+        // numeric ID (own ID space - see nextArrayKeyId_). N is compile-time-known,
+        // so this unrolls rather than looping.
         const auto semicolon = axeaKeyType.find(';');
         const auto closeBracket = axeaKeyType.rfind(']');
         const std::string elementName = axeaKeyType.substr(1, semicolon - 1);
@@ -5124,269 +3446,6 @@ equal:
     throw std::runtime_error("internal error: no order runtime registered for type " + axeaKeyType);
 }
 
-std::string LlvmIrEmitter::registerMapInstantiation(const std::string& keyAxeaType,
-                                                    const std::string& valueAxeaType)
-{
-    const std::string canonical = "Map<" + keyAxeaType + "," + valueAxeaType + ">";
-    if (const auto it = mapInstantiationIds_.find(canonical); it != mapInstantiationIds_.end())
-    {
-        return "{i32, i32, %axea.MapEntry." + std::to_string(it->second) + "**}*";
-    }
-
-    const int id = nextMapInstantiationId_++;
-    mapInstantiationIds_[canonical] = id;
-    const std::string idStr = std::to_string(id);
-
-    const std::string entry = "%axea.MapEntry." + idStr;
-    const std::string entryPtr = entry + "*";
-    const std::string entryPtrPtr = entry + "**";
-    const std::string entryPtrPtrPtr = entry + "***";
-    const std::string headerType = "{i32, i32, " + entryPtrPtr + "}";
-    const std::string headerPtr = headerType + "*";
-    const std::string keyType = llvmType(keyAxeaType);
-    const std::string valueType = llvmType(valueAxeaType);
-    mapValueLlvmTypeById_[id] = valueType;
-    const auto [hashFn, eqFn] = registerKeyRuntime(keyAxeaType);
-
-    mapSetTypeDeclsText_ << entry << " = type { " << keyType << ", " << valueType << ", "
-                         << entryPtr << " }\n";
-
-    const std::vector<std::pair<std::string, std::string>> substitutions{
-        {"<<ENTRYPTRPTRPTR>>", entryPtrPtrPtr},
-        {"<<ENTRYPTRPTR>>", entryPtrPtr},
-        {"<<ENTRYPTR>>", entryPtr},
-        {"<<ENTRY>>", entry},
-        {"<<HEADERPTR>>", headerPtr},
-        {"<<HEADERTYPE>>", headerType},
-        {"<<KEYTYPEPTR>>", keyType + "*"},
-        {"<<KEYTYPE>>", keyType},
-        {"<<VALUETYPEPTR>>", valueType + "*"},
-        {"<<VALUETYPE>>", valueType},
-        {"<<HASHFN>>", hashFn},
-        {"<<EQFN>>", eqFn},
-        {"<<SENTINEL>>", sentinelFor(valueType)},
-        {"<<NEXTIDX>>", "2"},
-        {"<<KIND>>", "map"},
-        {"<<ID>>", idStr},
-    };
-
-    mapSetRuntimeText_ << fillTemplate(kMapResizeTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kMapSetTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kMapGetTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kMapContainsTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kMapRemoveTemplate, substitutions);
-
-    return headerPtr;
-}
-
-std::string LlvmIrEmitter::registerSetInstantiation(const std::string& elementAxeaType)
-{
-    const std::string canonical = "Set<" + elementAxeaType + ">";
-    if (const auto it = setInstantiationIds_.find(canonical); it != setInstantiationIds_.end())
-    {
-        return "{i32, i32, %axea.SetEntry." + std::to_string(it->second) + "**}*";
-    }
-
-    const int id = nextSetInstantiationId_++;
-    setInstantiationIds_[canonical] = id;
-    const std::string idStr = std::to_string(id);
-
-    const std::string entry = "%axea.SetEntry." + idStr;
-    const std::string entryPtr = entry + "*";
-    const std::string entryPtrPtr = entry + "**";
-    const std::string entryPtrPtrPtr = entry + "***";
-    const std::string headerType = "{i32, i32, " + entryPtrPtr + "}";
-    const std::string headerPtr = headerType + "*";
-    const std::string keyType = llvmType(elementAxeaType);
-    const auto [hashFn, eqFn] = registerKeyRuntime(elementAxeaType);
-
-    mapSetTypeDeclsText_ << entry << " = type { " << keyType << ", " << entryPtr << " }\n";
-
-    const std::vector<std::pair<std::string, std::string>> substitutions{
-        {"<<ENTRYPTRPTRPTR>>", entryPtrPtrPtr},
-        {"<<ENTRYPTRPTR>>", entryPtrPtr},
-        {"<<ENTRYPTR>>", entryPtr},
-        {"<<ENTRY>>", entry},
-        {"<<HEADERPTR>>", headerPtr},
-        {"<<HEADERTYPE>>", headerType},
-        {"<<KEYTYPEPTR>>", keyType + "*"},
-        {"<<KEYTYPE>>", keyType},
-        {"<<HASHFN>>", hashFn},
-        {"<<EQFN>>", eqFn},
-        {"<<NEXTIDX>>", "1"},
-        {"<<KIND>>", "set"},
-        {"<<ID>>", idStr},
-    };
-
-    // Set<T>'s resize is structurally identical to Map<K,V>'s own (it never
-    // touches a value field either) - reuses kMapResizeTemplate directly,
-    // substituting <<NEXTIDX>> = "1" instead of "2".
-    mapSetRuntimeText_ << fillTemplate(kMapResizeTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kSetAddTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kSetContainsTemplate, substitutions);
-    mapSetRuntimeText_ << fillTemplate(kSetRemoveTemplate, substitutions);
-
-    return headerPtr;
-}
-
-std::string LlvmIrEmitter::registerLinkedListInstantiation(const std::string& elementAxeaType)
-{
-    const std::string canonical = "LinkedList<" + elementAxeaType + ">";
-    if (const auto it = linkedListInstantiationIds_.find(canonical);
-        it != linkedListInstantiationIds_.end())
-    {
-        const std::string node = "%axea.LLNode." + std::to_string(it->second);
-        return "{i32, " + node + "*, " + node + "*}*";
-    }
-
-    const int id = nextLinkedListInstantiationId_++;
-    linkedListInstantiationIds_[canonical] = id;
-    const std::string idStr = std::to_string(id);
-
-    const std::string node = "%axea.LLNode." + idStr;
-    const std::string nodePtr = node + "*";
-    const std::string nodePtrPtr = node + "**";
-    const std::string headerType = "{i32, " + nodePtr + ", " + nodePtr + "}";
-    const std::string headerPtr = headerType + "*";
-    const std::string valueType = llvmType(elementAxeaType);
-    linkedListElementLlvmTypeById_[id] = valueType;
-
-    linkedListTypeDeclsText_ << node << " = type { " << valueType << ", " << nodePtr << ", "
-                             << nodePtr << " }\n";
-
-    const std::vector<std::pair<std::string, std::string>> substitutions{
-        {"<<NODEPTRPTR>>", nodePtrPtr},
-        {"<<NODEPTR>>", nodePtr},
-        {"<<NODE>>", node},
-        {"<<HEADERPTR>>", headerPtr},
-        {"<<HEADERTYPE>>", headerType},
-        {"<<VALUETYPEPTR>>", valueType + "*"},
-        {"<<VALUETYPE>>", valueType},
-        {"<<ID>>", idStr},
-    };
-
-    linkedListRuntimeText_ << fillTemplate(kLinkedListPushFrontTemplate, substitutions);
-    linkedListRuntimeText_ << fillTemplate(kLinkedListPushBackTemplate, substitutions);
-    linkedListRuntimeText_ << fillTemplate(kLinkedListPopFrontTemplate, substitutions);
-    linkedListRuntimeText_ << fillTemplate(kLinkedListPopBackTemplate, substitutions);
-
-    return headerPtr;
-}
-
-std::string LlvmIrEmitter::registerSortedMapInstantiation(const std::string& keyAxeaType,
-                                                          const std::string& valueAxeaType)
-{
-    const std::string canonical = "SortedMap<" + keyAxeaType + "," + valueAxeaType + ">";
-    if (const auto it = sortedMapInstantiationIds_.find(canonical);
-        it != sortedMapInstantiationIds_.end())
-    {
-        return "{i32, %axea.SortedMapNode." + std::to_string(it->second) + "*}*";
-    }
-
-    const int id = nextSortedMapInstantiationId_++;
-    sortedMapInstantiationIds_[canonical] = id;
-    const std::string idStr = std::to_string(id);
-
-    const std::string node = "%axea.SortedMapNode." + idStr;
-    const std::string nodePtr = node + "*";
-    const std::string headerType = "{i32, " + nodePtr + "}";
-    const std::string headerPtr = headerType + "*";
-    // K is any of i32/char/str (TypeChecker's own orderability
-    // restriction, TypeChecker::isOrderableKind - see
-    // docs/language/0040-sorted-maps.md); registerOrderRuntime provides
-    // <<LESSFN>>, the single primitive every key comparison in this
-    // template calls through, so no per-kind branching is needed here -
-    // unlike Map<K,V>'s own registerKeyRuntime, which returns *two*
-    // functions (hash+eq) since a tree needs only ordering, never hashing.
-    const std::string keyType = llvmType(keyAxeaType);
-    const std::string valueType = llvmType(valueAxeaType);
-    sortedMapValueLlvmTypeById_[id] = valueType;
-    const std::string lessFn = registerOrderRuntime(keyAxeaType);
-
-    sortedMapTypeDeclsText_ << node << " = type { " << keyType << ", " << valueType << ", i32, "
-                            << nodePtr << ", " << nodePtr << " }\n";
-
-    const std::vector<std::pair<std::string, std::string>> substitutions{
-        {"<<NODEPTR>>", nodePtr},
-        {"<<NODE>>", node},
-        {"<<HEADERPTR>>", headerPtr},
-        {"<<HEADERTYPE>>", headerType},
-        {"<<KEYTYPEPTR>>", keyType + "*"},
-        {"<<KEYTYPE>>", keyType},
-        {"<<VALUETYPEPTR>>", valueType + "*"},
-        {"<<VALUETYPE>>", valueType},
-        {"<<SENTINEL>>", sentinelFor(valueType)},
-        {"<<LESSFN>>", lessFn},
-        {"<<ID>>", idStr},
-    };
-
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapHeightTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapRotateRightTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapRotateLeftTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapInsertNodeTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapMinValueNodeTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapRemoveNodeTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapSetTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapGetTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapContainsTemplate, substitutions);
-    sortedMapRuntimeText_ << fillTemplate(kSortedMapRemoveTemplate, substitutions);
-
-    return headerPtr;
-}
-
-std::string LlvmIrEmitter::registerSortedSetInstantiation(const std::string& elementAxeaType)
-{
-    const std::string canonical = "SortedSet<" + elementAxeaType + ">";
-    if (const auto it = sortedSetInstantiationIds_.find(canonical);
-        it != sortedSetInstantiationIds_.end())
-    {
-        return "{i32, %axea.SortedSetNode." + std::to_string(it->second) + "*}*";
-    }
-
-    const int id = nextSortedSetInstantiationId_++;
-    sortedSetInstantiationIds_[canonical] = id;
-    const std::string idStr = std::to_string(id);
-
-    const std::string node = "%axea.SortedSetNode." + idStr;
-    const std::string nodePtr = node + "*";
-    const std::string headerType = "{i32, " + nodePtr + "}";
-    const std::string headerPtr = headerType + "*";
-    // T is any of i32/char/str (TypeChecker's own orderability
-    // restriction, TypeChecker::isOrderableKind - see
-    // docs/language/0041-sorted-sets.md); registerOrderRuntime provides
-    // <<LESSFN>>, same reasoning as SortedMap<K,V>'s own K above.
-    const std::string keyType = llvmType(elementAxeaType);
-    const std::string lessFn = registerOrderRuntime(elementAxeaType);
-
-    // 4 fields - key, height, left, right - no value field, unlike
-    // SortedMap<K,V>'s own 5-field node.
-    sortedSetTypeDeclsText_ << node << " = type { " << keyType << ", i32, " << nodePtr << ", "
-                            << nodePtr << " }\n";
-
-    const std::vector<std::pair<std::string, std::string>> substitutions{
-        {"<<NODEPTR>>", nodePtr},
-        {"<<NODE>>", node},
-        {"<<HEADERPTR>>", headerPtr},
-        {"<<HEADERTYPE>>", headerType},
-        {"<<KEYTYPEPTR>>", keyType + "*"},
-        {"<<KEYTYPE>>", keyType},
-        {"<<LESSFN>>", lessFn},
-        {"<<ID>>", idStr},
-    };
-
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetHeightTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetRotateRightTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetRotateLeftTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetInsertNodeTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetMinValueNodeTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetRemoveNodeTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetAddTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetContainsTemplate, substitutions);
-    sortedSetRuntimeText_ << fillTemplate(kSortedSetRemoveTemplate, substitutions);
-
-    return headerPtr;
-}
-
 void LlvmIrEmitter::emitStructNew(const IrStructNew& structNew, FunctionContext& fctx)
 {
     const std::string llvmStructType = "%" + structNew.typeName;
@@ -5539,32 +3598,30 @@ void LlvmIrEmitter::emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fc
         return;
     }
 
-    if (isListType(objectType) || isMapType(objectType) || isSetType(objectType) ||
-        isLinkedListType(objectType) || isDequeType(objectType) || isSortedMapType(objectType) ||
-        isSortedSetType(objectType))
+    if (isListType(objectType) ||
+        isDequeType(objectType))
     {
-        // A List's ".length" is field 0 of the {i32, T*} heap record; a
-        // Map/Set's ".length" is field 0 (count) of its own 3-field header
-        // {count, bucketCount, buckets}; a LinkedList's ".length" is field 0
-        // of its own 3-field header {length, head, tail}; a Deque's
+        // A List's ".length" is field 0 of the {i32, T*} heap record; a Deque's
         // ".length" is field 0 (count) of its own 3-field header {count,
-        // start, data}; a SortedMap/SortedSet's ".length" is field 0
-        // (count) of its own 2-field header {count, root} - same GEP
-        // index, same shape, so this branch covers all seven (see
-        // docs/language/0033-lists.md, docs/language/0034-maps-and-sets.md,
-        // docs/language/0036-linked-lists.md, docs/language/0037-deques.md,
-        // docs/language/0040-sorted-maps.md, docs/language/0041-sorted-sets.md).
+        // start, data} - same GEP index, same shape, so this branch covers
+        // both (see docs/language/0033-lists.md,
+        // docs/language/0037-deques.md).
         // Stack<T> (docs/language/0035-stacks.md)
         // needs no branch of its own here at all: llvmType("Stack<T>")
         // produces the *exact same text* llvmType("List<T>") would, so
-        // isListType's own test already matches it - not a coincidence the
-        // way Map/Set's own count field briefly was, but a direct
+        // isListType's own test already matches it - not a coincidence, but a direct
         // consequence of Stack<T> and List<T> being the literal same LLVM
-        // type. isLinkedListType/isDequeType *are* still checked explicitly,
+        // type. isDequeType *is* still checked explicitly,
         // even though this shared field-0-i32 code would coincidentally
-        // handle either header too (unlike Stack<T>, their header shapes
-        // genuinely differ from List<T>'s) - same "explicit, not accidental"
-        // choice Map/Set's own count field made. Unlike an array's
+        // handle its header too (its header shape
+        // genuinely differs from List<T>'s) - same "explicit, not accidental"
+        // reasoning. `LinkedList<T>`/`Map<K,V>`/`Set<T>`/`SortedMap<K,V>`/`SortedSet<T>` are all
+        // real, user-declared generic structs now (see docs/language/0036-linked-lists.md,
+        // docs/language/0034-maps-and-sets.md's own "2026 Update", docs/language/0040-sorted-
+        // maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026 Update")
+        // - their own ".length" goes through ordinary struct field access, not this shared
+        // dispatch anymore - this is the last of these shared-dispatch collections. Unlike an
+        // array's
         // compile-time-constant ".length", this is always a genuine runtime
         // read, and unlike a slice's by-value extractvalue, these are all
         // accessed by pointer, so it's GEP+load.
@@ -5969,354 +4026,6 @@ void LlvmIrEmitter::emitAlloca(const IrAlloca& alloca, FunctionContext& fctx)
     *fctx.out << "  %" << destReg << " = alloca " << elementType << "\n";
     *fctx.out << "  store " << elementType << " " << ref(alloca.initialValue, fctx) << ", "
               << elementType << "* %" << destReg << "\n";
-}
-
-void LlvmIrEmitter::emitMapNew(const IrMapNew& mapNew, FunctionContext& fctx)
-{
-    // Memoized (see registerMapInstantiation) - already registered by
-    // inferTypesInList's own earlier pass over this same instruction, so
-    // this just looks the instantiation's header type back up.
-    const std::string pointerType =
-        llvmType("Map<" + mapNew.keyTypeName + "," + mapNew.valueTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-    const std::string entryPtrType = "%axea.MapEntry." + mapSetInstantiationId(pointerType) + "*";
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawHeaderReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(mapNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawHeaderReg << " to " << pointerType
-              << "\n";
-
-    // Initial 8-slot bucket array (see docs/language/0034-maps-and-sets.md) -
-    // sizeof(%axea.MapEntry*) via the same null-GEP idiom, times the
-    // compile-time-constant 8.
-    const int bucketSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketSizePtrReg << " = getelementptr " << entryPtrType << ", "
-              << entryPtrType << "* null, i32 1\n";
-    const int bucketElemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketElemSizeReg << " = ptrtoint " << entryPtrType << "* %"
-              << bucketSizePtrReg << " to i64\n";
-    const int bucketBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketBytesReg << " = mul i64 8, %" << bucketElemSizeReg << "\n";
-    const int rawBucketsReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawBucketsReg << " = call i8* @malloc(i64 %" << bucketBytesReg << ")\n";
-    const int bucketsReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketsReg << " = bitcast i8* %" << rawBucketsReg << " to "
-              << entryPtrType << "*\n";
-
-    // 8 is a compile-time constant, so the zero-init is unrolled rather than
-    // a real loop (same reasoning emitArrayNew-adjacent code elsewhere in
-    // this file uses for other statically-known-size cases).
-    for (int i = 0; i < 8; ++i)
-    {
-        const int slotPtrReg = allocateRegister(fctx);
-        *fctx.out << "  %" << slotPtrReg << " = getelementptr " << entryPtrType << ", "
-                  << entryPtrType << "* %" << bucketsReg << ", i32 " << i << "\n";
-        *fctx.out << "  store " << entryPtrType << " null, " << entryPtrType << "* %" << slotPtrReg
-                  << "\n";
-    }
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-    const int bucketCountPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketCountPtrReg << " = getelementptr " << headerType << ", "
-              << pointerType << " %" << destReg << ", i32 0, i32 1\n";
-    *fctx.out << "  store i32 8, i32* %" << bucketCountPtrReg << "\n";
-    const int bucketsFieldPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketsFieldPtrReg << " = getelementptr " << headerType << ", "
-              << pointerType << " %" << destReg << ", i32 0, i32 2\n";
-    *fctx.out << "  store " << entryPtrType << "* %" << bucketsReg << ", " << entryPtrType << "** %"
-              << bucketsFieldPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitSetNew(const IrSetNew& setNew, FunctionContext& fctx)
-{
-    // Memoized (see registerSetInstantiation) - already registered by
-    // inferTypesInList's own earlier pass over this same instruction.
-    const std::string pointerType = llvmType("Set<" + setNew.elementTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-    const std::string entryPtrType = "%axea.SetEntry." + mapSetInstantiationId(pointerType) + "*";
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawHeaderReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(setNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawHeaderReg << " to " << pointerType
-              << "\n";
-
-    const int bucketSizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketSizePtrReg << " = getelementptr " << entryPtrType << ", "
-              << entryPtrType << "* null, i32 1\n";
-    const int bucketElemSizeReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketElemSizeReg << " = ptrtoint " << entryPtrType << "* %"
-              << bucketSizePtrReg << " to i64\n";
-    const int bucketBytesReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketBytesReg << " = mul i64 8, %" << bucketElemSizeReg << "\n";
-    const int rawBucketsReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawBucketsReg << " = call i8* @malloc(i64 %" << bucketBytesReg << ")\n";
-    const int bucketsReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketsReg << " = bitcast i8* %" << rawBucketsReg << " to "
-              << entryPtrType << "*\n";
-
-    for (int i = 0; i < 8; ++i)
-    {
-        const int slotPtrReg = allocateRegister(fctx);
-        *fctx.out << "  %" << slotPtrReg << " = getelementptr " << entryPtrType << ", "
-                  << entryPtrType << "* %" << bucketsReg << ", i32 " << i << "\n";
-        *fctx.out << "  store " << entryPtrType << " null, " << entryPtrType << "* %" << slotPtrReg
-                  << "\n";
-    }
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-    const int bucketCountPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketCountPtrReg << " = getelementptr " << headerType << ", "
-              << pointerType << " %" << destReg << ", i32 0, i32 1\n";
-    *fctx.out << "  store i32 8, i32* %" << bucketCountPtrReg << "\n";
-    const int bucketsFieldPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << bucketsFieldPtrReg << " = getelementptr " << headerType << ", "
-              << pointerType << " %" << destReg << ", i32 0, i32 2\n";
-    *fctx.out << "  store " << entryPtrType << "* %" << bucketsReg << ", " << entryPtrType << "** %"
-              << bucketsFieldPtrReg << "\n";
-}
-
-void LlvmIrEmitter::emitMapSet(const IrMapSet& mapSet, FunctionContext& fctx)
-{
-    const std::string mapType = typeOf(mapSet.map, fctx);
-    const std::string id = mapSetInstantiationId(mapType);
-    const std::string keyType = typeOf(mapSet.key, fctx);
-    const std::string valueType = typeOf(mapSet.value, fctx);
-    // Unit-typed (see docs/language/0033-lists.md's identical reasoning for
-    // push) - no defineRegister call, mirroring emitListPush.
-    *fctx.out << "  call void @axea.map." << id << ".set(" << mapType << " "
-              << ref(mapSet.map, fctx) << ", " << keyType << " " << ref(mapSet.key, fctx) << ", "
-              << valueType << " " << ref(mapSet.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitMapGet(const IrMapGet& mapGet, FunctionContext& fctx)
-{
-    const std::string mapType = typeOf(mapGet.map, fctx);
-    const std::string id = mapSetInstantiationId(mapType);
-    const std::string keyType = typeOf(mapGet.key, fctx);
-    const std::string valueType = typeOf(mapGet.dest, fctx);
-    const int destReg = defineRegister(mapGet.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call " << valueType << " @axea.map." << id << ".get("
-              << mapType << " " << ref(mapGet.map, fctx) << ", " << keyType << " "
-              << ref(mapGet.key, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitMapContains(const IrMapContains& mapContains, FunctionContext& fctx)
-{
-    const std::string mapType = typeOf(mapContains.map, fctx);
-    const std::string id = mapSetInstantiationId(mapType);
-    const std::string keyType = typeOf(mapContains.key, fctx);
-    const int destReg = defineRegister(mapContains.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call i1 @axea.map." << id << ".contains(" << mapType << " "
-              << ref(mapContains.map, fctx) << ", " << keyType << " " << ref(mapContains.key, fctx)
-              << ")\n";
-}
-
-void LlvmIrEmitter::emitMapRemove(const IrMapRemove& mapRemove, FunctionContext& fctx)
-{
-    const std::string mapType = typeOf(mapRemove.map, fctx);
-    const std::string id = mapSetInstantiationId(mapType);
-    const std::string keyType = typeOf(mapRemove.key, fctx);
-    *fctx.out << "  call void @axea.map." << id << ".remove(" << mapType << " "
-              << ref(mapRemove.map, fctx) << ", " << keyType << " " << ref(mapRemove.key, fctx)
-              << ")\n";
-}
-
-void LlvmIrEmitter::emitSetAdd(const IrSetAdd& setAdd, FunctionContext& fctx)
-{
-    const std::string setType = typeOf(setAdd.set, fctx);
-    const std::string id = mapSetInstantiationId(setType);
-    const std::string elementType = typeOf(setAdd.value, fctx);
-    *fctx.out << "  call void @axea.set." << id << ".add(" << setType << " "
-              << ref(setAdd.set, fctx) << ", " << elementType << " " << ref(setAdd.value, fctx)
-              << ")\n";
-}
-
-void LlvmIrEmitter::emitSetContains(const IrSetContains& setContains, FunctionContext& fctx)
-{
-    const std::string setType = typeOf(setContains.set, fctx);
-    const std::string id = mapSetInstantiationId(setType);
-    const std::string elementType = typeOf(setContains.value, fctx);
-    const int destReg = defineRegister(setContains.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call i1 @axea.set." << id << ".contains(" << setType << " "
-              << ref(setContains.set, fctx) << ", " << elementType << " "
-              << ref(setContains.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSetRemove(const IrSetRemove& setRemove, FunctionContext& fctx)
-{
-    const std::string setType = typeOf(setRemove.set, fctx);
-    const std::string id = mapSetInstantiationId(setType);
-    const std::string elementType = typeOf(setRemove.value, fctx);
-    *fctx.out << "  call void @axea.set." << id << ".remove(" << setType << " "
-              << ref(setRemove.set, fctx) << ", " << elementType << " "
-              << ref(setRemove.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedMapNew(const IrSortedMapNew& sortedMapNew, FunctionContext& fctx)
-{
-    // A fresh {count: 0, root: null} heap header - same malloc + null-GEP
-    // sizeof idiom as emitStructNew/emitArrayNew, 2 fields, no bucket array
-    // unlike emitMapNew/emitSetNew - a tree needs no initial bucket
-    // allocation, see docs/language/0040-sorted-maps.md.
-    const std::string pointerType =
-        llvmType("SortedMap<" + sortedMapNew.keyTypeName + "," + sortedMapNew.valueTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawHeaderReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(sortedMapNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawHeaderReg << " to " << pointerType
-              << "\n";
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-    const std::string nodePtrType =
-        "%axea.SortedMapNode." + sortedMapInstantiationId(pointerType) + "*";
-    const int rootPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rootPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << nodePtrType << " null, " << nodePtrType << "* %" << rootPtrReg
-              << "\n";
-}
-
-void LlvmIrEmitter::emitSortedMapSet(const IrSortedMapSet& sortedMapSet, FunctionContext& fctx)
-{
-    const std::string sortedMapType = typeOf(sortedMapSet.sortedMap, fctx);
-    const std::string id = sortedMapInstantiationId(sortedMapType);
-    const std::string keyType = typeOf(sortedMapSet.key, fctx);
-    const std::string valueType = typeOf(sortedMapSet.value, fctx);
-    *fctx.out << "  call void @axea.sortedmap." << id << ".set(" << sortedMapType << " "
-              << ref(sortedMapSet.sortedMap, fctx) << ", " << keyType << " "
-              << ref(sortedMapSet.key, fctx) << ", " << valueType << " "
-              << ref(sortedMapSet.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedMapGet(const IrSortedMapGet& sortedMapGet, FunctionContext& fctx)
-{
-    const std::string sortedMapType = typeOf(sortedMapGet.sortedMap, fctx);
-    const std::string id = sortedMapInstantiationId(sortedMapType);
-    const std::string keyType = typeOf(sortedMapGet.key, fctx);
-    const std::string valueType = typeOf(sortedMapGet.dest, fctx);
-    const int destReg = defineRegister(sortedMapGet.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call " << valueType << " @axea.sortedmap." << id << ".get("
-              << sortedMapType << " " << ref(sortedMapGet.sortedMap, fctx) << ", " << keyType << " "
-              << ref(sortedMapGet.key, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedMapContains(const IrSortedMapContains& sortedMapContains,
-                                          FunctionContext& fctx)
-{
-    const std::string sortedMapType = typeOf(sortedMapContains.sortedMap, fctx);
-    const std::string id = sortedMapInstantiationId(sortedMapType);
-    const std::string keyType = typeOf(sortedMapContains.key, fctx);
-    const int destReg = defineRegister(sortedMapContains.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call i1 @axea.sortedmap." << id << ".contains("
-              << sortedMapType << " " << ref(sortedMapContains.sortedMap, fctx) << ", " << keyType
-              << " " << ref(sortedMapContains.key, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedMapRemove(const IrSortedMapRemove& sortedMapRemove,
-                                        FunctionContext& fctx)
-{
-    const std::string sortedMapType = typeOf(sortedMapRemove.sortedMap, fctx);
-    const std::string id = sortedMapInstantiationId(sortedMapType);
-    const std::string keyType = typeOf(sortedMapRemove.key, fctx);
-    *fctx.out << "  call void @axea.sortedmap." << id << ".remove(" << sortedMapType << " "
-              << ref(sortedMapRemove.sortedMap, fctx) << ", " << keyType << " "
-              << ref(sortedMapRemove.key, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedSetNew(const IrSortedSetNew& sortedSetNew, FunctionContext& fctx)
-{
-    // Mirrors emitSortedMapNew exactly - a fresh {count: 0, root: null}
-    // heap header, no bucket array (see docs/language/0041-sorted-sets.md).
-    const std::string pointerType = llvmType("SortedSet<" + sortedSetNew.elementTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-    const int rawHeaderReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawHeaderReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-    const int destReg = defineRegister(sortedSetNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawHeaderReg << " to " << pointerType
-              << "\n";
-
-    const int countPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << countPtrReg << "\n";
-    const std::string nodePtrType =
-        "%axea.SortedSetNode." + sortedSetInstantiationId(pointerType) + "*";
-    const int rootPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rootPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " %" << destReg << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << nodePtrType << " null, " << nodePtrType << "* %" << rootPtrReg
-              << "\n";
-}
-
-void LlvmIrEmitter::emitSortedSetAdd(const IrSortedSetAdd& sortedSetAdd, FunctionContext& fctx)
-{
-    const std::string sortedSetType = typeOf(sortedSetAdd.sortedSet, fctx);
-    const std::string id = sortedSetInstantiationId(sortedSetType);
-    const std::string elementType = typeOf(sortedSetAdd.value, fctx);
-    *fctx.out << "  call void @axea.sortedset." << id << ".add(" << sortedSetType << " "
-              << ref(sortedSetAdd.sortedSet, fctx) << ", " << elementType << " "
-              << ref(sortedSetAdd.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedSetContains(const IrSortedSetContains& sortedSetContains,
-                                          FunctionContext& fctx)
-{
-    const std::string sortedSetType = typeOf(sortedSetContains.sortedSet, fctx);
-    const std::string id = sortedSetInstantiationId(sortedSetType);
-    const std::string elementType = typeOf(sortedSetContains.value, fctx);
-    const int destReg = defineRegister(sortedSetContains.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call i1 @axea.sortedset." << id << ".contains("
-              << sortedSetType << " " << ref(sortedSetContains.sortedSet, fctx) << ", "
-              << elementType << " " << ref(sortedSetContains.value, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitSortedSetRemove(const IrSortedSetRemove& sortedSetRemove,
-                                        FunctionContext& fctx)
-{
-    const std::string sortedSetType = typeOf(sortedSetRemove.sortedSet, fctx);
-    const std::string id = sortedSetInstantiationId(sortedSetType);
-    const std::string elementType = typeOf(sortedSetRemove.value, fctx);
-    *fctx.out << "  call void @axea.sortedset." << id << ".remove(" << sortedSetType << " "
-              << ref(sortedSetRemove.sortedSet, fctx) << ", " << elementType << " "
-              << ref(sortedSetRemove.value, fctx) << ")\n";
 }
 
 void LlvmIrEmitter::emitStringNew(const IrStringNew& stringNew, FunctionContext& fctx)
@@ -8532,95 +6241,6 @@ void LlvmIrEmitter::emitBufferFinish(const IrBufferFinish& bufferFinish, Functio
     *fctx.out << "  store i8* %" << freshDataReg << ", i8** %" << dataPtrPtrReg << "\n";
 }
 
-void LlvmIrEmitter::emitLinkedListNew(const IrLinkedListNew& linkedListNew, FunctionContext& fctx)
-{
-    // Already registered (see registerLinkedListInstantiation) by
-    // inferTypesInList's own earlier pass over this same instruction, so
-    // this just looks the instantiation's header type back up - mirrors
-    // emitMapNew's identical reasoning.
-    const std::string pointerType = llvmType("LinkedList<" + linkedListNew.elementTypeName + ">");
-    const std::string headerType = pointerType.substr(0, pointerType.size() - 1);
-    const std::string nodePtrType = "%axea.LLNode." + linkedListInstantiationId(pointerType) + "*";
-
-    // sizeof({i32, Node*, Node*}) via the standard null-pointer GEP idiom -
-    // same idiom as emitListNew/emitMapNew.
-    const int sizePtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizePtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " null, i32 1\n";
-    const int sizeIntReg = allocateRegister(fctx);
-    *fctx.out << "  %" << sizeIntReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
-              << " to i64\n";
-
-    const int rawPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << rawPtrReg << " = call i8* @malloc(i64 %" << sizeIntReg << ")\n";
-
-    const int destReg = defineRegister(linkedListNew.dest, fctx);
-    *fctx.out << "  %" << destReg << " = bitcast i8* %" << rawPtrReg << " to " << pointerType
-              << "\n";
-
-    const int lenPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << lenPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(linkedListNew.dest, fctx) << ", i32 0, i32 0\n";
-    *fctx.out << "  store i32 0, i32* %" << lenPtrReg << "\n";
-
-    const int headPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << headPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(linkedListNew.dest, fctx) << ", i32 0, i32 1\n";
-    *fctx.out << "  store " << nodePtrType << " null, " << nodePtrType << "* %" << headPtrReg
-              << "\n";
-
-    const int tailPtrReg = allocateRegister(fctx);
-    *fctx.out << "  %" << tailPtrReg << " = getelementptr " << headerType << ", " << pointerType
-              << " " << ref(linkedListNew.dest, fctx) << ", i32 0, i32 2\n";
-    *fctx.out << "  store " << nodePtrType << " null, " << nodePtrType << "* %" << tailPtrReg
-              << "\n";
-}
-
-void LlvmIrEmitter::emitLinkedListPushFront(const IrLinkedListPushFront& pushFront,
-                                            FunctionContext& fctx)
-{
-    const std::string listType = typeOf(pushFront.list, fctx);
-    const std::string id = linkedListInstantiationId(listType);
-    const std::string valueType = typeOf(pushFront.value, fctx);
-    // Unit-typed (see docs/language/0033-lists.md's identical reasoning for
-    // List<T>.push) - no defineRegister call.
-    *fctx.out << "  call void @axea.linkedlist." << id << ".push_front(" << listType << " "
-              << ref(pushFront.list, fctx) << ", " << valueType << " " << ref(pushFront.value, fctx)
-              << ")\n";
-}
-
-void LlvmIrEmitter::emitLinkedListPushBack(const IrLinkedListPushBack& pushBack,
-                                           FunctionContext& fctx)
-{
-    const std::string listType = typeOf(pushBack.list, fctx);
-    const std::string id = linkedListInstantiationId(listType);
-    const std::string valueType = typeOf(pushBack.value, fctx);
-    *fctx.out << "  call void @axea.linkedlist." << id << ".push_back(" << listType << " "
-              << ref(pushBack.list, fctx) << ", " << valueType << " " << ref(pushBack.value, fctx)
-              << ")\n";
-}
-
-void LlvmIrEmitter::emitLinkedListPopFront(const IrLinkedListPopFront& popFront,
-                                           FunctionContext& fctx)
-{
-    const std::string listType = typeOf(popFront.list, fctx);
-    const std::string id = linkedListInstantiationId(listType);
-    const std::string valueType = linkedListElementLlvmType(listType);
-    const int destReg = defineRegister(popFront.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call " << valueType << " @axea.linkedlist." << id
-              << ".pop_front(" << listType << " " << ref(popFront.list, fctx) << ")\n";
-}
-
-void LlvmIrEmitter::emitLinkedListPopBack(const IrLinkedListPopBack& popBack, FunctionContext& fctx)
-{
-    const std::string listType = typeOf(popBack.list, fctx);
-    const std::string id = linkedListInstantiationId(listType);
-    const std::string valueType = linkedListElementLlvmType(listType);
-    const int destReg = defineRegister(popBack.dest, fctx);
-    *fctx.out << "  %" << destReg << " = call " << valueType << " @axea.linkedlist." << id
-              << ".pop_back(" << listType << " " << ref(popBack.list, fctx) << ")\n";
-}
-
 void LlvmIrEmitter::emitBranch(const IrBranch& branch, FunctionContext& fctx)
 {
     const int labelId = fctx.nextLabel++;
@@ -8917,6 +6537,20 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             *fctx.out << "  %" << destReg << " = add i24 0, " << constChar->codepoint << "\n";
             continue;
         }
+        if (const auto* constNull = dynamic_cast<const IrConstNull*>(inst.get()))
+        {
+            // Same "materialize as a trivial SSA value" convention as every other IrConst* above,
+            // adapted for a pointer: the established null-GEP idiom this file already uses for
+            // sizeof<T>() (a compile-time-known offset from a null pointer of the right type) -
+            // offset 0 yields back exactly `null` itself as a real, uniformly-"%N"-addressable
+            // register, not an inlined "null" text constant.
+            const std::string pointerType = typeOf(constNull->dest, fctx);
+            const std::string pointeeType = pointerType.substr(0, pointerType.size() - 1);
+            const int destReg = defineRegister(constNull->dest, fctx);
+            *fctx.out << "  %" << destReg << " = getelementptr " << pointeeType << ", "
+                      << pointerType << " null, i32 0\n";
+            continue;
+        }
         if (const auto* constString = dynamic_cast<const IrConstString*>(inst.get()))
         {
             const std::string& globalName = stringGlobalByLiteral_.at(constString->value);
@@ -8955,8 +6589,19 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             // `ptr + i` / `ptr - i` (see docs/language/0019-unsafe.md) - a single-index GEP,
             // element-scaled automatically by LLVM's own type system, exactly like every slice/
             // List/Array index GEP already is (see emitIndexGet). Minus negates the offset first
-            // so both operators reduce to the identical GEP shape.
-            if (isPointerType(lhsType))
+            // so both operators reduce to the identical GEP shape. Deliberately excludes
+            // EqualEqual/BangEqual (`ptr == ptr2`/`ptr != null`, see docs/language/0019-unsafe.md's
+            // own null-pointer support) - a real, previously-undiscovered bug found while porting
+            // LinkedList<T>'s own self-referential `*Node<T>` traversal: this check used to fire
+            // for *every* operator whenever the left operand was pointer-typed, so a pointer
+            // equality comparison was silently treated as pointer arithmetic instead (emitting a
+            // GEP whose own "offset" operand was the *right-hand pointer value itself*, reinterpreted
+            // as an integer index - malformed IR, not merely wrong results), rather than falling
+            // through to the ordinary `icmp eq`/`icmp ne` path below, which already handles pointer
+            // operands correctly (LLVM's `icmp` accepts pointer types natively). Untested before now
+            // - nothing in this codebase ever compared two pointer values until this port.
+            if (isPointerType(lhsType) && binOp->op != TokenKind::EqualEqual &&
+                binOp->op != TokenKind::BangEqual)
             {
                 const std::string elementType = pointerElementType(lhsType);
                 const std::string rhsType = typeOf(binOp->rhs, fctx);
@@ -9068,6 +6713,30 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             const int destReg = defineRegister(sizeOf->dest, fctx);
             *fctx.out << "  %" << destReg << " = ptrtoint " << pointerType << " %" << sizePtrReg
                       << " to i64\n";
+            continue;
+        }
+
+        if (const auto* hashOf = dynamic_cast<const IrHashOf*>(inst.get()))
+        {
+            // `hash<T>()` (see docs/language/0034-maps-and-sets.md's own "2026 Update") - the same
+            // registerKeyRuntime call Map<K,V>/Set<T>'s own set/get/etc used to make internally
+            // before they became real generic structs, now reachable directly from Axea source.
+            const std::string keyType = llvmType(hashOf->typeName);
+            const auto [hashFn, unusedEqFn] = registerKeyRuntime(hashOf->typeName);
+            const int destReg = defineRegister(hashOf->dest, fctx);
+            *fctx.out << "  %" << destReg << " = call i32 " << hashFn << "(" << keyType << " "
+                      << ref(hashOf->value, fctx) << ")\n";
+            continue;
+        }
+
+        if (const auto* keyEq = dynamic_cast<const IrKeyEq*>(inst.get()))
+        {
+            const std::string keyType = llvmType(keyEq->typeName);
+            const auto [unusedHashFn, eqFn] = registerKeyRuntime(keyEq->typeName);
+            const int destReg = defineRegister(keyEq->dest, fctx);
+            *fctx.out << "  %" << destReg << " = call i1 " << eqFn << "(" << keyType << " "
+                      << ref(keyEq->left, fctx) << ", " << keyType << " " << ref(keyEq->right, fctx)
+                      << ")\n";
             continue;
         }
         if (const auto* call = dynamic_cast<const IrCall*>(inst.get()))
@@ -9271,121 +6940,6 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
         if (const auto* appendValue = dynamic_cast<const IrBufferAppendValue*>(inst.get()))
         {
             emitBufferAppendValue(*appendValue, fctx);
-            continue;
-        }
-        if (const auto* linkedListNew = dynamic_cast<const IrLinkedListNew*>(inst.get()))
-        {
-            emitLinkedListNew(*linkedListNew, fctx);
-            continue;
-        }
-        if (const auto* pushFront = dynamic_cast<const IrLinkedListPushFront*>(inst.get()))
-        {
-            emitLinkedListPushFront(*pushFront, fctx);
-            continue;
-        }
-        if (const auto* pushBack = dynamic_cast<const IrLinkedListPushBack*>(inst.get()))
-        {
-            emitLinkedListPushBack(*pushBack, fctx);
-            continue;
-        }
-        if (const auto* popFront = dynamic_cast<const IrLinkedListPopFront*>(inst.get()))
-        {
-            emitLinkedListPopFront(*popFront, fctx);
-            continue;
-        }
-        if (const auto* popBack = dynamic_cast<const IrLinkedListPopBack*>(inst.get()))
-        {
-            emitLinkedListPopBack(*popBack, fctx);
-            continue;
-        }
-        if (const auto* mapNew = dynamic_cast<const IrMapNew*>(inst.get()))
-        {
-            emitMapNew(*mapNew, fctx);
-            continue;
-        }
-        if (const auto* setNew = dynamic_cast<const IrSetNew*>(inst.get()))
-        {
-            emitSetNew(*setNew, fctx);
-            continue;
-        }
-        if (const auto* mapSet = dynamic_cast<const IrMapSet*>(inst.get()))
-        {
-            emitMapSet(*mapSet, fctx);
-            continue;
-        }
-        if (const auto* mapGet = dynamic_cast<const IrMapGet*>(inst.get()))
-        {
-            emitMapGet(*mapGet, fctx);
-            continue;
-        }
-        if (const auto* mapContains = dynamic_cast<const IrMapContains*>(inst.get()))
-        {
-            emitMapContains(*mapContains, fctx);
-            continue;
-        }
-        if (const auto* mapRemove = dynamic_cast<const IrMapRemove*>(inst.get()))
-        {
-            emitMapRemove(*mapRemove, fctx);
-            continue;
-        }
-        if (const auto* setAdd = dynamic_cast<const IrSetAdd*>(inst.get()))
-        {
-            emitSetAdd(*setAdd, fctx);
-            continue;
-        }
-        if (const auto* setContains = dynamic_cast<const IrSetContains*>(inst.get()))
-        {
-            emitSetContains(*setContains, fctx);
-            continue;
-        }
-        if (const auto* setRemove = dynamic_cast<const IrSetRemove*>(inst.get()))
-        {
-            emitSetRemove(*setRemove, fctx);
-            continue;
-        }
-        if (const auto* sortedMapNew = dynamic_cast<const IrSortedMapNew*>(inst.get()))
-        {
-            emitSortedMapNew(*sortedMapNew, fctx);
-            continue;
-        }
-        if (const auto* sortedMapSet = dynamic_cast<const IrSortedMapSet*>(inst.get()))
-        {
-            emitSortedMapSet(*sortedMapSet, fctx);
-            continue;
-        }
-        if (const auto* sortedMapGet = dynamic_cast<const IrSortedMapGet*>(inst.get()))
-        {
-            emitSortedMapGet(*sortedMapGet, fctx);
-            continue;
-        }
-        if (const auto* sortedMapContains = dynamic_cast<const IrSortedMapContains*>(inst.get()))
-        {
-            emitSortedMapContains(*sortedMapContains, fctx);
-            continue;
-        }
-        if (const auto* sortedMapRemove = dynamic_cast<const IrSortedMapRemove*>(inst.get()))
-        {
-            emitSortedMapRemove(*sortedMapRemove, fctx);
-            continue;
-        }
-        if (const auto* sortedSetNew = dynamic_cast<const IrSortedSetNew*>(inst.get()))
-        {
-            emitSortedSetNew(*sortedSetNew, fctx);
-            continue;
-        }
-        if (const auto* sortedSetAdd = dynamic_cast<const IrSortedSetAdd*>(inst.get()))
-        {
-            emitSortedSetAdd(*sortedSetAdd, fctx);
-            continue;
-        }
-        if (const auto* sortedSetContains = dynamic_cast<const IrSortedSetContains*>(inst.get()))
-        {
-            emitSortedSetContains(*sortedSetContains, fctx);
-            continue;
-        }
-        if (const auto* sortedSetRemove = dynamic_cast<const IrSortedSetRemove*>(inst.get()))
-        {
-            emitSortedSetRemove(*sortedSetRemove, fctx);
             continue;
         }
         if (const auto* stringNew = dynamic_cast<const IrStringNew*>(inst.get()))
@@ -10016,103 +7570,6 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
             out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
                 << newline << ")\n";
         }
-        else if (isMapType(llvmTypeStr) || isSetType(llvmTypeStr))
-        {
-            // No iteration this phase (see docs/language/0034-maps-and-sets.md),
-            // so - unlike List's own runtime print loop just below - there's
-            // no way to print contents; falls back to "Map(N entries)"/
-            // "Set(N entries)" using the O(1) count field alone (field 0 of
-            // the header, GEP+load - same shape List's own ".length" uses).
-            const std::string headerType = llvmTypeStr.substr(0, llvmTypeStr.size() - 1);
-            const std::string label = isMapType(llvmTypeStr) ? "Map(" : "Set(";
-            const std::string prefix = stringPtrConstant(label);
-            const std::string suffix = stringPtrConstant(" entries)");
-            const std::string countFmt = stringPtrConstant("%s = %s%d%s\n");
-
-            const int countPtrReg = allocateRegister(fctx);
-            out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << llvmTypeStr
-                << " " << ref(axeaReg, fctx) << ", i32 0, i32 0\n";
-            const int countReg = allocateRegister(fctx);
-            out << "  %" << countReg << " = load i32, i32* %" << countPtrReg << "\n";
-            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
-                << countFmt << ", i8* " << namePtr << ", i8* " << prefix << ", i32 %" << countReg
-                << ", i8* " << suffix << ")\n";
-        }
-        else if (isLinkedListType(llvmTypeStr))
-        {
-            // Checked *before* isListType, same reasoning as Map/Set above -
-            // a LinkedList header is also "{i32, ...}*"-shaped, so it would
-            // otherwise spuriously match isListType's own looser test (and,
-            // unlike Stack<T>, genuinely produce garbage: LinkedList's header
-            // isn't shaped like List's own {length, data} record, so List's
-            // print loop would misread the head/tail node pointers as a
-            // T* data pointer). Same count-only fallback as Map/Set, for a
-            // related but distinct reason (see docs/language/0036-linked-lists.md):
-            // walking node pointers is possible in principle, but the "for
-            // x in expr" desugaring that would give this a natural user-
-            // facing analog needs `[i]` indexing, which a LinkedList doesn't
-            // support - so this stays deliberately minimal rather than
-            // hand-rolling a print-only traversal nothing else in the
-            // language exercises.
-            const std::string headerType = llvmTypeStr.substr(0, llvmTypeStr.size() - 1);
-            const std::string prefix = stringPtrConstant("LinkedList(");
-            const std::string suffix = stringPtrConstant(" entries)");
-            const std::string countFmt = stringPtrConstant("%s = %s%d%s\n");
-
-            const int countPtrReg = allocateRegister(fctx);
-            out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << llvmTypeStr
-                << " " << ref(axeaReg, fctx) << ", i32 0, i32 0\n";
-            const int countReg = allocateRegister(fctx);
-            out << "  %" << countReg << " = load i32, i32* %" << countPtrReg << "\n";
-            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
-                << countFmt << ", i8* " << namePtr << ", i8* " << prefix << ", i32 %" << countReg
-                << ", i8* " << suffix << ")\n";
-        }
-        else if (isSortedMapType(llvmTypeStr))
-        {
-            // Checked *before* isListType, same reasoning as LinkedList
-            // above - a SortedMap header is also "{i32, ...}*"-shaped
-            // (and would genuinely produce garbage via List's own print
-            // loop below: the second field is a node pointer, not a T*
-            // data pointer). Same count-only fallback as Map/Set/
-            // LinkedList (see docs/language/0040-sorted-maps.md): an
-            // in-order tree walk is possible in principle, but - like
-            // LinkedList's own node-pointer walk - has no `for`-in
-            // desugaring to hang off yet, so this stays deliberately
-            // minimal.
-            const std::string headerType = llvmTypeStr.substr(0, llvmTypeStr.size() - 1);
-            const std::string prefix = stringPtrConstant("SortedMap(");
-            const std::string suffix = stringPtrConstant(" entries)");
-            const std::string countFmt = stringPtrConstant("%s = %s%d%s\n");
-
-            const int countPtrReg = allocateRegister(fctx);
-            out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << llvmTypeStr
-                << " " << ref(axeaReg, fctx) << ", i32 0, i32 0\n";
-            const int countReg = allocateRegister(fctx);
-            out << "  %" << countReg << " = load i32, i32* %" << countPtrReg << "\n";
-            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
-                << countFmt << ", i8* " << namePtr << ", i8* " << prefix << ", i32 %" << countReg
-                << ", i8* " << suffix << ")\n";
-        }
-        else if (isSortedSetType(llvmTypeStr))
-        {
-            // Checked *before* isListType, same reasoning as SortedMap
-            // above - a SortedSet header is also "{i32, ...}*"-shaped. Same
-            // count-only fallback (see docs/language/0041-sorted-sets.md).
-            const std::string headerType = llvmTypeStr.substr(0, llvmTypeStr.size() - 1);
-            const std::string prefix = stringPtrConstant("SortedSet(");
-            const std::string suffix = stringPtrConstant(" entries)");
-            const std::string countFmt = stringPtrConstant("%s = %s%d%s\n");
-
-            const int countPtrReg = allocateRegister(fctx);
-            out << "  %" << countPtrReg << " = getelementptr " << headerType << ", " << llvmTypeStr
-                << " " << ref(axeaReg, fctx) << ", i32 0, i32 0\n";
-            const int countReg = allocateRegister(fctx);
-            out << "  %" << countReg << " = load i32, i32* %" << countPtrReg << "\n";
-            out << "  %" << allocateRegister(fctx) << " = call i32 (i8*, ...) @printf(i8* "
-                << countFmt << ", i8* " << namePtr << ", i8* " << prefix << ", i32 %" << countReg
-                << ", i8* " << suffix << ")\n";
-        }
         else if (isBufferType(llvmTypeStr))
         {
             // Checked *before* isDequeType (whose own "{i32, i32, ...}*"
@@ -10136,12 +7593,11 @@ void LlvmIrEmitter::emitMain(const IrProgram& program, std::ostringstream& out)
         }
         else if (isDequeType(llvmTypeStr))
         {
-            // Checked *before* isListType, same reasoning as Map/Set/
-            // LinkedList above - a Deque header is also "{i32, ...}*"-shaped
+            // Checked *before* isListType - a Deque header is also "{i32, ...}*"-shaped
             // (and would genuinely produce garbage via List's own print
             // loop below: the data pointer sits at field 2, not field 1, and
-            // every element read needs a `+start` offset). Unlike Map/Set/
-            // LinkedList, Deque<T> gets full bracket-format printing, not a
+            // every element read needs a `+start` offset).
+            // Deque<T> gets full bracket-format printing, not a
             // count-only fallback - its growable-array-with-a-start-offset
             // representation directly supports it, the same reasoning that
             // makes `[i]` cheap (see docs/language/0037-deques.md). Adapts
@@ -10723,7 +8179,7 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // just keeps every string constant declared in one place for readability.
     // Optional<T>'s own named type (see docs/language/0052-optional.md and
     // registerOptionalInstantiation) is, unlike every other named type in
-    // this backend (Map/Set/LinkedList/SortedMap/SortedSet's own entry/node
+    // this backend (a closure's own captures struct, a struct's own field
     // types), used *by value* - a function signature or extractvalue/
     // insertvalue referencing it needs its body already known, not merely
     // forward-declared (hand-verified against clang: `insertvalue %foo
@@ -10778,9 +8234,9 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // already been through inferTypes by this point (the discovery pass
     // above, plus emitMain/emitStructPrintHelpers just above), so
     // optionalTypeDeclsText_ is fully populated here, unlike every other
-    // instantiation-keyed *TypeDeclsText_ in this file (Map/Set/
-    // LinkedList/SortedMap/SortedSet), which are all safe to emit much
-    // later precisely because they're never used by value.
+    // instantiation-keyed *TypeDeclsText_ in this file (mapSetTypeDeclsText_/
+    // closureTypeDeclsText_), which are all safe to emit much later precisely because they're
+    // never used by value.
     out << optionalTypeDeclsText_.str();
     // Result<T,E>'s own named type needs the identical by-value ordering
     // treatment as Optional<T>'s just above (see docs/language/0063-result.md)
@@ -10879,20 +8335,6 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // docs/language/0034-maps-and-sets.md).
     out << mapSetTypeDeclsText_.str();
     out << mapSetRuntimeText_.str();
-    // Same reasoning as above, for LinkedList<T> (see
-    // docs/language/0036-linked-lists.md) - safe to snapshot only once every
-    // function/topLevel has been through inferTypes (registerLinkedListInstantiation
-    // is driven by llvmType, same as Map/Set's own registration).
-    out << linkedListTypeDeclsText_.str();
-    out << linkedListRuntimeText_.str();
-    // Same reasoning again, for SortedMap<K,V> (see
-    // docs/language/0040-sorted-maps.md).
-    out << sortedMapTypeDeclsText_.str();
-    out << sortedMapRuntimeText_.str();
-    // Same reasoning again, for SortedSet<T> (see
-    // docs/language/0041-sorted-sets.md).
-    out << sortedSetTypeDeclsText_.str();
-    out << sortedSetRuntimeText_.str();
     // Same reasoning again, for `.parse<T>()` (see
     // docs/language/0046-generic-methods.md) - registerParseRuntime is
     // driven by emitParse itself (called during emitFunction/emitMain

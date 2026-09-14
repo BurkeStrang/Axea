@@ -439,10 +439,20 @@ TEST("TypeChecker accepts Stack<T> as a struct field type - unlike the retired c
           "struct Wrapper { items: Box<i32> }");
 }
 
-TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a LinkedList<T>")
+TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a LinkedList<T> "
+     "(see docs/language/0036-linked-lists.md's own \"2026 Update\" - a real LinkedList<T>'s own "
+     "construction needs std/collections.ax's actual self-referential *Node<T>-based body, so "
+     "this uses a small inline generic struct with the same method shape instead)")
 {
-    check("f() -> i32 { "
-          "  s = LinkedList<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  push_front(self, value: T) { } "
+          "  push_back(self, value: T) { } "
+          "  pop_front(self) -> T { return self.length } "
+          "  pop_back(self) -> T { return self.length } "
+          "} "
+          "f() -> i32 { "
+          "  s = Box<i32> { length: 0 } "
           "  s.push_front(4) "
           "  s.push_back(5) "
           "  front = s.pop_front() "
@@ -452,35 +462,46 @@ TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a L
           "x = f()");
 }
 
-TEST("TypeChecker rejects 'push_front' with the wrong element type on a LinkedList<T>")
+TEST("TypeChecker rejects 'push_front' with the wrong element type on a LinkedList<T>-shaped "
+     "struct")
 {
-    EXPECT_THROWS(check("f() { s = LinkedList<i32>()  s.push_front(true) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push_front(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.push_front(true) }"));
 }
 
 TEST("TypeChecker rejects 'pop_back' with arguments")
 {
-    EXPECT_THROWS(check("f() -> i32 { s = LinkedList<i32>()  return s.pop_back(1) }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { pop_back(self) -> T { return self.length } } "
+                        "f() -> i32 { s = Box<i32> { length: 0 }  return s.pop_back(1) }"));
 }
 
-TEST("TypeChecker rejects an unknown method on a LinkedList<T>")
+TEST("TypeChecker rejects an unknown method on a LinkedList<T>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { s = LinkedList<i32>()  s.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { push_front(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.size() }"));
 }
 
-TEST("TypeChecker accepts LinkedList<T> as a parameter, return type, and local declared type")
+TEST("TypeChecker accepts a LinkedList<T>-shaped struct as a parameter, return type, and local "
+     "declared type")
 {
-    check("build() -> LinkedList<i32> { "
-          "  x: LinkedList<i32> = LinkedList<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(s: LinkedList<i32>) -> i32 { return s.length } "
+          "consume(s: Box<i32>) -> i32 { return s.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects LinkedList<T> as a struct field type")
+TEST("TypeChecker accepts LinkedList<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: LinkedList<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
 TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/.get/.set on a "
@@ -717,10 +738,20 @@ TEST("TypeChecker rejects the owned String type in a generic method's own '<' co
                         "c = a.less(b)"));
 }
 
-TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
+TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<K,V>-shaped struct (see "
+     "docs/language/0034-maps-and-sets.md's own \"2026 Update\" - a real Map<K,V>'s own "
+     "construction needs std/collections.ax's actual malloc-based body, so this uses a small "
+     "inline generic struct with the same method shape instead)")
 {
-    check("f() -> i32 { "
-          "  m = Map<i32,i32>() "
+    check("struct Box<K,V> { length: i32 } "
+          "impl<K,V> Box<K,V> { "
+          "  set(self, key: K, value: V) { } "
+          "  get(self, key: K) -> V { return self.get(key) } "
+          "  contains(self, key: K) -> bool { return true } "
+          "  remove(self, key: K) { } "
+          "} "
+          "f() -> i32 { "
+          "  m = Box<i32,i32> { length: 0 } "
           "  m.set(1, 100) "
           "  m.set(1, 999) "
           "  v = m.get(1) "
@@ -731,10 +762,16 @@ TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<i32,i32>")
           "x = f()");
 }
 
-TEST("TypeChecker accepts add/contains/remove/.length on a Set<i32>")
+TEST("TypeChecker accepts add/contains/remove/.length on a Set<T>-shaped struct")
 {
-    check("f() -> i32 { "
-          "  s = Set<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  add(self, value: T) { } "
+          "  contains(self, value: T) -> bool { return true } "
+          "  remove(self, value: T) { } "
+          "} "
+          "f() -> i32 { "
+          "  s = Box<i32> { length: 0 } "
           "  s.add(1) "
           "  hit: bool = s.contains(1) "
           "  s.remove(1) "
@@ -743,219 +780,199 @@ TEST("TypeChecker accepts add/contains/remove/.length on a Set<i32>")
           "x = f()");
 }
 
-TEST("TypeChecker accepts str/bool as Map/Set key types (generic, Rust-style Hash+Eq)")
+TEST("TypeChecker's hash<T>()/keyEq<T>() accept str/bool/i32 - the new generic-code-facing entry "
+     "point into the same Rust-style Hash+Eq requirement Map<K,V>/Set<T>'s own key used to "
+     "enforce eagerly at construction time (see docs/language/0034-maps-and-sets.md's own "
+     "\"2026 Update\")")
 {
-    check("f() { m = Map<str,i32>() }");
-    check("f() { m = Map<i32,str>() }");
-    check("f() { m = Map<bool,bool>() }");
-    check("f() { s = Set<str>() }");
-    check("f() { s = Set<bool>() }");
+    check("f() { h = hash<str>(\"a\")  e = keyEq<str>(\"a\", \"b\") }");
+    check("f() { h = hash<i32>(1)  e = keyEq<i32>(1, 2) }");
+    check("f() { h = hash<bool>(true)  e = keyEq<bool>(true, false) }");
 }
 
-TEST("TypeChecker rejects Map/Set as a Map/Set key type (mirrors Rust: HashMap/HashSet aren't "
-     "Hash)")
+TEST("TypeChecker rejects hash<T>()/keyEq<T>() on a non-hashable struct (mirrors Rust: "
+     "HashMap/HashSet aren't themselves Hash) - Map<K,V> is a real struct now, whose own "
+     "`buckets` field is a raw pointer, so it's structurally non-hashable exactly like the "
+     "retired intrinsic's own eager rejection intended")
 {
-    EXPECT_THROWS(check("f() { m = Map<Map<i32,i32>,i32>() }"));
-    EXPECT_THROWS(check("f() { s = Set<Set<i32>>() }"));
+    EXPECT_THROWS(check("struct MapEntry<K,V> { key: K  value: V  next: *MapEntry<K,V> } "
+                        "struct Map<K,V> { length: i32  bucketCount: i32  buckets: "
+                        "**MapEntry<K,V> } "
+                        "f() { h = hash<Map<i32,i32>>(0) }"));
 }
 
-TEST("TypeChecker rejects slice<T> as a Map/Set key or value type")
+TEST("TypeChecker rejects slice<T> as a hash<T>()/keyEq<T>() type argument")
 {
-    EXPECT_THROWS(check("f() { m = Map<slice<i32>,i32>() }"));
-    EXPECT_THROWS(check("f() { m = Map<i32,slice<i32>>() }"));
+    EXPECT_THROWS(check("f() { h = hash<slice<i32>>(0) }"));
 }
 
 TEST("TypeChecker accepts a struct key if every field is itself hashable")
 {
     check("struct Point { x: i32  y: i32 } "
-          "f() { s = Set<Point>() }");
+          "f() { h = hash<Point>(Point { x: 1, y: 2 }) }");
 }
 
-TEST("TypeChecker rejects a struct key if any field is not hashable (List<T> field)")
+TEST("TypeChecker rejects a struct key if any field is not hashable (a raw pointer field)")
 {
-    // List<T> itself is already rejected as a struct field type
-    // (docs/language/0033-lists.md), so this struct never type-checks in
-    // the first place - confirms the rejection surfaces here too, not just
-    // at the struct declaration.
-    EXPECT_THROWS(check("struct Bag { items: List<i32> } "
-                        "f() { s = Set<Bag>() }"));
+    EXPECT_THROWS(check("struct Bag { items: *i32 } "
+                        "f() { h = hash<Bag>(0) }"));
 }
 
 TEST("TypeChecker accepts a fixed array key if the element is hashable")
 {
-    check("f() { s = Set<[i32;3]>() }");
+    check("f() { h = hash<[i32;3]>([1, 2, 3]) }");
 }
 
-TEST("TypeChecker accepts arbitrary V (struct, array, generic struct, nested Map) with no "
-     "hashability requirement")
+TEST("TypeChecker rejects 'set' with the wrong argument count or type on a Map<K,V>-shaped "
+     "struct")
 {
-    check("struct Point { x: i32 } "
-          "struct Box<T> { value: T } "
-          "f() { "
-          "  m1 = Map<i32,Point>() "
-          "  m2 = Map<i32,[i32;3]>() "
-          "  m3 = Map<i32,Box<i32>>() "
-          "  m4 = Map<i32,Map<i32,i32>>() "
-          "}");
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                        "f() { m = Box<i32,i32> { length: 0 }  m.set(1) }"));
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                        "f() { m = Box<i32,i32> { length: 0 }  m.set(true, 1) }"));
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                        "f() { m = Box<i32,i32> { length: 0 }  m.set(1, true) }"));
 }
 
-TEST("TypeChecker's Map<K,V>.get() returns V's real resolved type, not always i32")
+TEST("TypeChecker rejects an unknown method on a Map<K,V>/Set<T>-shaped struct")
 {
-    check("struct Point { x: i32 } "
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                        "f() { m = Box<i32,i32> { length: 0 }  m.size() }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { add(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.push(1) }"));
+}
+
+TEST("TypeChecker rejects indexing into a Map<K,V>/Set<T>-shaped struct")
+{
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "f() -> i32 { m = Box<i32,i32> { length: 0 }  return m[0] }"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "f() -> i32 { s = Box<i32> { length: 0 }  return s[0] }"));
+}
+
+TEST("TypeChecker accepts a Map<K,V>/Set<T>-shaped struct as a parameter, return type, and "
+     "local declared type")
+{
+    check("struct Box<K,V> { length: i32 } "
+          "build() -> Box<i32,i32> { "
+          "  x: Box<i32,i32> = Box<i32,i32> { length: 0 } "
+          "  return x "
+          "} "
+          "consume(m: Box<i32,i32>) -> i32 { return m.length } "
+          "n = build() "
+          "y = consume(n)");
+}
+
+TEST("TypeChecker accepts Map<K,V>/Set<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one")
+{
+    check("struct Box<K,V> { length: i32 } "
+          "struct Wrapper { entries: Box<i32,i32> }");
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper2 { items: Box<i32> }");
+}
+
+TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<K,V>-shaped struct (see "
+     "docs/language/0040-sorted-maps.md's own \"2026 Update\" - a real SortedMap<K,V>'s own "
+     "construction needs std/collections.ax's actual malloc-based AVL body, so this uses a small "
+     "inline generic struct with the same method shape instead, mirroring Map<K,V>'s own "
+     "identical test above)")
+{
+    check("struct Box<K,V> { length: i32 } "
+          "impl<K,V> Box<K,V> { "
+          "  set(self, key: K, value: V) { } "
+          "  get(self, key: K) -> V { return self.get(key) } "
+          "  contains(self, key: K) -> bool { return true } "
+          "  remove(self, key: K) { } "
+          "} "
           "f() -> i32 { "
-          "  m = Map<i32,Point>() "
+          "  m = Box<i32,i32> { length: 0 } "
+          "  m.set(1, 100) "
+          "  m.set(1, 999) "
+          "  v = m.get(1) "
+          "  hit: bool = m.contains(1) "
+          "  m.remove(1) "
+          "  return v + m.length "
+          "} "
+          "x = f()");
+}
+
+// SortedMap<K,V>'s own "K must be orderable" restriction is no longer enforced eagerly at
+// construction time (see docs/language/0040-sorted-maps.md's own "2026 Update") - it now surfaces
+// from within the monomorphized set/get/contains/remove method's own '<'/'>' comparison instead,
+// the exact same shared BinaryExpr/isOrderableKind path PriorityQueue<T>'s own sift comparison
+// already exercises (see the "TypeChecker rejects a non-orderable element type used in a generic
+// method's own '<' comparison" test and its own siblings above) - no SortedMap-specific
+// orderability test is needed here anymore, that coverage is already shared and general.
+
+TEST("TypeChecker's SortedMap<K,V>.get() returns V's real resolved type, not always i32 - "
+     "ordinary generic-method return-type substitution, no special casing needed for a real "
+     "struct (mirrors Map<K,V>'s own identical port precedent)")
+{
+    check("struct Point { x: i32 } "
+          "struct Box<K,V> { length: i32 } "
+          "impl<K,V> Box<K,V> { get(self, key: K) -> V { return self.get(key) } } "
+          "f() -> i32 { "
+          "  m = Box<i32,Point> { length: 0 } "
           "  p = m.get(1) "
           "  return p.x "
           "} "
           "x = f()");
 }
 
-TEST("TypeChecker rejects 'set' with the wrong argument count or type")
+TEST("TypeChecker rejects an unknown method on a SortedMap<K,V>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(1) }"));
-    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(true, 1) }"));
-    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.set(1, true) }"));
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                        "f() { m = Box<i32,i32> { length: 0 }  m.size() }"));
 }
 
-TEST("TypeChecker rejects an unknown method on Map/Set")
+TEST("TypeChecker rejects indexing into a SortedMap<K,V>-shaped struct")
 {
-    EXPECT_THROWS(check("f() { m = Map<i32,i32>()  m.size() }"));
-    EXPECT_THROWS(check("f() { s = Set<i32>()  s.push(1) }"));
+    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
+                        "f() -> i32 { m = Box<i32,i32> { length: 0 }  return m[0] }"));
 }
 
-TEST("TypeChecker rejects indexing into a Map or Set")
-{
-    EXPECT_THROWS(check("f() -> i32 { m = Map<i32,i32>()  return m[0] }"));
-    EXPECT_THROWS(check("f() -> i32 { s = Set<i32>()  return s[0] }"));
-}
-
-TEST("TypeChecker accepts Map<i32,i32>/Set<i32> as a parameter, return type, and local "
+TEST("TypeChecker accepts a SortedMap<K,V>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("build() -> Map<i32,i32> { "
-          "  x: Map<i32,i32> = Map<i32,i32>() "
+    check("struct Box<K,V> { length: i32 } "
+          "build() -> Box<i32,i32> { "
+          "  x: Box<i32,i32> = Box<i32,i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(m: Map<i32,i32>) -> i32 { return m.length } "
+          "consume(m: Box<i32,i32>) -> i32 { return m.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects Map<K,V>/Set<T> as a struct field type")
+TEST("TypeChecker accepts SortedMap<K,V> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one "
+     "(mirrors Map<K,V>'s own identical port precedent)")
 {
-    EXPECT_THROWS(check("struct Wrapper { entries: Map<i32,i32> }"));
-    EXPECT_THROWS(check("struct Wrapper { items: Set<i32> }"));
+    check("struct Box<K,V> { length: i32 } "
+          "struct Wrapper { entries: Box<i32,i32> }");
 }
 
-TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<i32,i32>")
+TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<T>-shaped struct (see "
+     "docs/language/0041-sorted-sets.md's own \"2026 Update\" - a real SortedSet<T>'s own "
+     "construction needs std/collections.ax's actual malloc-based AVL body, so this uses a small "
+     "inline generic struct with the same method shape instead, mirroring SortedMap<K,V>'s own "
+     "identical test above)")
 {
-    check("f() -> i32 { "
-          "  m = SortedMap<i32,i32>() "
-          "  m.set(1, 100) "
-          "  m.set(2, 200) "
-          "  before = m.contains(2) "
-          "  m.remove(2) "
-          "  after = m.contains(2) "
-          "  removedDelta = if before { 10 } else { 0 } "
-          "  keptDelta = if after { 1 } else { 0 } "
-          "  return m.get(1) + m.length * 1000 + removedDelta + keptDelta "
+    check("struct Box<T> { length: i32 } "
+          "impl<T> Box<T> { "
+          "  add(self, value: T) { } "
+          "  contains(self, value: T) -> bool { return true } "
+          "  remove(self, value: T) { } "
           "} "
-          "x = f()");
-}
-
-TEST("TypeChecker rejects a non-orderable key type on SortedMap<K,V> - bool has no total order, "
-     "and the owned String type isn't orderable even though it's str-coercible everywhere else "
-     "(see docs/language/0040-sorted-maps.md)")
-{
-    EXPECT_THROWS(check("m = SortedMap<bool,i32>()"));
-    EXPECT_THROWS(check("m = SortedMap<String,i32>()"));
-}
-
-TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<char,i32> - char is "
-     "orderable by codepoint, same as i32 (see docs/language/0044-char.md)")
-{
-    check("f() -> i32 { "
-          "  m = SortedMap<char,i32>() "
-          "  m.set('A', 1) "
-          "  hit: bool = m.contains('A') "
-          "  v = m.get('A') "
-          "  m.remove('A') "
-          "  return v + m.length "
-          "} "
-          "x = f()");
-}
-
-TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<str,i32> - str has a "
-     "real lexicographic order, same as i32/char (see docs/language/0042-string.md)")
-{
-    check("f() -> i32 { "
-          "  m = SortedMap<str,i32>() "
-          "  m.set(\"a\", 1) "
-          "  hit: bool = m.contains(\"a\") "
-          "  v = m.get(\"a\") "
-          "  m.remove(\"a\") "
-          "  return v + m.length "
-          "} "
-          "x = f()");
-}
-
-TEST("TypeChecker accepts arbitrary V (struct, array, generic struct) on a SortedMap<i32,V> - "
-     "only K is restricted to i32, V has no such requirement, mirroring Map<K,V>'s own V")
-{
-    check("struct Point { x: i32 } "
-          "struct Box<T> { value: T } "
-          "f() { "
-          "  m = SortedMap<i32,Point>() "
-          "  m.set(1, Point { x: 1 }) "
-          "  l = SortedMap<i32,Box<i32>>() "
-          "  l.set(1, Box<i32> { value: 1 }) "
-          "}");
-}
-
-TEST("TypeChecker's SortedMap<K,V>.get() returns V's real resolved type, not always i32")
-{
-    check("struct Point { x: i32 } "
           "f() -> i32 { "
-          "  m = SortedMap<i32,Point>() "
-          "  m.set(1, Point { x: 42 }) "
-          "  p = m.get(1) "
-          "  return p.x "
-          "} "
-          "x = f()");
-}
-
-TEST("TypeChecker rejects an unknown method on a SortedMap<K,V>")
-{
-    EXPECT_THROWS(check("f() { m = SortedMap<i32,i32>()  m.size() }"));
-}
-
-TEST("TypeChecker rejects indexing into a SortedMap<K,V> - deliberately not indexable, no "
-     "`[key]` syntax or `for`-in iteration this phase (see docs/language/0040-sorted-maps.md)")
-{
-    EXPECT_THROWS(check("f() -> i32 { m = SortedMap<i32,i32>()  return m[0] }"));
-}
-
-TEST("TypeChecker accepts SortedMap<i32,i32> as a parameter, return type, and local declared "
-     "type")
-{
-    check("build() -> SortedMap<i32,i32> { "
-          "  x: SortedMap<i32,i32> = SortedMap<i32,i32>() "
-          "  return x "
-          "} "
-          "consume(m: SortedMap<i32,i32>) -> i32 { return m.length } "
-          "n = build() "
-          "y = consume(n)");
-}
-
-TEST("TypeChecker rejects SortedMap<K,V> as a struct field type")
-{
-    EXPECT_THROWS(check("struct Wrapper { entries: SortedMap<i32,i32> }"));
-}
-
-TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<i32>")
-{
-    check("f() -> i32 { "
-          "  s = SortedSet<i32>() "
+          "  s = Box<i32> { length: 0 } "
           "  s.add(5) "
           "  s.add(6) "
           "  before = s.contains(6) "
@@ -968,66 +985,49 @@ TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<i32>")
           "x = f()");
 }
 
-TEST("TypeChecker rejects a non-orderable element type on SortedSet<T> - bool has no total "
-     "order, and the owned String type isn't orderable even though it's str-coercible "
-     "everywhere else (see docs/language/0041-sorted-sets.md)")
+// SortedSet<T>'s own "T must be orderable" restriction is no longer enforced eagerly at
+// construction time (see docs/language/0041-sorted-sets.md's own "2026 Update") - it now surfaces
+// from within the monomorphized add/contains/remove method's own '<'/'>' comparison instead, the
+// exact same shared BinaryExpr/isOrderableKind path PriorityQueue<T>/SortedMap<K,V>'s own sift/
+// rebalance comparisons already exercise (see the "TypeChecker rejects a non-orderable element
+// type used in a generic method's own '<' comparison" test and its own siblings above) - no
+// SortedSet-specific orderability test is needed here anymore, that coverage is already shared
+// and general. This is the last of these collection-specific orderability tests: every collection
+// docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real Axea
+// source.
+
+TEST("TypeChecker rejects an unknown method on a SortedSet<T>-shaped struct")
 {
-    EXPECT_THROWS(check("s = SortedSet<bool>()"));
-    EXPECT_THROWS(check("s = SortedSet<String>()"));
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "impl<T> Box<T> { add(self, value: T) { } } "
+                        "f() { s = Box<i32> { length: 0 }  s.push(1) }"));
 }
 
-TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<str> - str has a real "
-     "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
+TEST("TypeChecker rejects indexing into a SortedSet<T>-shaped struct")
 {
-    check("f() -> i32 { "
-          "  s = SortedSet<str>() "
-          "  s.add(\"a\") "
-          "  s.add(\"b\") "
-          "  before = s.contains(\"b\") "
-          "  s.remove(\"b\") "
-          "  return s.length "
-          "} "
-          "x = f()");
+    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
+                        "f() -> i32 { s = Box<i32> { length: 0 }  return s[0] }"));
 }
 
-TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<char> - char is orderable "
-     "by codepoint, same as i32 (see docs/language/0044-char.md)")
+TEST("TypeChecker accepts a SortedSet<T>-shaped struct as a parameter, return type, and local "
+     "declared type")
 {
-    check("f() -> i32 { "
-          "  s = SortedSet<char>() "
-          "  s.add('A') "
-          "  s.add('B') "
-          "  before = s.contains('B') "
-          "  s.remove('B') "
-          "  return s.length "
-          "} "
-          "x = f()");
-}
-
-TEST("TypeChecker rejects an unknown method on a SortedSet<T>")
-{
-    EXPECT_THROWS(check("f() { s = SortedSet<i32>()  s.push(1) }"));
-}
-
-TEST("TypeChecker rejects indexing into a SortedSet<T>")
-{
-    EXPECT_THROWS(check("f() -> i32 { s = SortedSet<i32>()  return s[0] }"));
-}
-
-TEST("TypeChecker accepts SortedSet<i32> as a parameter, return type, and local declared type")
-{
-    check("build() -> SortedSet<i32> { "
-          "  x: SortedSet<i32> = SortedSet<i32>() "
+    check("struct Box<T> { length: i32 } "
+          "build() -> Box<i32> { "
+          "  x: Box<i32> = Box<i32> { length: 0 } "
           "  return x "
           "} "
-          "consume(s: SortedSet<i32>) -> i32 { return s.length } "
+          "consume(s: Box<i32>) -> i32 { return s.length } "
           "n = build() "
           "y = consume(n)");
 }
 
-TEST("TypeChecker rejects SortedSet<T> as a struct field type")
+TEST("TypeChecker accepts SortedSet<T> as a struct field type - unlike the retired compiler "
+     "intrinsic, a real struct field may be any other struct type, including a generic one "
+     "(mirrors SortedMap<K,V>'s own identical port precedent)")
 {
-    EXPECT_THROWS(check("struct Wrapper { items: SortedSet<i32> }"));
+    check("struct Box<T> { length: i32 } "
+          "struct Wrapper { items: Box<i32> }");
 }
 
 TEST("TypeChecker accepts String(text) construction and .append/.length")
@@ -1676,10 +1676,10 @@ TEST("TypeChecker rejects is_ok/is_err on an Optional<T>, and unwrap_or/is_some/
 }
 
 TEST("TypeChecker resolves a nested Result<T,E> type - E itself a Result, and T itself a "
-     "Map<K,V> - via bracket-depth-aware comma splitting")
+     "Result too - via bracket-depth-aware comma splitting")
 {
     check("x: Result<i32, Result<i32, str>> = Ok(1) "
-          "y: Result<Map<i32,i32>, str> = Err(\"e\")");
+          "y: Result<Result<i32, str>, str> = Err(\"e\")");
 }
 
 TEST("TypeChecker accepts parse<i32>() and parse<bool>(), typing the result as "
@@ -1874,12 +1874,13 @@ TEST("TypeChecker accepts a struct argument to print(...)/write(...) - it prints
           "write(p)");
 }
 
-TEST("TypeChecker accepts every collection kind as a print(...)/write(...) argument")
-{
-    check("m: Map<i32,i32> = Map<i32,i32>() print(m)");
-    check("s: Set<i32> = Set<i32>() print(s)");
-    check("l: LinkedList<i32> = LinkedList<i32>() print(l)");
-}
+// Map<K,V>/Set<T>/SortedMap<K,V>/SortedSet<T> are all real, user-declared generic structs now
+// (see docs/language/0034-maps-and-sets.md's own "2026 Update", docs/language/0040-sorted-
+// maps.md's own "2026 Update", and docs/language/0041-sorted-sets.md's own "2026 Update") -
+// there is no dedicated "every remaining intrinsic collection kind as a print(...)/write(...)
+// argument" test left here anymore; all four are already covered by the struct print test above.
+// This is the last of these collection-print tests: every collection docs/language/0029-
+// collections.md originally scoped as a compiler intrinsic is now real Axea source.
 
 TEST("TypeChecker checks a bare top-level print(...)/write(...) call via the new ExprStmt "
      "case in TypeChecker::check's own top-level item loop (see "

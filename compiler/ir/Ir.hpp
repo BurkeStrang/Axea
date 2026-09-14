@@ -61,6 +61,18 @@ struct IrConstChar final : IrInst
     std::int32_t codepoint;
 };
 
+// `null` (see docs/language/0019-unsafe.md) - the untyped null pointer literal. Unlike every
+// other IrConst* above, carries no value of its own kind's own type - `pointeeTypeName` is the
+// canonical Axea-level pointee type text (e.g. "i32", "Node$i32") IrGenerator resolves from
+// whatever *consumption* context this literal appeared in (a declared/field/param type, or the
+// other operand's own type for `==`/`!=` - see IrGenerator.cpp's own `lowerNullExpr` and its call
+// sites), since a bare `null` has no type of its own to derive it from the way every other
+// IrConst* does.
+struct IrConstNull final : IrInst
+{
+    std::string pointeeTypeName;
+};
+
 struct IrBinOp final : IrInst
 {
     TokenKind op;
@@ -91,6 +103,23 @@ struct IrCall final : IrInst
 struct IrSizeOf final : IrInst
 {
     std::string typeName;
+};
+
+// `hash<T>(value)`/`keyEq<T>(a, b)` (see docs/language/0034-maps-and-sets.md's own "2026 Update") -
+// `typeName` is the monomorphized concrete type, used to call `LlvmIrEmitter::registerKeyRuntime`'s
+// own per-type hash/equality function pair, the same one Map<K,V>/Set<T>'s own `set`/`get`/etc used
+// to call internally before they became real generic structs.
+struct IrHashOf final : IrInst
+{
+    std::string typeName;
+    int value;
+};
+
+struct IrKeyEq final : IrInst
+{
+    std::string typeName;
+    int left;
+    int right;
 };
 
 struct IrStructNew final : IrInst
@@ -245,123 +274,26 @@ struct IrJoin final : IrInst
 // (an ordinary IrCall), construction via their own `newList<T>()`/`newStack<T>()` generic
 // top-level functions.
 
-// `LinkedList<elem>()` - a fresh, empty, doubly linked, node-based collection
-// (see docs/language/0036-linked-lists.md). Carries elementTypeName - a
-// brand-new empty list has nothing to infer it from.
-struct IrLinkedListNew final : IrInst
-{
-    std::string elementTypeName;
-};
+// `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>`/`LinkedList<T>` are all real,
+// user-declared generic structs now, not compiler intrinsics (see docs/language/0006-generics.md's
+// own port follow-up and std/collections.ax) - there is no IrDequeNew/IrDequePushFront/
+// IrDequePushBack/IrDequePopFront/IrDequePopBack/IrQueueNew/IrQueueEnqueue/IrQueueDequeue/
+// IrPriorityQueueNew/IrPriorityQueuePush/IrPriorityQueuePop/IrPriorityQueuePeek/IrLinkedListNew/
+// IrLinkedListPushFront/IrLinkedListPushBack/IrLinkedListPopFront/IrLinkedListPopBack anymore;
+// `.push_front`/`.push_back`/`.pop_front`/`.pop_back`/`.get`/`.set`/`.enqueue`/`.dequeue`/
+// `.push`/`.pop`/`.peek` all reach their own real methods via the general struct method dispatch
+// (an ordinary IrCall), construction via their own `newDeque<T>()`/`newQueue<T>()`/
+// `newPriorityQueue<T>()`/`newLinkedList<T>()` generic top-level functions.
 
-// `list.push_front(value)`/`list.push_back(value)` - no dest (void); mutate
-// `list`'s own header fields (and link a fresh node) in place.
-struct IrLinkedListPushFront final : IrInst
-{
-    int list;
-    int value;
-};
-
-struct IrLinkedListPushBack final : IrInst
-{
-    int list;
-    int value;
-};
-
-// `list.pop_front()`/`list.pop_back()` - dest is the removed element.
-struct IrLinkedListPopFront final : IrInst
-{
-    int list;
-};
-
-struct IrLinkedListPopBack final : IrInst
-{
-    int list;
-};
-
-// `List<T>`/`Stack<T>`/`Deque<T>`/`Queue<T>`/`PriorityQueue<T>` are all real, user-declared
-// generic structs now, not compiler intrinsics (see docs/language/0006-generics.md's own
-// List<T>/Stack<T>/Deque<T>/Queue<T>/PriorityQueue<T> port follow-up and std/collections.ax) -
-// there is no IrDequeNew/IrDequePushFront/IrDequePushBack/IrDequePopFront/IrDequePopBack/
-// IrQueueNew/IrQueueEnqueue/IrQueueDequeue/IrPriorityQueueNew/IrPriorityQueuePush/
-// IrPriorityQueuePop/IrPriorityQueuePeek anymore; `.push_front`/`.push_back`/`.pop_front`/
-// `.pop_back`/`.get`/`.set`/`.enqueue`/`.dequeue`/`.push`/`.pop`/`.peek` all reach their own real
-// methods via the general struct method dispatch (an ordinary IrCall), construction via their
-// own `newDeque<T>()`/`newQueue<T>()`/`newPriorityQueue<T>()` generic top-level functions.
-
-// `SortedMap<key,value>()` - a fresh, empty AVL tree (see
-// docs/language/0040-sorted-maps.md). Carries the concrete K/V type strings
-// explicitly, exactly like IrMapNew - a brand-new empty tree has nothing to
-// infer them from, and LlvmIrEmitter needs them to look up (or register, on
-// first sight) the right monomorphized instantiation.
-struct IrSortedMapNew final : IrInst
-{
-    std::string keyTypeName;
-    std::string valueTypeName;
-};
-
-// `sortedMap.set(key, value)` - no dest (unit); inserts (with AVL
-// rebalancing) or updates in place.
-struct IrSortedMapSet final : IrInst
-{
-    int sortedMap;
-    int key;
-    int value;
-};
-
-// `sortedMap.get(key)` - dest is the value (or an unspecified sentinel if
-// the key is absent in compiled code, mirroring IrMapGet; the interpreter
-// throws instead).
-struct IrSortedMapGet final : IrInst
-{
-    int sortedMap;
-    int key;
-};
-
-// `sortedMap.contains(key)` - dest is a bool.
-struct IrSortedMapContains final : IrInst
-{
-    int sortedMap;
-    int key;
-};
-
-// `sortedMap.remove(key)` - no dest (unit); no-op if the key is absent.
-// Removing (with AVL rebalancing) mirrors IrMapRemove's own shape.
-struct IrSortedMapRemove final : IrInst
-{
-    int sortedMap;
-    int key;
-};
-
-// `SortedSet<elem>()` - a fresh, empty AVL tree (see
-// docs/language/0041-sorted-sets.md). Carries elementTypeName exactly like
-// IrSetNew - a brand-new empty tree has nothing to infer it from.
-struct IrSortedSetNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `sortedSet.add(value)` - no dest (unit); inserts (with AVL rebalancing)
-// or no-ops if already present, mirroring IrSetAdd's own shape.
-struct IrSortedSetAdd final : IrInst
-{
-    int sortedSet;
-    int value;
-};
-
-// `sortedSet.contains(value)` - dest is a bool.
-struct IrSortedSetContains final : IrInst
-{
-    int sortedSet;
-    int value;
-};
-
-// `sortedSet.remove(value)` - no dest (unit); no-op if absent. Removing
-// (with AVL rebalancing) mirrors IrSetRemove's own shape.
-struct IrSortedSetRemove final : IrInst
-{
-    int sortedSet;
-    int value;
-};
+// SortedMap<K,V>/SortedSet<T> are both real, user-declared generic structs now (see
+// docs/language/0040-sorted-maps.md's own "2026 Update" and docs/language/0041-sorted-sets.md's
+// own "2026 Update") - there is no IrSortedMapNew/Set/Get/Contains/Remove or
+// IrSortedSetNew/Add/Contains/Remove left here; `set`/`get`/`contains`/`remove`/`add` all reach
+// the real struct's own methods via the general struct method dispatch (an ordinary IrCall),
+// construction via their own `newSortedMap<K,V>()`/`newSortedSet<T>()` generic top-level
+// functions - this is the last of these structs: every collection
+// docs/language/0029-collections.md originally scoped as a compiler intrinsic is now real Axea
+// source.
 
 // `String(text)` - a fresh, owned copy of `text`'s own bytes, plus a null
 // terminator (see docs/language/0042-string.md). `text` is a register (a
@@ -458,8 +390,7 @@ struct IrParse final : IrInst
 // `payloadTypeName` is T's own canonical type name, needed at LLVM emission
 // time to build the `{i1, T}` literal - unlike every other dest-typed
 // instruction here, it can't be inferred from `value` alone, since None has
-// no value register to infer from (mirrors IrLinkedListNew's own
-// elementTypeName, needed for the identical reason on an empty list).
+// no value register to infer from.
 struct IrOptionalNew final : IrInst
 {
     int value = -1;
@@ -561,74 +492,15 @@ struct IrBufferAppendValue final : IrInst
     bool debug = false;
 };
 
-// `Map<K,V>()` - a fresh, empty hash table (see docs/language/0034-maps-and-sets.md's
-// generic rewrite). Carries the concrete K/V type strings explicitly - like
-// IrLinkedListNew's own elementTypeName, a brand-new empty Map has nothing to infer
-// them from - so LlvmIrEmitter can look up (or register, on first sight) the
-// right monomorphized instantiation.
-struct IrMapNew final : IrInst
-{
-    std::string keyTypeName;
-    std::string valueTypeName;
-};
-
-// `map.set(key, value)` - no dest (unit); inserts or updates in place.
-struct IrMapSet final : IrInst
-{
-    int map;
-    int key;
-    int value;
-};
-
-// `map.get(key)` - dest is the value (or an unspecified sentinel if the key
-// is absent in compiled code; the interpreter throws instead - see
-// docs/language/0034-maps-and-sets.md).
-struct IrMapGet final : IrInst
-{
-    int map;
-    int key;
-};
-
-// `map.contains(key)` - dest is a bool.
-struct IrMapContains final : IrInst
-{
-    int map;
-    int key;
-};
-
-// `map.remove(key)` - no dest (unit); no-op if the key is absent.
-struct IrMapRemove final : IrInst
-{
-    int map;
-    int key;
-};
-
-// `Set<T>()` - a fresh, empty hash set. Same reasoning as IrMapNew above.
-struct IrSetNew final : IrInst
-{
-    std::string elementTypeName;
-};
-
-// `set.add(value)` - no dest (unit); no-op if already present.
-struct IrSetAdd final : IrInst
-{
-    int set;
-    int value;
-};
-
-// `set.contains(value)` - dest is a bool.
-struct IrSetContains final : IrInst
-{
-    int set;
-    int value;
-};
-
-// `set.remove(value)` - no dest (unit); no-op if absent.
-struct IrSetRemove final : IrInst
-{
-    int set;
-    int value;
-};
+// `Map<K,V>`/`Set<T>` are real, user-declared generic structs now, not compiler intrinsics (see
+// docs/language/0034-maps-and-sets.md's own "2026 Update") - there is no IrMapNew/IrMapSet/
+// IrMapGet/IrMapContains/IrMapRemove/IrSetNew/IrSetAdd/IrSetContains/IrSetRemove anymore;
+// `.set`/`.get`/`.contains`/`.remove`/`.add` all reach their own real methods via the general
+// struct method dispatch (an ordinary IrCall), construction via their own `newMap<K,V>()`/
+// `newSet<T>()` generic top-level functions. `hash<T>()`/`keyEq<T>()` (`IrHashOf`/`IrKeyEq`
+// above) are the new generic-code-facing entry point into the same `registerKeyRuntime` hash/
+// equality generation these methods' own bodies now call directly instead of a dedicated
+// instruction.
 
 // `if`/`else`, kept structured: two nested instruction lists rather than
 // separate labeled blocks, since the language has no loops yet and this

@@ -5,6 +5,38 @@
 
 ---
 
+## 2026 Update: `null` Is Implemented
+
+This doc's own "Open Questions" section below asked whether a `null` literal should exist. It now
+does — added as a prerequisite for porting `LinkedList<T>` out of the compiler (see
+`docs/language/0036-linked-lists.md`'s own "2026 Update"): the first retired collection whose own
+node type genuinely needs to represent "no node here," which nothing in the language could
+express before this.
+
+`null` is a bare, context-independent literal (mirrors `Optional<T>`'s own `None`, but unlike
+`None`, type-checks against *any* `*T` in every position a pointer value is expected — assignment,
+function-call arguments, `return`, struct-literal field initializers, and `==`/`!=` comparison
+against a real pointer in either direction), not a lexer keyword. Represented at runtime as a
+pointer whose backing arena is absent (`arena == nullptr`, the sentinel state).
+
+**One deliberate departure from this doc's own recommendation below**: dereferencing `null`
+*does* get special-cased detection, at least in the interpreter — it throws a clear "dereferenced
+a null pointer" error rather than being silently undefined behavior. This matches the "interpreter
+catches more than compiled UB does" contract every other empty-collection/out-of-bounds operation
+in this codebase already has (`List<T>.pop()`'s own bounds check being the closest precedent), not
+a departure from `unsafe`'s "zero extra static checking" stance — the check is a runtime one, and
+the compiled backend still emits a bare `getelementptr`/`load` off address `0` with no check at
+all, so a null-deref bug still reads as ordinary UB in compiled code, exactly as this doc
+originally proposed.
+
+Pointer equality (`==`/`!=` between two `*T` values, including against `null`) is now genuine
+structural comparison — `(arena, offset)` value equality, not C++ object identity — fixing a
+latent bug this port's own research surfaced: nothing in this codebase ever compared two pointer
+values before `LinkedList<T>`'s `while ptr != null`-shaped traversal needed it, so the gap had
+gone untested.
+
+---
+
 ## Motivation
 
 `docs/language/0012-memory-model.md` already states the goal: *"Raw pointers require explicit
@@ -247,11 +279,11 @@ free(buf)
 -   Should `*T` support pointer-to-pointer (`**T`) from day one? Recommendation: yes, for free -
     nothing in the type-rule or lowering design above is arity-limited; `**T` is just `*T` where
     `T = *U`.
--   Should there be a `null` literal, and does dereferencing it need special-cased detection, or is
-    it left as ordinary undefined behavior (a real, likely-segfaulting `getelementptr`/`load` off
-    address 0), matching C? Recommendation: allow a `null` literal for any `*T` (needed for
-    `malloc`-failure checking and `while ptr != null`-shaped loops), with no special deref
-    detection - matches this doc's own "zero extra static checking inside unsafe" stance.
+-   ~~Should there be a `null` literal...~~ **Resolved, see this doc's own "2026 Update" above** -
+    `null` is implemented, type-checks against any `*T`. The interpreter throws a clear error on
+    dereference (one deliberate departure from the recommendation below); the compiled backend
+    still emits ordinary unchecked `getelementptr`/`load` off address 0, undefined behavior on
+    deref exactly as originally proposed.
 
 ## Future Work
 

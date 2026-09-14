@@ -62,3 +62,13 @@ void resolveUnqualifiedCalls(Program& merged, const std::vector<std::string>& us
 //   unknown-callee error surfaces downstream unchanged).
 void resolveUnqualifiedConstructorCalls(Program& merged,
                                         const std::vector<std::string>& usedModules);
+
+// Collects every CallExpr reachable from `items` - top-level executable code, plain FunctionDecl
+// bodies, and ImplDecl method bodies alike - the same full-AST walk resolveUnqualifiedCalls/
+// resolveUnqualifiedConstructorCalls above already need internally. Exposed here so
+// ModuleLoader::mergeModule can reuse it for a narrower, single-module-scoped fixup: a module's own
+// *private* (non-`pub`) top-level function, called by bare (unqualified) name from elsewhere in
+// that exact same module (including from an ImplDecl method body), is not something
+// resolveUnqualifiedCalls' own pub-only candidate index above can ever resolve - see
+// ModuleLoader.cpp's own use of this for the fix.
+std::vector<CallExpr*> collectAllCallExprs(std::vector<std::unique_ptr<Stmt>>& items);

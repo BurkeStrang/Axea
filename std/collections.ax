@@ -314,3 +314,918 @@ impl<T> PriorityQueue<T>
         return self.items.length
     }
 }
+
+struct Node<T>
+{
+    value: T
+    prev: *Node<T>
+    next: *Node<T>
+}
+
+struct LinkedList<T>
+{
+    length: i32
+    head: *Node<T>
+    tail: *Node<T>
+}
+
+pub newLinkedList<T>() -> LinkedList<T>
+{
+    return LinkedList<T> { length: 0, head: null, tail: null }
+}
+
+impl<T> LinkedList<T>
+{
+    push_front(self, value: T)
+    {
+        raw = malloc(sizeof<Node<T>>())
+        newNode = unsafe { raw as *Node<T> }
+        unsafe { *newNode = Node<T> { value: value, prev: null, next: self.head } }
+        if self.head == null
+        {
+            self.tail = newNode
+        }
+        else
+        {
+            oldHead = unsafe { *self.head }
+            oldHead.prev = newNode
+        }
+        self.head = newNode
+        self.length = self.length + 1
+    }
+
+    push_back(self, value: T)
+    {
+        raw = malloc(sizeof<Node<T>>())
+        newNode = unsafe { raw as *Node<T> }
+        unsafe { *newNode = Node<T> { value: value, prev: self.tail, next: null } }
+        if self.tail == null
+        {
+            self.head = newNode
+        }
+        else
+        {
+            oldTail = unsafe { *self.tail }
+            oldTail.next = newNode
+        }
+        self.tail = newNode
+        self.length = self.length + 1
+    }
+
+    // No bounds check on an empty pop (dereferences a null node pointer) - matches this
+    // collection's own longstanding documented UB-on-empty behavior in compiled mode
+    // (see docs/language/0036-linked-lists.md). The interpreter throws a clear "dereferenced a
+    // null pointer" error instead, an improvement over the retired intrinsic's own identical UB.
+    pop_front(self) -> T
+    {
+        oldHead = unsafe { *self.head }
+        value = oldHead.value
+        newHead = oldHead.next
+        if newHead == null
+        {
+            self.tail = null
+        }
+        else
+        {
+            newHeadNode = unsafe { *newHead }
+            newHeadNode.prev = null
+        }
+        self.head = newHead
+        self.length = self.length - 1
+        return value
+    }
+
+    pop_back(self) -> T
+    {
+        oldTail = unsafe { *self.tail }
+        value = oldTail.value
+        newTail = oldTail.prev
+        if newTail == null
+        {
+            self.head = null
+        }
+        else
+        {
+            newTailNode = unsafe { *newTail }
+            newTailNode.next = null
+        }
+        self.tail = newTail
+        self.length = self.length - 1
+        return value
+    }
+}
+
+struct MapEntry<K,V>
+{
+    key: K
+    value: V
+    next: *MapEntry<K,V>
+}
+
+struct Map<K,V>
+{
+    length: i32
+    bucketCount: i32
+    buckets: **MapEntry<K,V>
+}
+
+pub newMap<K,V>() -> Map<K,V>
+{
+    bucketCount = 8
+    raw = malloc(bucketCount as i64 * sizeof<*MapEntry<K,V>>())
+    buckets = unsafe { raw as **MapEntry<K,V> }
+    i = 0
+    loop
+    {
+        if i >= bucketCount { break }
+        unsafe { *(buckets + i) = null }
+        i = i + 1
+    }
+    return Map<K,V> { length: 0, bucketCount: bucketCount, buckets: buckets }
+}
+
+impl<K,V> Map<K,V>
+{
+    // Doubles bucketCount and relinks every existing entry into the fresh array - no entry is
+    // reallocated, only relinked, and the old bucket array itself is left unfreed (matches this
+    // collection's own "leak, don't free" convention, see List<T>.push's own identical choice for
+    // the old data buffer it replaces).
+    resize(self)
+    {
+        newBucketCount = self.bucketCount * 2
+        raw = malloc(newBucketCount as i64 * sizeof<*MapEntry<K,V>>())
+        newBuckets = unsafe { raw as **MapEntry<K,V> }
+        i = 0
+        loop
+        {
+            if i >= newBucketCount { break }
+            unsafe { *(newBuckets + i) = null }
+            i = i + 1
+        }
+        j = 0
+        loop
+        {
+            if j >= self.bucketCount { break }
+            cur = unsafe { *(self.buckets + j) }
+            loop
+            {
+                if cur == null { break }
+                curNode = unsafe { *cur }
+                nextNode = curNode.next
+                idx = hash<K>(curNode.key) & (newBucketCount - 1)
+                oldHead = unsafe { *(newBuckets + idx) }
+                curNode.next = oldHead
+                unsafe { *(newBuckets + idx) = cur }
+                cur = nextNode
+            }
+            j = j + 1
+        }
+        self.bucketCount = newBucketCount
+        self.buckets = newBuckets
+    }
+
+    set(self, key: K, value: V)
+    {
+        idx = hash<K>(key) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        loop
+        {
+            if cur == null { break }
+            curNode = unsafe { *cur }
+            if keyEq<K>(curNode.key, key)
+            {
+                curNode.value = value
+                return
+            }
+            cur = curNode.next
+        }
+        raw = malloc(sizeof<MapEntry<K,V>>())
+        newEntry = unsafe { raw as *MapEntry<K,V> }
+        oldHead = unsafe { *(self.buckets + idx) }
+        unsafe { *newEntry = MapEntry<K,V> { key: key, value: value, next: oldHead } }
+        unsafe { *(self.buckets + idx) = newEntry }
+        self.length = self.length + 1
+        if self.length * 4 > self.bucketCount * 3
+        {
+            self.resize()
+        }
+    }
+
+    // No bounds check on a missing key (dereferences a null node pointer once the chain runs out) -
+    // matches this collection's own longstanding documented UB-on-missing-key behavior in compiled
+    // mode (see docs/language/0034-maps-and-sets.md). The interpreter throws a clear "dereferenced
+    // a null pointer" error instead, an improvement over the retired intrinsic's own "returns an
+    // unspecified zero value" compiled behavior.
+    get(self, key: K) -> V
+    {
+        idx = hash<K>(key) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        loop
+        {
+            curNode = unsafe { *cur }
+            if keyEq<K>(curNode.key, key) { return curNode.value }
+            cur = curNode.next
+        }
+    }
+
+    contains(self, key: K) -> bool
+    {
+        idx = hash<K>(key) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        loop
+        {
+            if cur == null { return false }
+            curNode = unsafe { *cur }
+            if keyEq<K>(curNode.key, key) { return true }
+            cur = curNode.next
+        }
+    }
+
+    // No `free` of the unlinked entry (matches every other collection's "leak, don't free"
+    // convention, and the retired intrinsic's own identical choice).
+    remove(self, key: K)
+    {
+        idx = hash<K>(key) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        prev: *MapEntry<K,V> = null
+        loop
+        {
+            if cur == null { return }
+            curNode = unsafe { *cur }
+            if keyEq<K>(curNode.key, key)
+            {
+                if prev == null
+                {
+                    unsafe { *(self.buckets + idx) = curNode.next }
+                }
+                else
+                {
+                    prevNode = unsafe { *prev }
+                    prevNode.next = curNode.next
+                }
+                self.length = self.length - 1
+                return
+            }
+            prev = cur
+            cur = curNode.next
+        }
+    }
+}
+
+struct SetEntry<T>
+{
+    value: T
+    next: *SetEntry<T>
+}
+
+struct Set<T>
+{
+    length: i32
+    bucketCount: i32
+    buckets: **SetEntry<T>
+}
+
+pub newSet<T>() -> Set<T>
+{
+    bucketCount = 8
+    raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>())
+    buckets = unsafe { raw as **SetEntry<T> }
+    i = 0
+    loop
+    {
+        if i >= bucketCount { break }
+        unsafe { *(buckets + i) = null }
+        i = i + 1
+    }
+    return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets }
+}
+
+impl<T> Set<T>
+{
+    resize(self)
+    {
+        newBucketCount = self.bucketCount * 2
+        raw = malloc(newBucketCount as i64 * sizeof<*SetEntry<T>>())
+        newBuckets = unsafe { raw as **SetEntry<T> }
+        i = 0
+        loop
+        {
+            if i >= newBucketCount { break }
+            unsafe { *(newBuckets + i) = null }
+            i = i + 1
+        }
+        j = 0
+        loop
+        {
+            if j >= self.bucketCount { break }
+            cur = unsafe { *(self.buckets + j) }
+            loop
+            {
+                if cur == null { break }
+                curNode = unsafe { *cur }
+                nextNode = curNode.next
+                idx = hash<T>(curNode.value) & (newBucketCount - 1)
+                oldHead = unsafe { *(newBuckets + idx) }
+                curNode.next = oldHead
+                unsafe { *(newBuckets + idx) = cur }
+                cur = nextNode
+            }
+            j = j + 1
+        }
+        self.bucketCount = newBucketCount
+        self.buckets = newBuckets
+    }
+
+    add(self, value: T)
+    {
+        idx = hash<T>(value) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        loop
+        {
+            if cur == null { break }
+            curNode = unsafe { *cur }
+            if keyEq<T>(curNode.value, value) { return }
+            cur = curNode.next
+        }
+        raw = malloc(sizeof<SetEntry<T>>())
+        newEntry = unsafe { raw as *SetEntry<T> }
+        oldHead = unsafe { *(self.buckets + idx) }
+        unsafe { *newEntry = SetEntry<T> { value: value, next: oldHead } }
+        unsafe { *(self.buckets + idx) = newEntry }
+        self.length = self.length + 1
+        if self.length * 4 > self.bucketCount * 3
+        {
+            self.resize()
+        }
+    }
+
+    contains(self, value: T) -> bool
+    {
+        idx = hash<T>(value) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        loop
+        {
+            if cur == null { return false }
+            curNode = unsafe { *cur }
+            if keyEq<T>(curNode.value, value) { return true }
+            cur = curNode.next
+        }
+    }
+
+    remove(self, value: T)
+    {
+        idx = hash<T>(value) & (self.bucketCount - 1)
+        cur = unsafe { *(self.buckets + idx) }
+        prev: *SetEntry<T> = null
+        loop
+        {
+            if cur == null { return }
+            curNode = unsafe { *cur }
+            if keyEq<T>(curNode.value, value)
+            {
+                if prev == null
+                {
+                    unsafe { *(self.buckets + idx) = curNode.next }
+                }
+                else
+                {
+                    prevNode = unsafe { *prev }
+                    prevNode.next = curNode.next
+                }
+                self.length = self.length - 1
+                return
+            }
+            prev = cur
+            cur = curNode.next
+        }
+    }
+}
+
+maxI32(a: i32, b: i32) -> i32
+{
+    if a > b { return a }
+    return b
+}
+
+struct SortedMapNode<K,V>
+{
+    key: K
+    value: V
+    height: i32
+    left: *SortedMapNode<K,V>
+    right: *SortedMapNode<K,V>
+}
+
+struct SortedMap<K,V>
+{
+    length: i32
+    root: *SortedMapNode<K,V>
+}
+
+pub newSortedMap<K,V>() -> SortedMap<K,V>
+{
+    return SortedMap<K,V> { length: 0, root: null }
+}
+
+sortedMapNodeHeight<K,V>(node: *SortedMapNode<K,V>) -> i32
+{
+    if node == null { return 0 }
+    return unsafe { *node }.height
+}
+
+// Classic single right rotation: y is the unbalanced node, x = y.left becomes the new subtree
+// root.
+sortedMapRotateRight<K,V>(y: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+{
+    yNode = unsafe { *y }
+    x = yNode.left
+    xNode = unsafe { *x }
+    t2 = xNode.right
+    xNode.right = y
+    yNode.left = t2
+    yNode.height = maxI32(sortedMapNodeHeight<K,V>(yNode.left), sortedMapNodeHeight<K,V>(yNode.right)) + 1
+    xNode.height = maxI32(sortedMapNodeHeight<K,V>(xNode.left), sortedMapNodeHeight<K,V>(y)) + 1
+    return x
+}
+
+// Mirror image of sortedMapRotateRight above: x is the unbalanced node, y = x.right becomes the
+// new subtree root.
+sortedMapRotateLeft<K,V>(x: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+{
+    xNode = unsafe { *x }
+    y = xNode.right
+    yNode = unsafe { *y }
+    t2 = yNode.left
+    yNode.left = x
+    xNode.right = t2
+    xNode.height = maxI32(sortedMapNodeHeight<K,V>(xNode.left), sortedMapNodeHeight<K,V>(xNode.right)) + 1
+    yNode.height = maxI32(sortedMapNodeHeight<K,V>(x), sortedMapNodeHeight<K,V>(yNode.right)) + 1
+    return y
+}
+
+struct SortedMapInsertResult<K,V>
+{
+    node: *SortedMapNode<K,V>
+    wasNew: bool
+}
+
+sortedMapInsertNode<K,V>(node: *SortedMapNode<K,V>, key: K, value: V) -> SortedMapInsertResult<K,V>
+{
+    if node == null
+    {
+        raw = malloc(sizeof<SortedMapNode<K,V>>())
+        newNode = unsafe { raw as *SortedMapNode<K,V> }
+        unsafe {
+            *newNode = SortedMapNode<K,V> { key: key, value: value, height: 1, left: null, right: null }
+        }
+        return SortedMapInsertResult<K,V> { node: newNode, wasNew: true }
+    }
+
+    curNode = unsafe { *node }
+    wasNew: bool = false
+    if key < curNode.key
+    {
+        leftResult = sortedMapInsertNode<K,V>(curNode.left, key, value)
+        curNode.left = leftResult.node
+        wasNew = leftResult.wasNew
+    }
+    else if curNode.key < key
+    {
+        rightResult = sortedMapInsertNode<K,V>(curNode.right, key, value)
+        curNode.right = rightResult.node
+        wasNew = rightResult.wasNew
+    }
+    else
+    {
+        curNode.value = value
+        return SortedMapInsertResult<K,V> { node: node, wasNew: false }
+    }
+
+    lh = sortedMapNodeHeight<K,V>(curNode.left)
+    rh = sortedMapNodeHeight<K,V>(curNode.right)
+    curNode.height = maxI32(lh, rh) + 1
+    balance = lh - rh
+
+    if balance > 1
+    {
+        leftNode = unsafe { *curNode.left }
+        if key < leftNode.key
+        {
+            return SortedMapInsertResult<K,V> { node: sortedMapRotateRight<K,V>(node), wasNew: wasNew }
+        }
+        curNode.left = sortedMapRotateLeft<K,V>(curNode.left)
+        return SortedMapInsertResult<K,V> { node: sortedMapRotateRight<K,V>(node), wasNew: wasNew }
+    }
+
+    if balance < 0 - 1
+    {
+        rightNode = unsafe { *curNode.right }
+        if rightNode.key < key
+        {
+            return SortedMapInsertResult<K,V> { node: sortedMapRotateLeft<K,V>(node), wasNew: wasNew }
+        }
+        curNode.right = sortedMapRotateRight<K,V>(curNode.right)
+        return SortedMapInsertResult<K,V> { node: sortedMapRotateLeft<K,V>(node), wasNew: wasNew }
+    }
+
+    return SortedMapInsertResult<K,V> { node: node, wasNew: wasNew }
+}
+
+// Iterative descent to the leftmost (smallest-key) node of a subtree - only ever called with a
+// non-null argument (sortedMapRemoveNode's own two-children case, on a subtree it already knows
+// is non-empty).
+sortedMapMinValueNode<K,V>(node: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+{
+    cur = node
+    loop
+    {
+        curNode = unsafe { *cur }
+        if curNode.left == null { break }
+        cur = curNode.left
+    }
+    return cur
+}
+
+struct SortedMapRemoveResult<K,V>
+{
+    node: *SortedMapNode<K,V>
+    wasRemoved: bool
+}
+
+// Recursive AVL delete: descends by key; on the found node, splices it out (0 or 1 child) or
+// replaces its key/value with its in-order successor and recursively removes that successor from
+// the right subtree instead (2 children) - then rebalances on the way back up, the same shape
+// sortedMapInsertNode's own rebalance uses but checking the *child's own* balance rather than
+// comparing against a just-inserted key, since deletion has no such key to compare against.
+sortedMapRemoveNode<K,V>(node: *SortedMapNode<K,V>, key: K) -> SortedMapRemoveResult<K,V>
+{
+    if node == null
+    {
+        return SortedMapRemoveResult<K,V> { node: null, wasRemoved: false }
+    }
+
+    curNode = unsafe { *node }
+    wasRemoved: bool = false
+    if key < curNode.key
+    {
+        leftResult = sortedMapRemoveNode<K,V>(curNode.left, key)
+        curNode.left = leftResult.node
+        wasRemoved = leftResult.wasRemoved
+    }
+    else if curNode.key < key
+    {
+        rightResult = sortedMapRemoveNode<K,V>(curNode.right, key)
+        curNode.right = rightResult.node
+        wasRemoved = rightResult.wasRemoved
+    }
+    else
+    {
+        wasRemoved = true
+        if curNode.left == null
+        {
+            return SortedMapRemoveResult<K,V> { node: curNode.right, wasRemoved: true }
+        }
+        if curNode.right == null
+        {
+            return SortedMapRemoveResult<K,V> { node: curNode.left, wasRemoved: true }
+        }
+        successor = sortedMapMinValueNode<K,V>(curNode.right)
+        successorNode = unsafe { *successor }
+        curNode.key = successorNode.key
+        curNode.value = successorNode.value
+        successorResult = sortedMapRemoveNode<K,V>(curNode.right, successorNode.key)
+        curNode.right = successorResult.node
+    }
+
+    lh = sortedMapNodeHeight<K,V>(curNode.left)
+    rh = sortedMapNodeHeight<K,V>(curNode.right)
+    curNode.height = maxI32(lh, rh) + 1
+    balance = lh - rh
+
+    if balance > 1
+    {
+        leftNode = unsafe { *curNode.left }
+        leftBalance = sortedMapNodeHeight<K,V>(leftNode.left) - sortedMapNodeHeight<K,V>(leftNode.right)
+        if leftBalance >= 0
+        {
+            return SortedMapRemoveResult<K,V> { node: sortedMapRotateRight<K,V>(node), wasRemoved: wasRemoved }
+        }
+        curNode.left = sortedMapRotateLeft<K,V>(curNode.left)
+        return SortedMapRemoveResult<K,V> { node: sortedMapRotateRight<K,V>(node), wasRemoved: wasRemoved }
+    }
+
+    if balance < 0 - 1
+    {
+        rightNode = unsafe { *curNode.right }
+        rightBalance = sortedMapNodeHeight<K,V>(rightNode.left) - sortedMapNodeHeight<K,V>(rightNode.right)
+        if rightBalance <= 0
+        {
+            return SortedMapRemoveResult<K,V> { node: sortedMapRotateLeft<K,V>(node), wasRemoved: wasRemoved }
+        }
+        curNode.right = sortedMapRotateRight<K,V>(curNode.right)
+        return SortedMapRemoveResult<K,V> { node: sortedMapRotateLeft<K,V>(node), wasRemoved: wasRemoved }
+    }
+
+    return SortedMapRemoveResult<K,V> { node: node, wasRemoved: wasRemoved }
+}
+
+impl<K,V> SortedMap<K,V>
+{
+    set(self, key: K, value: V)
+    {
+        result = sortedMapInsertNode<K,V>(self.root, key, value)
+        self.root = result.node
+        if result.wasNew { self.length = self.length + 1 }
+    }
+
+    // No bounds check on a missing key (dereferences a null node pointer once the search runs off
+    // a leaf) - matches Map<K,V>.get's own identical "2026 Update" precedent: interpreter throws a
+    // clear "dereferenced a null pointer" error, compiled mode is genuine UB (was an unspecified
+    // sentinel before).
+    get(self, key: K) -> V
+    {
+        cur = self.root
+        loop
+        {
+            curNode = unsafe { *cur }
+            if key < curNode.key { cur = curNode.left }
+            else if curNode.key < key { cur = curNode.right }
+            else { return curNode.value }
+        }
+    }
+
+    contains(self, key: K) -> bool
+    {
+        cur = self.root
+        loop
+        {
+            if cur == null { return false }
+            curNode = unsafe { *cur }
+            if key < curNode.key { cur = curNode.left }
+            else if curNode.key < key { cur = curNode.right }
+            else { return true }
+        }
+    }
+
+    // No `free` of the unlinked node (matches every other collection's "leak, don't free"
+    // convention, and the retired intrinsic's own identical choice).
+    remove(self, key: K)
+    {
+        result = sortedMapRemoveNode<K,V>(self.root, key)
+        self.root = result.node
+        if result.wasRemoved { self.length = self.length - 1 }
+    }
+}
+
+struct SortedSetNode<T>
+{
+    key: T
+    height: i32
+    left: *SortedSetNode<T>
+    right: *SortedSetNode<T>
+}
+
+struct SortedSet<T>
+{
+    length: i32
+    root: *SortedSetNode<T>
+}
+
+pub newSortedSet<T>() -> SortedSet<T>
+{
+    return SortedSet<T> { length: 0, root: null }
+}
+
+sortedSetNodeHeight<T>(node: *SortedSetNode<T>) -> i32
+{
+    if node == null { return 0 }
+    return unsafe { *node }.height
+}
+
+// Classic single right rotation: y is the unbalanced node, x = y.left becomes the new subtree
+// root.
+sortedSetRotateRight<T>(y: *SortedSetNode<T>) -> *SortedSetNode<T>
+{
+    yNode = unsafe { *y }
+    x = yNode.left
+    xNode = unsafe { *x }
+    t2 = xNode.right
+    xNode.right = y
+    yNode.left = t2
+    yNode.height = maxI32(sortedSetNodeHeight<T>(yNode.left), sortedSetNodeHeight<T>(yNode.right)) + 1
+    xNode.height = maxI32(sortedSetNodeHeight<T>(xNode.left), sortedSetNodeHeight<T>(y)) + 1
+    return x
+}
+
+// Mirror image of sortedSetRotateRight above: x is the unbalanced node, y = x.right becomes the
+// new subtree root.
+sortedSetRotateLeft<T>(x: *SortedSetNode<T>) -> *SortedSetNode<T>
+{
+    xNode = unsafe { *x }
+    y = xNode.right
+    yNode = unsafe { *y }
+    t2 = yNode.left
+    yNode.left = x
+    xNode.right = t2
+    xNode.height = maxI32(sortedSetNodeHeight<T>(xNode.left), sortedSetNodeHeight<T>(xNode.right)) + 1
+    yNode.height = maxI32(sortedSetNodeHeight<T>(x), sortedSetNodeHeight<T>(yNode.right)) + 1
+    return y
+}
+
+struct SortedSetInsertResult<T>
+{
+    node: *SortedSetNode<T>
+    wasNew: bool
+}
+
+// `insertNode`'s "already present" base case needs no update step (a set has no value to update)
+// - it just reports "not new" and returns the node unchanged.
+sortedSetInsertNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetInsertResult<T>
+{
+    if node == null
+    {
+        raw = malloc(sizeof<SortedSetNode<T>>())
+        newNode = unsafe { raw as *SortedSetNode<T> }
+        unsafe {
+            *newNode = SortedSetNode<T> { key: key, height: 1, left: null, right: null }
+        }
+        return SortedSetInsertResult<T> { node: newNode, wasNew: true }
+    }
+
+    curNode = unsafe { *node }
+    wasNew: bool = false
+    if key < curNode.key
+    {
+        leftResult = sortedSetInsertNode<T>(curNode.left, key)
+        curNode.left = leftResult.node
+        wasNew = leftResult.wasNew
+    }
+    else if curNode.key < key
+    {
+        rightResult = sortedSetInsertNode<T>(curNode.right, key)
+        curNode.right = rightResult.node
+        wasNew = rightResult.wasNew
+    }
+    else
+    {
+        return SortedSetInsertResult<T> { node: node, wasNew: false }
+    }
+
+    lh = sortedSetNodeHeight<T>(curNode.left)
+    rh = sortedSetNodeHeight<T>(curNode.right)
+    curNode.height = maxI32(lh, rh) + 1
+    balance = lh - rh
+
+    if balance > 1
+    {
+        leftNode = unsafe { *curNode.left }
+        if key < leftNode.key
+        {
+            return SortedSetInsertResult<T> { node: sortedSetRotateRight<T>(node), wasNew: wasNew }
+        }
+        curNode.left = sortedSetRotateLeft<T>(curNode.left)
+        return SortedSetInsertResult<T> { node: sortedSetRotateRight<T>(node), wasNew: wasNew }
+    }
+
+    if balance < 0 - 1
+    {
+        rightNode = unsafe { *curNode.right }
+        if rightNode.key < key
+        {
+            return SortedSetInsertResult<T> { node: sortedSetRotateLeft<T>(node), wasNew: wasNew }
+        }
+        curNode.right = sortedSetRotateRight<T>(curNode.right)
+        return SortedSetInsertResult<T> { node: sortedSetRotateLeft<T>(node), wasNew: wasNew }
+    }
+
+    return SortedSetInsertResult<T> { node: node, wasNew: wasNew }
+}
+
+// Iterative descent to the leftmost (smallest-key) node of a subtree - only ever called with a
+// non-null argument (sortedSetRemoveNode's own two-children case, on a subtree it already knows
+// is non-empty).
+sortedSetMinValueNode<T>(node: *SortedSetNode<T>) -> *SortedSetNode<T>
+{
+    cur = node
+    loop
+    {
+        curNode = unsafe { *cur }
+        if curNode.left == null { break }
+        cur = curNode.left
+    }
+    return cur
+}
+
+struct SortedSetRemoveResult<T>
+{
+    node: *SortedSetNode<T>
+    wasRemoved: bool
+}
+
+// Recursive AVL delete: descends by key; on the found node, splices it out (0 or 1 child) or
+// replaces its key with its in-order successor's own key and recursively removes that successor
+// from the right subtree instead (2 children) - then rebalances on the way back up, the same
+// shape sortedSetInsertNode's own rebalance uses but checking the *child's own* balance rather
+// than comparing against a just-inserted key, since deletion has no such key to compare against.
+sortedSetRemoveNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetRemoveResult<T>
+{
+    if node == null
+    {
+        return SortedSetRemoveResult<T> { node: null, wasRemoved: false }
+    }
+
+    curNode = unsafe { *node }
+    wasRemoved: bool = false
+    if key < curNode.key
+    {
+        leftResult = sortedSetRemoveNode<T>(curNode.left, key)
+        curNode.left = leftResult.node
+        wasRemoved = leftResult.wasRemoved
+    }
+    else if curNode.key < key
+    {
+        rightResult = sortedSetRemoveNode<T>(curNode.right, key)
+        curNode.right = rightResult.node
+        wasRemoved = rightResult.wasRemoved
+    }
+    else
+    {
+        wasRemoved = true
+        if curNode.left == null
+        {
+            return SortedSetRemoveResult<T> { node: curNode.right, wasRemoved: true }
+        }
+        if curNode.right == null
+        {
+            return SortedSetRemoveResult<T> { node: curNode.left, wasRemoved: true }
+        }
+        successor = sortedSetMinValueNode<T>(curNode.right)
+        successorNode = unsafe { *successor }
+        curNode.key = successorNode.key
+        successorResult = sortedSetRemoveNode<T>(curNode.right, successorNode.key)
+        curNode.right = successorResult.node
+    }
+
+    lh = sortedSetNodeHeight<T>(curNode.left)
+    rh = sortedSetNodeHeight<T>(curNode.right)
+    curNode.height = maxI32(lh, rh) + 1
+    balance = lh - rh
+
+    if balance > 1
+    {
+        leftNode = unsafe { *curNode.left }
+        leftBalance = sortedSetNodeHeight<T>(leftNode.left) - sortedSetNodeHeight<T>(leftNode.right)
+        if leftBalance >= 0
+        {
+            return SortedSetRemoveResult<T> { node: sortedSetRotateRight<T>(node), wasRemoved: wasRemoved }
+        }
+        curNode.left = sortedSetRotateLeft<T>(curNode.left)
+        return SortedSetRemoveResult<T> { node: sortedSetRotateRight<T>(node), wasRemoved: wasRemoved }
+    }
+
+    if balance < 0 - 1
+    {
+        rightNode = unsafe { *curNode.right }
+        rightBalance = sortedSetNodeHeight<T>(rightNode.left) - sortedSetNodeHeight<T>(rightNode.right)
+        if rightBalance <= 0
+        {
+            return SortedSetRemoveResult<T> { node: sortedSetRotateLeft<T>(node), wasRemoved: wasRemoved }
+        }
+        curNode.right = sortedSetRotateRight<T>(curNode.right)
+        return SortedSetRemoveResult<T> { node: sortedSetRotateLeft<T>(node), wasRemoved: wasRemoved }
+    }
+
+    return SortedSetRemoveResult<T> { node: node, wasRemoved: wasRemoved }
+}
+
+impl<T> SortedSet<T>
+{
+    add(self, key: T)
+    {
+        result = sortedSetInsertNode<T>(self.root, key)
+        self.root = result.node
+        if result.wasNew { self.length = self.length + 1 }
+    }
+
+    contains(self, key: T) -> bool
+    {
+        cur = self.root
+        loop
+        {
+            if cur == null { return false }
+            curNode = unsafe { *cur }
+            if key < curNode.key { cur = curNode.left }
+            else if curNode.key < key { cur = curNode.right }
+            else { return true }
+        }
+    }
+
+    // No `free` of the unlinked node (matches every other collection's "leak, don't free"
+    // convention, and the retired intrinsic's own identical choice).
+    remove(self, key: T)
+    {
+        result = sortedSetRemoveNode<T>(self.root, key)
+        self.root = result.node
+        if result.wasRemoved { self.length = self.length - 1 }
+    }
+}

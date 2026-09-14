@@ -324,38 +324,50 @@ TEST("CapabilityChecker infers read for a Stack<T>-shaped struct parameter that 
     EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is push_front'd")
-{
-    const auto capabilities = capabilitiesOf("pushOne(s: LinkedList<i32>) { s.push_front(1) } "
-                                             "a = LinkedList<i32>() "
-                                             "called = pushOne(a)");
-    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is push_back'd")
-{
-    const auto capabilities = capabilitiesOf("pushOne(s: LinkedList<i32>) { s.push_back(1) } "
-                                             "a = LinkedList<i32>() "
-                                             "called = pushOne(a)");
-    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is pop_front'd")
+TEST("CapabilityChecker infers write for a LinkedList<T>-shaped struct parameter that is "
+     "push_front'd")
 {
     const auto capabilities =
-        capabilitiesOf("popOne(s: LinkedList<i32>) -> i32 { return s.pop_front() } "
-                       "a = LinkedList<i32>() "
-                       "called = a.push_front(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { push_front(self, value: T) { } } "
+                       "pushOne(s: Box<i32>) { s.push_front(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a LinkedList<T>-shaped struct parameter that is "
+     "push_back'd")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { push_back(self, value: T) { } } "
+                       "pushOne(s: Box<i32>) { s.push_back(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = pushOne(a)");
+    EXPECT_TRUE(capabilities.at("pushOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a LinkedList<T>-shaped struct parameter that is "
+     "pop_front'd")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { pop_front(self) -> T { return self.length } } "
+                       "popOne(s: Box<i32>) -> i32 { return s.pop_front() } "
+                       "a = Box<i32> { length: 0 } "
                        "x = popOne(a)");
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a LinkedList<T> parameter that is pop_back'd")
+TEST("CapabilityChecker infers write for a LinkedList<T>-shaped struct parameter that is "
+     "pop_back'd")
 {
     const auto capabilities =
-        capabilitiesOf("popOne(s: LinkedList<i32>) -> i32 { return s.pop_back() } "
-                       "a = LinkedList<i32>() "
-                       "called = a.push_front(1) "
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { pop_back(self) -> T { return self.length } } "
+                       "popOne(s: Box<i32>) -> i32 { return s.pop_back() } "
+                       "a = Box<i32> { length: 0 } "
                        "x = popOne(a)");
     EXPECT_TRUE(capabilities.at("popOne")[0] == Capability::Write);
 }
@@ -468,98 +480,129 @@ TEST("CapabilityChecker infers read for a PriorityQueue<T>-shaped struct paramet
     EXPECT_TRUE(capabilities.at("peekOne")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a Map<i32,i32> parameter that is 'set'")
-{
-    const auto capabilities = capabilitiesOf("put(m: Map<i32,i32>) { m.set(1, 2) } "
-                                             "a = Map<i32,i32>() "
-                                             "called = put(a)");
-    EXPECT_TRUE(capabilities.at("put")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers write for a Map<i32,i32> parameter that is 'remove'd")
-{
-    const auto capabilities = capabilitiesOf("drop(m: Map<i32,i32>) { m.remove(1) } "
-                                             "a = Map<i32,i32>() "
-                                             "called = drop(a)");
-    EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers read for a Map<i32,i32> parameter that is only 'get'/'contains'")
+TEST("CapabilityChecker infers write for a Map<K,V>-shaped struct parameter that is 'set'")
 {
     const auto capabilities =
-        capabilitiesOf("peek(m: Map<i32,i32>) -> bool { return m.contains(1) } "
-                       "a = Map<i32,i32>() "
-                       "called = a.set(1, 2) "
-                       "x = peek(a)");
-    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
-}
-
-TEST("CapabilityChecker infers write for a Set<i32> parameter that is 'add'ed to")
-{
-    const auto capabilities = capabilitiesOf("addOne(s: Set<i32>) { s.add(1) } "
-                                             "a = Set<i32>() "
-                                             "called = addOne(a)");
-    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
-}
-
-TEST("CapabilityChecker infers read for a Set<i32> parameter that is only 'contains'")
-{
-    const auto capabilities = capabilitiesOf("peek(s: Set<i32>) -> bool { return s.contains(1) } "
-                                             "a = Set<i32>() "
-                                             "called = a.add(1) "
-                                             "x = peek(a)");
-    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
-}
-
-TEST("CapabilityChecker infers write for a SortedMap<i32,i32> parameter that is 'set'")
-{
-    const auto capabilities = capabilitiesOf("put(m: SortedMap<i32,i32>) { m.set(1, 2) } "
-                                             "a = SortedMap<i32,i32>() "
-                                             "called = put(a)");
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                       "put(m: Box<i32,i32>) { m.set(1, 2) } "
+                       "a = Box<i32,i32> { length: 0 } "
+                       "called = put(a)");
     EXPECT_TRUE(capabilities.at("put")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a SortedMap<i32,i32> parameter that is 'remove'd")
+TEST("CapabilityChecker infers write for a Map<K,V>-shaped struct parameter that is 'remove'd")
 {
-    const auto capabilities = capabilitiesOf("drop(m: SortedMap<i32,i32>) { m.remove(1) } "
-                                             "a = SortedMap<i32,i32>() "
-                                             "called = drop(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { remove(self, key: K) { } } "
+                       "drop(m: Box<i32,i32>) { m.remove(1) } "
+                       "a = Box<i32,i32> { length: 0 } "
+                       "called = drop(a)");
     EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers read for a SortedMap<i32,i32> parameter that is only "
+TEST("CapabilityChecker infers read for a Map<K,V>-shaped struct parameter that is only "
      "'get'/'contains'")
 {
     const auto capabilities =
-        capabilitiesOf("peek(m: SortedMap<i32,i32>) -> bool { return m.contains(1) } "
-                       "a = SortedMap<i32,i32>() "
-                       "called = a.set(1, 2) "
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { contains(self, key: K) -> bool { return true } } "
+                       "peek(m: Box<i32,i32>) -> bool { return m.contains(1) } "
+                       "a = Box<i32,i32> { length: 0 } "
                        "x = peek(a)");
     EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
 }
 
-TEST("CapabilityChecker infers write for a SortedSet<i32> parameter that is 'add'ed to")
+TEST("CapabilityChecker infers write for a Set<T>-shaped struct parameter that is 'add'ed to")
 {
-    const auto capabilities = capabilitiesOf("addOne(s: SortedSet<i32>) { s.add(1) } "
-                                             "a = SortedSet<i32>() "
-                                             "called = addOne(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { add(self, value: T) { } } "
+                       "addOne(s: Box<i32>) { s.add(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = addOne(a)");
     EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers write for a SortedSet<i32> parameter that is 'remove'd")
+TEST("CapabilityChecker infers read for a Set<T>-shaped struct parameter that is only 'contains'")
 {
-    const auto capabilities = capabilitiesOf("drop(s: SortedSet<i32>) { s.remove(1) } "
-                                             "a = SortedSet<i32>() "
-                                             "called = drop(a)");
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { contains(self, value: T) -> bool { return true } } "
+                       "peek(s: Box<i32>) -> bool { return s.contains(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a SortedMap<K,V>-shaped struct parameter that is 'set'")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
+                       "put(m: Box<i32,i32>) { m.set(1, 2) } "
+                       "a = Box<i32,i32> { length: 0 } "
+                       "called = put(a)");
+    EXPECT_TRUE(capabilities.at("put")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a SortedMap<K,V>-shaped struct parameter that is "
+     "'remove'd")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { remove(self, key: K) { } } "
+                       "drop(m: Box<i32,i32>) { m.remove(1) } "
+                       "a = Box<i32,i32> { length: 0 } "
+                       "called = drop(a)");
     EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
 }
 
-TEST("CapabilityChecker infers read for a SortedSet<i32> parameter that is only 'contains'")
+TEST("CapabilityChecker infers read for a SortedMap<K,V>-shaped struct parameter that is only "
+     "'get'/'contains'")
 {
     const auto capabilities =
-        capabilitiesOf("peek(s: SortedSet<i32>) -> bool { return s.contains(1) } "
-                       "a = SortedSet<i32>() "
-                       "called = a.add(1) "
+        capabilitiesOf("struct Box<K,V> { length: i32 } "
+                       "impl<K,V> Box<K,V> { contains(self, key: K) -> bool { return true } } "
+                       "peek(m: Box<i32,i32>) -> bool { return m.contains(1) } "
+                       "a = Box<i32,i32> { length: 0 } "
+                       "x = peek(a)");
+    EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
+}
+
+TEST("CapabilityChecker infers write for a SortedSet<T>-shaped struct parameter that is 'add'ed "
+     "to")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { add(self, value: T) { } } "
+                       "addOne(s: Box<i32>) { s.add(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = addOne(a)");
+    EXPECT_TRUE(capabilities.at("addOne")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers write for a SortedSet<T>-shaped struct parameter that is "
+     "'remove'd")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { remove(self, value: T) { } } "
+                       "drop(s: Box<i32>) { s.remove(1) } "
+                       "a = Box<i32> { length: 0 } "
+                       "called = drop(a)");
+    EXPECT_TRUE(capabilities.at("drop")[0] == Capability::Write);
+}
+
+TEST("CapabilityChecker infers read for a SortedSet<T>-shaped struct parameter that is only "
+     "'contains'")
+{
+    const auto capabilities =
+        capabilitiesOf("struct Box<T> { length: i32 } "
+                       "impl<T> Box<T> { contains(self, value: T) -> bool { return true } } "
+                       "peek(s: Box<i32>) -> bool { return s.contains(1) } "
+                       "a = Box<i32> { length: 0 } "
                        "x = peek(a)");
     EXPECT_TRUE(capabilities.at("peek")[0] == Capability::Read);
 }

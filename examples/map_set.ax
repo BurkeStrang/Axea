@@ -1,6 +1,8 @@
+use collections
+
 build() -> Map<i32,i32>
 {
-    m = Map<i32,i32>()
+    m = collections.newMap<i32,i32>()
     m.set(1, 10)
     m.set(2, 20)
     m.set(3, 30)
@@ -17,7 +19,7 @@ fillMore(m: Map<i32,i32>)
 
 buildSet() -> Set<i32>
 {
-    s = Set<i32>()
+    s = collections.newSet<i32>()
     s.add(1)
     s.add(2)
     s.add(3)
@@ -58,7 +60,7 @@ struct Point
 
 wordCounts() -> Map<str,i32>
 {
-    counts = Map<str,i32>()
+    counts = collections.newMap<str,i32>()
     counts.set("apple", 3)
     counts.set("banana", 5)
     counts.set("apple", 4)
@@ -67,7 +69,7 @@ wordCounts() -> Map<str,i32>
 
 uniquePoints() -> Set<Point>
 {
-    seen = Set<Point>()
+    seen = collections.newSet<Point>()
     seen.add(Point { x: 1  y: 1 })
     seen.add(Point { x: 1  y: 1 })
     seen.add(Point { x: 2  y: 2 })
@@ -76,7 +78,7 @@ uniquePoints() -> Set<Point>
 
 locations() -> Map<str,Point>
 {
-    places = Map<str,Point>()
+    places = collections.newMap<str,Point>()
     places.set("origin", Point { x: 0  y: 0 })
     places.set("home", Point { x: 3  y: 4 })
     return places

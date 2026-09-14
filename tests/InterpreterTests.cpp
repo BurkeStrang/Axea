@@ -255,6 +255,667 @@ namespace
     // PriorityQueue<T> (and no other List<T>-composing collection already in scope) prepend
     // this instead.
     const std::string kPriorityQueuePrelude = kListPrelude + kPriorityQueueImplOnly;
+
+    // A real (doubly linked, self-referential `*Node<T>`-based) LinkedList<T>, mirroring
+    // std/collections.ax's own actual LinkedList<T> (see docs/language/0036-linked-lists.md's
+    // own "2026 Update" - this needed real `null` pointer support as a prerequisite, see
+    // docs/language/0019-unsafe.md). No bounds check on an empty pop (dereferences a null node
+    // pointer, matching the retired intrinsic's own identical documented UB in compiled mode) -
+    // the interpreter throws a clear "dereferenced a null pointer" error instead.
+    const std::string kLinkedListPrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "struct Node<T> { value: T  prev: *Node<T>  next: *Node<T> } "
+        "struct LinkedList<T> { length: i32  head: *Node<T>  tail: *Node<T> } "
+        "newLinkedList<T>() -> LinkedList<T> { "
+        "  return LinkedList<T> { length: 0, head: null, tail: null } "
+        "} "
+        "impl<T> LinkedList<T> { "
+        "  push_front(self, value: T) { "
+        "    raw = malloc(sizeof<Node<T>>()) "
+        "    newNode = unsafe { raw as *Node<T> } "
+        "    unsafe { *newNode = Node<T> { value: value, prev: null, next: self.head } } "
+        "    if self.head == null { "
+        "      self.tail = newNode "
+        "    } else { "
+        "      oldHead = unsafe { *self.head } "
+        "      oldHead.prev = newNode "
+        "    } "
+        "    self.head = newNode "
+        "    self.length = self.length + 1 "
+        "  } "
+        "  push_back(self, value: T) { "
+        "    raw = malloc(sizeof<Node<T>>()) "
+        "    newNode = unsafe { raw as *Node<T> } "
+        "    unsafe { *newNode = Node<T> { value: value, prev: self.tail, next: null } } "
+        "    if self.tail == null { "
+        "      self.head = newNode "
+        "    } else { "
+        "      oldTail = unsafe { *self.tail } "
+        "      oldTail.next = newNode "
+        "    } "
+        "    self.tail = newNode "
+        "    self.length = self.length + 1 "
+        "  } "
+        "  pop_front(self) -> T { "
+        "    oldHead = unsafe { *self.head } "
+        "    value = oldHead.value "
+        "    newHead = oldHead.next "
+        "    if newHead == null { "
+        "      self.tail = null "
+        "    } else { "
+        "      newHeadNode = unsafe { *newHead } "
+        "      newHeadNode.prev = null "
+        "    } "
+        "    self.head = newHead "
+        "    self.length = self.length - 1 "
+        "    return value "
+        "  } "
+        "  pop_back(self) -> T { "
+        "    oldTail = unsafe { *self.tail } "
+        "    value = oldTail.value "
+        "    newTail = oldTail.prev "
+        "    if newTail == null { "
+        "      self.head = null "
+        "    } else { "
+        "      newTailNode = unsafe { *newTail } "
+        "      newTailNode.next = null "
+        "    } "
+        "    self.tail = newTail "
+        "    self.length = self.length - 1 "
+        "    return value "
+        "  } "
+        "} ";
+
+    // A real (malloc-backed, chained hash table) Map<K,V>/Set<T>, mirroring std/collections.ax's
+    // own actual Map<K,V>/Set<T> (see docs/language/0034-maps-and-sets.md's own "2026 Update" -
+    // this needed real `hash<T>()`/`keyEq<T>()` intrinsics as a prerequisite). Initial bucket
+    // count 8, doubling on a >0.75 load factor, bucket index via `hash & (bucketCount - 1)` - a
+    // faithful translation of the retired intrinsic's own hand-verified LLVM templates.
+    const std::string kMapPrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "struct MapEntry<K,V> { key: K  value: V  next: *MapEntry<K,V> } "
+        "struct Map<K,V> { length: i32  bucketCount: i32  buckets: **MapEntry<K,V> } "
+        "newMap<K,V>() -> Map<K,V> { "
+        "  bucketCount = 8 "
+        "  raw = malloc(bucketCount as i64 * sizeof<*MapEntry<K,V>>()) "
+        "  buckets = unsafe { raw as **MapEntry<K,V> } "
+        "  i = 0 "
+        "  loop { "
+        "    if i >= bucketCount { break } "
+        "    unsafe { *(buckets + i) = null } "
+        "    i = i + 1 "
+        "  } "
+        "  return Map<K,V> { length: 0, bucketCount: bucketCount, buckets: buckets } "
+        "} "
+        "impl<K,V> Map<K,V> { "
+        "  resize(self) { "
+        "    newBucketCount = self.bucketCount * 2 "
+        "    raw = malloc(newBucketCount as i64 * sizeof<*MapEntry<K,V>>()) "
+        "    newBuckets = unsafe { raw as **MapEntry<K,V> } "
+        "    i = 0 "
+        "    loop { "
+        "      if i >= newBucketCount { break } "
+        "      unsafe { *(newBuckets + i) = null } "
+        "      i = i + 1 "
+        "    } "
+        "    j = 0 "
+        "    loop { "
+        "      if j >= self.bucketCount { break } "
+        "      cur = unsafe { *(self.buckets + j) } "
+        "      loop { "
+        "        if cur == null { break } "
+        "        curNode = unsafe { *cur } "
+        "        nextNode = curNode.next "
+        "        idx = hash<K>(curNode.key) & (newBucketCount - 1) "
+        "        oldHead = unsafe { *(newBuckets + idx) } "
+        "        curNode.next = oldHead "
+        "        unsafe { *(newBuckets + idx) = cur } "
+        "        cur = nextNode "
+        "      } "
+        "      j = j + 1 "
+        "    } "
+        "    self.bucketCount = newBucketCount "
+        "    self.buckets = newBuckets "
+        "  } "
+        "  set(self, key: K, value: V) { "
+        "    idx = hash<K>(key) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    loop { "
+        "      if cur == null { break } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<K>(curNode.key, key) { "
+        "        curNode.value = value "
+        "        return "
+        "      } "
+        "      cur = curNode.next "
+        "    } "
+        "    raw = malloc(sizeof<MapEntry<K,V>>()) "
+        "    newEntry = unsafe { raw as *MapEntry<K,V> } "
+        "    oldHead = unsafe { *(self.buckets + idx) } "
+        "    unsafe { *newEntry = MapEntry<K,V> { key: key, value: value, next: oldHead } } "
+        "    unsafe { *(self.buckets + idx) = newEntry } "
+        "    self.length = self.length + 1 "
+        "    if self.length * 4 > self.bucketCount * 3 { "
+        "      self.resize() "
+        "    } "
+        "  } "
+        "  get(self, key: K) -> V { "
+        "    idx = hash<K>(key) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    loop { "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<K>(curNode.key, key) { return curNode.value } "
+        "      cur = curNode.next "
+        "    } "
+        "  } "
+        "  contains(self, key: K) -> bool { "
+        "    idx = hash<K>(key) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    loop { "
+        "      if cur == null { return false } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<K>(curNode.key, key) { return true } "
+        "      cur = curNode.next "
+        "    } "
+        "  } "
+        "  remove(self, key: K) { "
+        "    idx = hash<K>(key) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    prev: *MapEntry<K,V> = null "
+        "    loop { "
+        "      if cur == null { return } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<K>(curNode.key, key) { "
+        "        if prev == null { "
+        "          unsafe { *(self.buckets + idx) = curNode.next } "
+        "        } else { "
+        "          prevNode = unsafe { *prev } "
+        "          prevNode.next = curNode.next "
+        "        } "
+        "        self.length = self.length - 1 "
+        "        return "
+        "      } "
+        "      prev = cur "
+        "      cur = curNode.next "
+        "    } "
+        "  } "
+        "} ";
+
+    // A real (malloc-backed, chained hash table) Set<T>, mirroring std/collections.ax's own
+    // actual Set<T> - built on top of kMapPrelude's own extern malloc/free declarations, so a
+    // test needing both prepends kMapPrelude + kSetPrelude, not kSetPrelude alone.
+    const std::string kSetPrelude =
+        "struct SetEntry<T> { value: T  next: *SetEntry<T> } "
+        "struct Set<T> { length: i32  bucketCount: i32  buckets: **SetEntry<T> } "
+        "newSet<T>() -> Set<T> { "
+        "  bucketCount = 8 "
+        "  raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>()) "
+        "  buckets = unsafe { raw as **SetEntry<T> } "
+        "  i = 0 "
+        "  loop { "
+        "    if i >= bucketCount { break } "
+        "    unsafe { *(buckets + i) = null } "
+        "    i = i + 1 "
+        "  } "
+        "  return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets } "
+        "} "
+        "impl<T> Set<T> { "
+        "  resize(self) { "
+        "    newBucketCount = self.bucketCount * 2 "
+        "    raw = malloc(newBucketCount as i64 * sizeof<*SetEntry<T>>()) "
+        "    newBuckets = unsafe { raw as **SetEntry<T> } "
+        "    i = 0 "
+        "    loop { "
+        "      if i >= newBucketCount { break } "
+        "      unsafe { *(newBuckets + i) = null } "
+        "      i = i + 1 "
+        "    } "
+        "    j = 0 "
+        "    loop { "
+        "      if j >= self.bucketCount { break } "
+        "      cur = unsafe { *(self.buckets + j) } "
+        "      loop { "
+        "        if cur == null { break } "
+        "        curNode = unsafe { *cur } "
+        "        nextNode = curNode.next "
+        "        idx = hash<T>(curNode.value) & (newBucketCount - 1) "
+        "        oldHead = unsafe { *(newBuckets + idx) } "
+        "        curNode.next = oldHead "
+        "        unsafe { *(newBuckets + idx) = cur } "
+        "        cur = nextNode "
+        "      } "
+        "      j = j + 1 "
+        "    } "
+        "    self.bucketCount = newBucketCount "
+        "    self.buckets = newBuckets "
+        "  } "
+        "  add(self, value: T) { "
+        "    idx = hash<T>(value) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    loop { "
+        "      if cur == null { break } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<T>(curNode.value, value) { return } "
+        "      cur = curNode.next "
+        "    } "
+        "    raw = malloc(sizeof<SetEntry<T>>()) "
+        "    newEntry = unsafe { raw as *SetEntry<T> } "
+        "    oldHead = unsafe { *(self.buckets + idx) } "
+        "    unsafe { *newEntry = SetEntry<T> { value: value, next: oldHead } } "
+        "    unsafe { *(self.buckets + idx) = newEntry } "
+        "    self.length = self.length + 1 "
+        "    if self.length * 4 > self.bucketCount * 3 { "
+        "      self.resize() "
+        "    } "
+        "  } "
+        "  contains(self, value: T) -> bool { "
+        "    idx = hash<T>(value) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    loop { "
+        "      if cur == null { return false } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<T>(curNode.value, value) { return true } "
+        "      cur = curNode.next "
+        "    } "
+        "  } "
+        "  remove(self, value: T) { "
+        "    idx = hash<T>(value) & (self.bucketCount - 1) "
+        "    cur = unsafe { *(self.buckets + idx) } "
+        "    prev: *SetEntry<T> = null "
+        "    loop { "
+        "      if cur == null { return } "
+        "      curNode = unsafe { *cur } "
+        "      if keyEq<T>(curNode.value, value) { "
+        "        if prev == null { "
+        "          unsafe { *(self.buckets + idx) = curNode.next } "
+        "        } else { "
+        "          prevNode = unsafe { *prev } "
+        "          prevNode.next = curNode.next "
+        "        } "
+        "        self.length = self.length - 1 "
+        "        return "
+        "      } "
+        "      prev = cur "
+        "      cur = curNode.next "
+        "    } "
+        "  } "
+        "} ";
+
+    // A real AVL tree SortedMap<K,V>, mirroring std/collections.ax's own actual SortedMap<K,V>
+    // (see docs/language/0040-sorted-maps.md's own "2026 Update") - a faithful translation of the
+    // retired intrinsic's own hand-verified LLVM templates, using an ordinary K/V comparison
+    // (`<`/`>`) rather than kMapPrelude's own hash<K>()/keyEq<K>() (a tree needs only ordering,
+    // never hashing), so this prelude is fully self-contained (its own extern malloc/free), not
+    // built on kMapPrelude.
+    const std::string kSortedMapPrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "maxI32(a: i32, b: i32) -> i32 { if a > b { return a } return b } "
+        "struct SortedMapNode<K,V> { key: K  value: V  height: i32  left: *SortedMapNode<K,V>  "
+        "right: *SortedMapNode<K,V> } "
+        "struct SortedMap<K,V> { length: i32  root: *SortedMapNode<K,V> } "
+        "newSortedMap<K,V>() -> SortedMap<K,V> { return SortedMap<K,V> { length: 0, root: null } } "
+        "sortedMapNodeHeight<K,V>(node: *SortedMapNode<K,V>) -> i32 { "
+        "  if node == null { return 0 } "
+        "  return unsafe { *node }.height "
+        "} "
+        "sortedMapRotateRight<K,V>(y: *SortedMapNode<K,V>) -> *SortedMapNode<K,V> { "
+        "  yNode = unsafe { *y } "
+        "  x = yNode.left "
+        "  xNode = unsafe { *x } "
+        "  t2 = xNode.right "
+        "  xNode.right = y "
+        "  yNode.left = t2 "
+        "  yNode.height = maxI32(sortedMapNodeHeight<K,V>(yNode.left), "
+        "sortedMapNodeHeight<K,V>(yNode.right)) + 1 "
+        "  xNode.height = maxI32(sortedMapNodeHeight<K,V>(xNode.left), "
+        "sortedMapNodeHeight<K,V>(y)) + 1 "
+        "  return x "
+        "} "
+        "sortedMapRotateLeft<K,V>(x: *SortedMapNode<K,V>) -> *SortedMapNode<K,V> { "
+        "  xNode = unsafe { *x } "
+        "  y = xNode.right "
+        "  yNode = unsafe { *y } "
+        "  t2 = yNode.left "
+        "  yNode.left = x "
+        "  xNode.right = t2 "
+        "  xNode.height = maxI32(sortedMapNodeHeight<K,V>(xNode.left), "
+        "sortedMapNodeHeight<K,V>(xNode.right)) + 1 "
+        "  yNode.height = maxI32(sortedMapNodeHeight<K,V>(x), "
+        "sortedMapNodeHeight<K,V>(yNode.right)) + 1 "
+        "  return y "
+        "} "
+        "struct SortedMapInsertResult<K,V> { node: *SortedMapNode<K,V>  wasNew: bool } "
+        "sortedMapInsertNode<K,V>(node: *SortedMapNode<K,V>, key: K, value: V) -> "
+        "SortedMapInsertResult<K,V> { "
+        "  if node == null { "
+        "    raw = malloc(sizeof<SortedMapNode<K,V>>()) "
+        "    newNode = unsafe { raw as *SortedMapNode<K,V> } "
+        "    unsafe { *newNode = SortedMapNode<K,V> { key: key, value: value, height: 1, "
+        "left: null, right: null } } "
+        "    return SortedMapInsertResult<K,V> { node: newNode, wasNew: true } "
+        "  } "
+        "  curNode = unsafe { *node } "
+        "  wasNew: bool = false "
+        "  if key < curNode.key { "
+        "    leftResult = sortedMapInsertNode<K,V>(curNode.left, key, value) "
+        "    curNode.left = leftResult.node "
+        "    wasNew = leftResult.wasNew "
+        "  } else if curNode.key < key { "
+        "    rightResult = sortedMapInsertNode<K,V>(curNode.right, key, value) "
+        "    curNode.right = rightResult.node "
+        "    wasNew = rightResult.wasNew "
+        "  } else { "
+        "    curNode.value = value "
+        "    return SortedMapInsertResult<K,V> { node: node, wasNew: false } "
+        "  } "
+        "  lh = sortedMapNodeHeight<K,V>(curNode.left) "
+        "  rh = sortedMapNodeHeight<K,V>(curNode.right) "
+        "  curNode.height = maxI32(lh, rh) + 1 "
+        "  balance = lh - rh "
+        "  if balance > 1 { "
+        "    leftNode = unsafe { *curNode.left } "
+        "    if key < leftNode.key { "
+        "      return SortedMapInsertResult<K,V> { node: sortedMapRotateRight<K,V>(node), "
+        "wasNew: wasNew } "
+        "    } "
+        "    curNode.left = sortedMapRotateLeft<K,V>(curNode.left) "
+        "    return SortedMapInsertResult<K,V> { node: sortedMapRotateRight<K,V>(node), "
+        "wasNew: wasNew } "
+        "  } "
+        "  if balance < 0 - 1 { "
+        "    rightNode = unsafe { *curNode.right } "
+        "    if rightNode.key < key { "
+        "      return SortedMapInsertResult<K,V> { node: sortedMapRotateLeft<K,V>(node), "
+        "wasNew: wasNew } "
+        "    } "
+        "    curNode.right = sortedMapRotateRight<K,V>(curNode.right) "
+        "    return SortedMapInsertResult<K,V> { node: sortedMapRotateLeft<K,V>(node), "
+        "wasNew: wasNew } "
+        "  } "
+        "  return SortedMapInsertResult<K,V> { node: node, wasNew: wasNew } "
+        "} "
+        "sortedMapMinValueNode<K,V>(node: *SortedMapNode<K,V>) -> *SortedMapNode<K,V> { "
+        "  cur = node "
+        "  loop { "
+        "    curNode = unsafe { *cur } "
+        "    if curNode.left == null { break } "
+        "    cur = curNode.left "
+        "  } "
+        "  return cur "
+        "} "
+        "struct SortedMapRemoveResult<K,V> { node: *SortedMapNode<K,V>  wasRemoved: bool } "
+        "sortedMapRemoveNode<K,V>(node: *SortedMapNode<K,V>, key: K) -> "
+        "SortedMapRemoveResult<K,V> { "
+        "  if node == null { return SortedMapRemoveResult<K,V> { node: null, wasRemoved: false } } "
+        "  curNode = unsafe { *node } "
+        "  wasRemoved: bool = false "
+        "  if key < curNode.key { "
+        "    leftResult = sortedMapRemoveNode<K,V>(curNode.left, key) "
+        "    curNode.left = leftResult.node "
+        "    wasRemoved = leftResult.wasRemoved "
+        "  } else if curNode.key < key { "
+        "    rightResult = sortedMapRemoveNode<K,V>(curNode.right, key) "
+        "    curNode.right = rightResult.node "
+        "    wasRemoved = rightResult.wasRemoved "
+        "  } else { "
+        "    wasRemoved = true "
+        "    if curNode.left == null { "
+        "      return SortedMapRemoveResult<K,V> { node: curNode.right, wasRemoved: true } "
+        "    } "
+        "    if curNode.right == null { "
+        "      return SortedMapRemoveResult<K,V> { node: curNode.left, wasRemoved: true } "
+        "    } "
+        "    successor = sortedMapMinValueNode<K,V>(curNode.right) "
+        "    successorNode = unsafe { *successor } "
+        "    curNode.key = successorNode.key "
+        "    curNode.value = successorNode.value "
+        "    successorResult = sortedMapRemoveNode<K,V>(curNode.right, successorNode.key) "
+        "    curNode.right = successorResult.node "
+        "  } "
+        "  lh = sortedMapNodeHeight<K,V>(curNode.left) "
+        "  rh = sortedMapNodeHeight<K,V>(curNode.right) "
+        "  curNode.height = maxI32(lh, rh) + 1 "
+        "  balance = lh - rh "
+        "  if balance > 1 { "
+        "    leftNode = unsafe { *curNode.left } "
+        "    leftBalance = sortedMapNodeHeight<K,V>(leftNode.left) - "
+        "sortedMapNodeHeight<K,V>(leftNode.right) "
+        "    if leftBalance >= 0 { "
+        "      return SortedMapRemoveResult<K,V> { node: sortedMapRotateRight<K,V>(node), "
+        "wasRemoved: wasRemoved } "
+        "    } "
+        "    curNode.left = sortedMapRotateLeft<K,V>(curNode.left) "
+        "    return SortedMapRemoveResult<K,V> { node: sortedMapRotateRight<K,V>(node), "
+        "wasRemoved: wasRemoved } "
+        "  } "
+        "  if balance < 0 - 1 { "
+        "    rightNode = unsafe { *curNode.right } "
+        "    rightBalance = sortedMapNodeHeight<K,V>(rightNode.left) - "
+        "sortedMapNodeHeight<K,V>(rightNode.right) "
+        "    if rightBalance <= 0 { "
+        "      return SortedMapRemoveResult<K,V> { node: sortedMapRotateLeft<K,V>(node), "
+        "wasRemoved: wasRemoved } "
+        "    } "
+        "    curNode.right = sortedMapRotateRight<K,V>(curNode.right) "
+        "    return SortedMapRemoveResult<K,V> { node: sortedMapRotateLeft<K,V>(node), "
+        "wasRemoved: wasRemoved } "
+        "  } "
+        "  return SortedMapRemoveResult<K,V> { node: node, wasRemoved: wasRemoved } "
+        "} "
+        "impl<K,V> SortedMap<K,V> { "
+        "  set(self, key: K, value: V) { "
+        "    result = sortedMapInsertNode<K,V>(self.root, key, value) "
+        "    self.root = result.node "
+        "    if result.wasNew { self.length = self.length + 1 } "
+        "  } "
+        "  get(self, key: K) -> V { "
+        "    cur = self.root "
+        "    loop { "
+        "      curNode = unsafe { *cur } "
+        "      if key < curNode.key { cur = curNode.left } "
+        "      else if curNode.key < key { cur = curNode.right } "
+        "      else { return curNode.value } "
+        "    } "
+        "  } "
+        "  contains(self, key: K) -> bool { "
+        "    cur = self.root "
+        "    loop { "
+        "      if cur == null { return false } "
+        "      curNode = unsafe { *cur } "
+        "      if key < curNode.key { cur = curNode.left } "
+        "      else if curNode.key < key { cur = curNode.right } "
+        "      else { return true } "
+        "    } "
+        "  } "
+        "  remove(self, key: K) { "
+        "    result = sortedMapRemoveNode<K,V>(self.root, key) "
+        "    self.root = result.node "
+        "    if result.wasRemoved { self.length = self.length - 1 } "
+        "  } "
+        "} ";
+
+    // A real AVL tree SortedSet<T>, mirroring std/collections.ax's own actual SortedSet<T> (see
+    // docs/language/0041-sorted-sets.md's own "2026 Update") - byte-for-byte kSortedMapPrelude's
+    // own shape, minus the value field (4-field node: key, height, left, right), so this prelude
+    // is fully self-contained (its own extern malloc/free, its own maxI32), not built on
+    // kSortedMapPrelude.
+    const std::string kSortedSetPrelude =
+        "extern c malloc(size: i64) -> *i32 "
+        "extern c free(ptr: *i32) "
+        "maxI32(a: i32, b: i32) -> i32 { if a > b { return a } return b } "
+        "struct SortedSetNode<T> { key: T  height: i32  left: *SortedSetNode<T>  "
+        "right: *SortedSetNode<T> } "
+        "struct SortedSet<T> { length: i32  root: *SortedSetNode<T> } "
+        "newSortedSet<T>() -> SortedSet<T> { return SortedSet<T> { length: 0, root: null } } "
+        "sortedSetNodeHeight<T>(node: *SortedSetNode<T>) -> i32 { "
+        "  if node == null { return 0 } "
+        "  return unsafe { *node }.height "
+        "} "
+        "sortedSetRotateRight<T>(y: *SortedSetNode<T>) -> *SortedSetNode<T> { "
+        "  yNode = unsafe { *y } "
+        "  x = yNode.left "
+        "  xNode = unsafe { *x } "
+        "  t2 = xNode.right "
+        "  xNode.right = y "
+        "  yNode.left = t2 "
+        "  yNode.height = maxI32(sortedSetNodeHeight<T>(yNode.left), "
+        "sortedSetNodeHeight<T>(yNode.right)) + 1 "
+        "  xNode.height = maxI32(sortedSetNodeHeight<T>(xNode.left), "
+        "sortedSetNodeHeight<T>(y)) + 1 "
+        "  return x "
+        "} "
+        "sortedSetRotateLeft<T>(x: *SortedSetNode<T>) -> *SortedSetNode<T> { "
+        "  xNode = unsafe { *x } "
+        "  y = xNode.right "
+        "  yNode = unsafe { *y } "
+        "  t2 = yNode.left "
+        "  yNode.left = x "
+        "  xNode.right = t2 "
+        "  xNode.height = maxI32(sortedSetNodeHeight<T>(xNode.left), "
+        "sortedSetNodeHeight<T>(xNode.right)) + 1 "
+        "  yNode.height = maxI32(sortedSetNodeHeight<T>(x), "
+        "sortedSetNodeHeight<T>(yNode.right)) + 1 "
+        "  return y "
+        "} "
+        "struct SortedSetInsertResult<T> { node: *SortedSetNode<T>  wasNew: bool } "
+        "sortedSetInsertNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetInsertResult<T> { "
+        "  if node == null { "
+        "    raw = malloc(sizeof<SortedSetNode<T>>()) "
+        "    newNode = unsafe { raw as *SortedSetNode<T> } "
+        "    unsafe { *newNode = SortedSetNode<T> { key: key, height: 1, left: null, "
+        "right: null } } "
+        "    return SortedSetInsertResult<T> { node: newNode, wasNew: true } "
+        "  } "
+        "  curNode = unsafe { *node } "
+        "  wasNew: bool = false "
+        "  if key < curNode.key { "
+        "    leftResult = sortedSetInsertNode<T>(curNode.left, key) "
+        "    curNode.left = leftResult.node "
+        "    wasNew = leftResult.wasNew "
+        "  } else if curNode.key < key { "
+        "    rightResult = sortedSetInsertNode<T>(curNode.right, key) "
+        "    curNode.right = rightResult.node "
+        "    wasNew = rightResult.wasNew "
+        "  } else { "
+        "    return SortedSetInsertResult<T> { node: node, wasNew: false } "
+        "  } "
+        "  lh = sortedSetNodeHeight<T>(curNode.left) "
+        "  rh = sortedSetNodeHeight<T>(curNode.right) "
+        "  curNode.height = maxI32(lh, rh) + 1 "
+        "  balance = lh - rh "
+        "  if balance > 1 { "
+        "    leftNode = unsafe { *curNode.left } "
+        "    if key < leftNode.key { "
+        "      return SortedSetInsertResult<T> { node: sortedSetRotateRight<T>(node), "
+        "wasNew: wasNew } "
+        "    } "
+        "    curNode.left = sortedSetRotateLeft<T>(curNode.left) "
+        "    return SortedSetInsertResult<T> { node: sortedSetRotateRight<T>(node), "
+        "wasNew: wasNew } "
+        "  } "
+        "  if balance < 0 - 1 { "
+        "    rightNode = unsafe { *curNode.right } "
+        "    if rightNode.key < key { "
+        "      return SortedSetInsertResult<T> { node: sortedSetRotateLeft<T>(node), "
+        "wasNew: wasNew } "
+        "    } "
+        "    curNode.right = sortedSetRotateRight<T>(curNode.right) "
+        "    return SortedSetInsertResult<T> { node: sortedSetRotateLeft<T>(node), "
+        "wasNew: wasNew } "
+        "  } "
+        "  return SortedSetInsertResult<T> { node: node, wasNew: wasNew } "
+        "} "
+        "sortedSetMinValueNode<T>(node: *SortedSetNode<T>) -> *SortedSetNode<T> { "
+        "  cur = node "
+        "  loop { "
+        "    curNode = unsafe { *cur } "
+        "    if curNode.left == null { break } "
+        "    cur = curNode.left "
+        "  } "
+        "  return cur "
+        "} "
+        "struct SortedSetRemoveResult<T> { node: *SortedSetNode<T>  wasRemoved: bool } "
+        "sortedSetRemoveNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetRemoveResult<T> { "
+        "  if node == null { return SortedSetRemoveResult<T> { node: null, wasRemoved: false } } "
+        "  curNode = unsafe { *node } "
+        "  wasRemoved: bool = false "
+        "  if key < curNode.key { "
+        "    leftResult = sortedSetRemoveNode<T>(curNode.left, key) "
+        "    curNode.left = leftResult.node "
+        "    wasRemoved = leftResult.wasRemoved "
+        "  } else if curNode.key < key { "
+        "    rightResult = sortedSetRemoveNode<T>(curNode.right, key) "
+        "    curNode.right = rightResult.node "
+        "    wasRemoved = rightResult.wasRemoved "
+        "  } else { "
+        "    wasRemoved = true "
+        "    if curNode.left == null { "
+        "      return SortedSetRemoveResult<T> { node: curNode.right, wasRemoved: true } "
+        "    } "
+        "    if curNode.right == null { "
+        "      return SortedSetRemoveResult<T> { node: curNode.left, wasRemoved: true } "
+        "    } "
+        "    successor = sortedSetMinValueNode<T>(curNode.right) "
+        "    successorNode = unsafe { *successor } "
+        "    curNode.key = successorNode.key "
+        "    successorResult = sortedSetRemoveNode<T>(curNode.right, successorNode.key) "
+        "    curNode.right = successorResult.node "
+        "  } "
+        "  lh = sortedSetNodeHeight<T>(curNode.left) "
+        "  rh = sortedSetNodeHeight<T>(curNode.right) "
+        "  curNode.height = maxI32(lh, rh) + 1 "
+        "  balance = lh - rh "
+        "  if balance > 1 { "
+        "    leftNode = unsafe { *curNode.left } "
+        "    leftBalance = sortedSetNodeHeight<T>(leftNode.left) - "
+        "sortedSetNodeHeight<T>(leftNode.right) "
+        "    if leftBalance >= 0 { "
+        "      return SortedSetRemoveResult<T> { node: sortedSetRotateRight<T>(node), "
+        "wasRemoved: wasRemoved } "
+        "    } "
+        "    curNode.left = sortedSetRotateLeft<T>(curNode.left) "
+        "    return SortedSetRemoveResult<T> { node: sortedSetRotateRight<T>(node), "
+        "wasRemoved: wasRemoved } "
+        "  } "
+        "  if balance < 0 - 1 { "
+        "    rightNode = unsafe { *curNode.right } "
+        "    rightBalance = sortedSetNodeHeight<T>(rightNode.left) - "
+        "sortedSetNodeHeight<T>(rightNode.right) "
+        "    if rightBalance <= 0 { "
+        "      return SortedSetRemoveResult<T> { node: sortedSetRotateLeft<T>(node), "
+        "wasRemoved: wasRemoved } "
+        "    } "
+        "    curNode.right = sortedSetRotateRight<T>(curNode.right) "
+        "    return SortedSetRemoveResult<T> { node: sortedSetRotateLeft<T>(node), "
+        "wasRemoved: wasRemoved } "
+        "  } "
+        "  return SortedSetRemoveResult<T> { node: node, wasRemoved: wasRemoved } "
+        "} "
+        "impl<T> SortedSet<T> { "
+        "  add(self, key: T) { "
+        "    result = sortedSetInsertNode<T>(self.root, key) "
+        "    self.root = result.node "
+        "    if result.wasNew { self.length = self.length + 1 } "
+        "  } "
+        "  contains(self, key: T) -> bool { "
+        "    cur = self.root "
+        "    loop { "
+        "      if cur == null { return false } "
+        "      curNode = unsafe { *cur } "
+        "      if key < curNode.key { cur = curNode.left } "
+        "      else if curNode.key < key { cur = curNode.right } "
+        "      else { return true } "
+        "    } "
+        "  } "
+        "  remove(self, key: T) { "
+        "    result = sortedSetRemoveNode<T>(self.root, key) "
+        "    self.root = result.node "
+        "    if result.wasRemoved { self.length = self.length - 1 } "
+        "  } "
+        "} ";
 } // namespace
 
 TEST("Interpreter evaluates arithmetic with operator precedence")
@@ -870,8 +1531,9 @@ TEST("Interpreter's generic struct List<T> and Stack<T> resolve their own 'push'
 
 TEST("Interpreter push_front/push_back/pop_front/pop_back on a LinkedList<T>, reading .length")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = LinkedList<i32>() "
+    const std::string source = kLinkedListPrelude +
+                               "f() -> i32 { "
+                               "  s = newLinkedList<i32>() "
                                "  s.push_back(10) "
                                "  s.push_back(20) "
                                "  s.push_front(5) "
@@ -883,32 +1545,43 @@ TEST("Interpreter push_front/push_back/pop_front/pop_back on a LinkedList<T>, re
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 701);
 }
 
-TEST("Interpreter throws on pop_front from an empty LinkedList")
+TEST("Interpreter throws on pop_front from an empty LinkedList (a null-pointer dereference, "
+     "unsafe Milestone 1 - matching Deque<T>'s own identical port decision)")
 {
-    EXPECT_THROWS(runProgram("x = LinkedList<i32>().pop_front()"));
+    EXPECT_THROWS(
+        runProgram(kLinkedListPrelude +
+                  "f() -> i32 { s = newLinkedList<i32>() return s.pop_front() } "
+                  "x = f()"));
 }
 
 TEST("Interpreter throws on pop_back from an empty LinkedList")
 {
-    EXPECT_THROWS(runProgram("x = LinkedList<i32>().pop_back()"));
+    EXPECT_THROWS(
+        runProgram(kLinkedListPrelude +
+                  "f() -> i32 { s = newLinkedList<i32>() return s.pop_back() } "
+                  "x = f()"));
 }
 
 TEST("Interpreter push_front through a LinkedList<T> parameter writes through to the caller")
 {
-    const std::string source = "pushOne(s: LinkedList<i32>) { s.push_front(99) } "
-                               "a = LinkedList<i32>() "
+    const std::string source = kLinkedListPrelude +
+                               "pushOne(s: LinkedList<i32>) { s.push_front(99) } "
+                               "a = newLinkedList<i32>() "
                                "called = pushOne(a) "
                                "x = a.pop_front()";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter toString formats a LinkedList as a count only, unlike an array's bracket "
-     "format")
+TEST("Interpreter toString formats a LinkedList as its own real struct fields, since it's a "
+     "real, user-declared generic struct now (not a compiler intrinsic) - unlike List<T>'s own "
+     "runtime bracket format, which needs codegen support this plain struct toString doesn't "
+     "have")
 {
-    const std::string source = "x = LinkedList<i32>() "
+    const std::string source = kLinkedListPrelude +
+                               "x = newLinkedList<i32>() "
                                "b = x.push_back(1) "
                                "c = x.push_back(2)";
-    EXPECT_EQ(toString(run(source)), "LinkedList(2 entries)");
+    EXPECT_EQ(toString(run(source)), "LinkedList$i32 { length: 2, head: (), tail: () }");
 }
 
 TEST("Interpreter push_front/push_back/pop_front/pop_back on a Deque<T>, reading .length")
@@ -970,12 +1643,12 @@ TEST("Interpreter push_front through a Deque<T> parameter writes through to the 
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
-TEST("Interpreter's still-intrinsic LinkedList<T> and its own generic struct Deque<T> resolve "
+TEST("Interpreter's two independent generic structs LinkedList<T> and Deque<T> resolve "
      "'push_front'/'pop_front' independently, despite sharing the same method names")
 {
-    const std::string source = kDequePrelude +
+    const std::string source = kDequePrelude + kLinkedListPrelude +
                                "f() -> i32 { "
-                               "  l = LinkedList<i32>() "
+                               "  l = newLinkedList<i32>() "
                                "  l.push_front(1) "
                                "  d: Deque<i32> = newDeque<i32>() "
                                "  d.push_front(2) "
@@ -1156,8 +1829,9 @@ TEST("Interpreter's generic structs List<T>/Stack<T>/PriorityQueue<T> resolve th
 
 TEST("Interpreter set/get/contains/remove round-trip on a Map<i32,i32>")
 {
-    const std::string source = "f() -> i32 { "
-                               "  m = Map<i32,i32>() "
+    const std::string source = kMapPrelude +
+                               "f() -> i32 { "
+                               "  m = newMap<i32,i32>() "
                                "  m.set(1, 100) "
                                "  m.set(2, 200) "
                                "  m.set(1, 999) " // update, not a duplicate
@@ -1172,15 +1846,19 @@ TEST("Interpreter set/get/contains/remove round-trip on a Map<i32,i32>")
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2009);
 }
 
-TEST("Interpreter Map.get throws on a missing key")
+TEST("Interpreter Map.get throws on a missing key (a null-pointer dereference, unsafe Milestone "
+     "1 - matching LinkedList<T>'s own identical port decision)")
 {
-    EXPECT_THROWS(runProgram("x = Map<i32,i32>().get(1)"));
+    EXPECT_THROWS(runProgram(kMapPrelude +
+                             "f() -> i32 { m = newMap<i32,i32>() return m.get(1) } "
+                             "x = f()"));
 }
 
 TEST("Interpreter add/contains/remove round-trip on a Set<i32>")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = Set<i32>() "
+    const std::string source = kMapPrelude + kSetPrelude +
+                               "f() -> i32 { "
+                               "  s = newSet<i32>() "
                                "  s.add(5) "
                                "  s.add(6) "
                                "  s.add(5) " // duplicate add is a no-op
@@ -1197,8 +1875,9 @@ TEST("Interpreter add/contains/remove round-trip on a Set<i32>")
 
 TEST("Interpreter 'set' through a Map<i32,i32> parameter writes through to the caller")
 {
-    const std::string source = "put(m: Map<i32,i32>) { m.set(1, 42) } "
-                               "a = Map<i32,i32>() "
+    const std::string source = kMapPrelude +
+                               "put(m: Map<i32,i32>) { m.set(1, 42) } "
+                               "a = newMap<i32,i32>() "
                                "called = put(a) "
                                "x = a.get(1)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
@@ -1206,23 +1885,28 @@ TEST("Interpreter 'set' through a Map<i32,i32> parameter writes through to the c
 
 TEST("Interpreter 'add' through a Set<i32> parameter writes through to the caller")
 {
-    const std::string source = "addOne(s: Set<i32>) { s.add(7) } "
-                               "a = Set<i32>() "
+    const std::string source = kMapPrelude + kSetPrelude +
+                               "addOne(s: Set<i32>) { s.add(7) } "
+                               "a = newSet<i32>() "
                                "called = addOne(a) "
                                "x = a.length";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1);
 }
 
-TEST("Interpreter toString formats Map/Set by count, not contents")
+TEST("Interpreter toString formats Map/Set as their own real struct fields, since both are real, "
+     "user-declared generic structs now (not compiler intrinsics)")
 {
-    EXPECT_EQ(toString(run("x = Map<i32,i32>()")), "Map(0 entries)");
-    EXPECT_EQ(toString(run("x = Set<i32>()")), "Set(0 entries)");
+    EXPECT_EQ(toString(run(kMapPrelude + "x = newMap<i32,i32>()")),
+             "Map$i32$i32 { length: 0, bucketCount: 8, buckets: () }");
+    EXPECT_EQ(toString(run(kMapPrelude + kSetPrelude + "x = newSet<i32>()")),
+             "Set$i32 { length: 0, bucketCount: 8, buckets: () }");
 }
 
 TEST("Interpreter Map<str,i32> hashes/compares str keys by content, not identity")
 {
-    const std::string source = "f() -> i32 { "
-                               "  m = Map<str,i32>() "
+    const std::string source = kMapPrelude +
+                               "f() -> i32 { "
+                               "  m = newMap<str,i32>() "
                                "  m.set(\"a\", 1) "
                                "  m.set(\"a\", 999) " // separately-constructed but equal key
                                "  m.set(\"b\", 2) "
@@ -1234,9 +1918,10 @@ TEST("Interpreter Map<str,i32> hashes/compares str keys by content, not identity
 
 TEST("Interpreter Set<Point> hashes/compares struct keys structurally, not by identity")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
+    const std::string source = kMapPrelude + kSetPrelude +
+                               "struct Point { x: i32  y: i32 } "
                                "f() -> i32 { "
-                               "  s = Set<Point>() "
+                               "  s = newSet<Point>() "
                                "  s.add(Point { x: 1  y: 2 }) "
                                "  s.add(Point { x: 1  y: 2 }) " // separately-constructed, equal
                                "  s.add(Point { x: 3  y: 4 }) "
@@ -1250,9 +1935,10 @@ TEST("Interpreter Set<Point> hashes/compares struct keys structurally, not by id
 
 TEST("Interpreter Map<i32,Point>.get() returns an alias to the map's own stored struct")
 {
-    const std::string source = "struct Point { x: i32 } "
+    const std::string source = kMapPrelude +
+                               "struct Point { x: i32 } "
                                "f() -> i32 { "
-                               "  m = Map<i32,Point>() "
+                               "  m = newMap<i32,Point>() "
                                "  m.set(1, Point { x: 1 }) "
                                "  p = m.get(1) "
                                "  p.x = 99 "
@@ -1265,16 +1951,16 @@ TEST("Interpreter Map<i32,Point>.get() returns an alias to the map's own stored 
 TEST("Interpreter Map<K,V> supports arbitrary V: struct, array, generic struct, nested Map")
 {
     const std::string source =
-        kListPrelude +
+        kMapPrelude + kListPrelude +
         "struct Point { x: i32 } "
         "f() -> i32 { "
-        "  m1 = Map<i32,Point>()  m1.set(1, Point { x: 10 }) "
-        "  m2 = Map<i32,[i32;2]>()  m2.set(1, [1, 2]) "
-        "  m3 = Map<i32,List<i32>>() "
+        "  m1 = newMap<i32,Point>()  m1.set(1, Point { x: 10 }) "
+        "  m2 = newMap<i32,[i32;2]>()  m2.set(1, [1, 2]) "
+        "  m3 = newMap<i32,List<i32>>() "
         "  inner: List<i32> = newList<i32>()  inner.push(7) "
         "  m3.set(1, inner) "
-        "  m4 = Map<i32,Map<i32,i32>>() "
-        "  innerMap = Map<i32,i32>()  innerMap.set(5, 50) "
+        "  m4 = newMap<i32,Map<i32,i32>>() "
+        "  innerMap = newMap<i32,i32>()  innerMap.set(5, 50) "
         "  m4.set(1, innerMap) "
         "  return m1.get(1).x + m2.get(1)[0] + m3.get(1).get(0) + m4.get(1).get(5) "
         "} "
@@ -1284,8 +1970,9 @@ TEST("Interpreter Map<K,V> supports arbitrary V: struct, array, generic struct, 
 
 TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<i32,i32>")
 {
-    const std::string source = "f() -> i32 { "
-                               "  m = SortedMap<i32,i32>() "
+    const std::string source = kSortedMapPrelude +
+                               "f() -> i32 { "
+                               "  m = newSortedMap<i32,i32>() "
                                "  m.set(1, 100) "
                                "  m.set(2, 200) "
                                "  m.set(1, 999) " // update, not a duplicate
@@ -1302,29 +1989,32 @@ TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<i32,i32>")
 
 TEST("Interpreter SortedMap.get throws on a missing key")
 {
-    EXPECT_THROWS(runProgram("x = SortedMap<i32,i32>().get(1)"));
+    EXPECT_THROWS(runProgram(kSortedMapPrelude + "x = newSortedMap<i32,i32>().get(1)"));
 }
 
 TEST("Interpreter 'set' through a SortedMap<i32,i32> parameter writes through to the caller")
 {
-    const std::string source = "put(m: SortedMap<i32,i32>) { m.set(1, 42) } "
-                               "a = SortedMap<i32,i32>() "
+    const std::string source = kSortedMapPrelude +
+                               "put(m: SortedMap<i32,i32>) { m.set(1, 42) } "
+                               "a = newSortedMap<i32,i32>() "
                                "called = put(a) "
                                "x = a.get(1)";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
 }
 
-TEST("Interpreter toString formats a SortedMap by count, not contents - matches the LLVM "
-     "backend's own identical choice (see docs/language/0040-sorted-maps.md)")
+TEST("Interpreter toString formats SortedMap as its own real struct fields, since it's a real, "
+     "user-declared generic struct now (not a compiler intrinsic)")
 {
-    EXPECT_EQ(toString(run("x = SortedMap<i32,i32>()")), "SortedMap(0 entries)");
+    EXPECT_EQ(toString(run(kSortedMapPrelude + "x = newSortedMap<i32,i32>()")),
+             "SortedMap$i32$i32 { length: 0, root: () }");
 }
 
 TEST("Interpreter SortedMap<i32,Point>.get() returns an alias to the tree's own stored struct")
 {
-    const std::string source = "struct Point { x: i32 } "
+    const std::string source = kSortedMapPrelude +
+                               "struct Point { x: i32 } "
                                "f() -> i32 { "
-                               "  m = SortedMap<i32,Point>() "
+                               "  m = newSortedMap<i32,Point>() "
                                "  m.set(1, Point { x: 5 }) "
                                "  p = m.get(1) "
                                "  return p.x "
@@ -1339,8 +2029,9 @@ TEST("Interpreter SortedMap keeps keys correctly ordered under insertion and rem
      "see docs/language/0040-sorted-maps.md)")
 {
     const std::string source =
+        kSortedMapPrelude +
         "f() -> i32 { "
-        "  m = SortedMap<i32,i32>() "
+        "  m = newSortedMap<i32,i32>() "
         "  m.set(50, 100)  m.set(30, 101)  m.set(70, 102)  m.set(20, 103) "
         "  m.set(40, 104)  m.set(60, 105)  m.set(80, 106)  m.set(10, 107) "
         "  m.set(25, 108)  m.set(35, 109)  m.set(45, 110)  m.set(90, 111) "
@@ -1362,8 +2053,9 @@ TEST("Interpreter SortedMap keeps keys correctly ordered under insertion and rem
 TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<char,i32> - char is "
      "orderable by codepoint, same as i32 (see docs/language/0044-char.md)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  m = SortedMap<char,i32>() "
+    const std::string source = kSortedMapPrelude +
+                               "f() -> i32 { "
+                               "  m = newSortedMap<char,i32>() "
                                "  m.set('B', 2)  m.set('A', 1)  m.set('C', 3) "
                                "  hit = if m.contains('A') { 1 } else { 0 } "
                                "  m.remove('B') "
@@ -1377,8 +2069,9 @@ TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<str,i32> - s
      "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
 {
     const std::string source =
+        kSortedMapPrelude +
         "f() -> i32 { "
-        "  m = SortedMap<str,i32>() "
+        "  m = newSortedMap<str,i32>() "
         "  m.set(\"b\", 2)  m.set(\"a\", 1)  m.set(\"c\", 3) "
         "  hit = if m.contains(\"a\") { 1 } else { 0 } "
         "  m.remove(\"b\") "
@@ -1390,8 +2083,9 @@ TEST("Interpreter set/get/contains/remove round-trip on a SortedMap<str,i32> - s
 
 TEST("Interpreter add/contains/remove round-trip on a SortedSet<i32>")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = SortedSet<i32>() "
+    const std::string source = kSortedSetPrelude +
+                               "f() -> i32 { "
+                               "  s = newSortedSet<i32>() "
                                "  s.add(5) "
                                "  s.add(6) "
                                "  s.add(5) " // duplicate add is a no-op
@@ -1409,8 +2103,9 @@ TEST("Interpreter add/contains/remove round-trip on a SortedSet<i32>")
 TEST("Interpreter add/contains/remove round-trip on a SortedSet<char> - char is orderable by "
      "codepoint, same as i32 (see docs/language/0044-char.md)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = SortedSet<char>() "
+    const std::string source = kSortedSetPrelude +
+                               "f() -> i32 { "
+                               "  s = newSortedSet<char>() "
                                "  s.add('A')  s.add('B')  s.add('A') " // duplicate add is a no-op
                                "  before = if s.contains('B') { 1 } else { 0 } "
                                "  s.remove('B') "
@@ -1424,8 +2119,9 @@ TEST("Interpreter add/contains/remove round-trip on a SortedSet<char> - char is 
 TEST("Interpreter add/contains/remove round-trip on a SortedSet<str> - str has a real "
      "lexicographic order, same as i32/char (see docs/language/0042-string.md)")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = SortedSet<str>() "
+    const std::string source = kSortedSetPrelude +
+                               "f() -> i32 { "
+                               "  s = newSortedSet<str>() "
                                "  s.add(\"a\")  s.add(\"b\")  s.add(\"a\") " // dup add is a no-op
                                "  before = if s.contains(\"b\") { 1 } else { 0 } "
                                "  s.remove(\"b\") "
@@ -1438,27 +2134,30 @@ TEST("Interpreter add/contains/remove round-trip on a SortedSet<str> - str has a
 
 TEST("Interpreter 'add' through a SortedSet<i32> parameter writes through to the caller")
 {
-    const std::string source = "addOne(s: SortedSet<i32>) { s.add(7) } "
-                               "a = SortedSet<i32>() "
+    const std::string source = kSortedSetPrelude +
+                               "addOne(s: SortedSet<i32>) { s.add(7) } "
+                               "a = newSortedSet<i32>() "
                                "called = addOne(a) "
                                "x = a.length";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 1);
 }
 
-TEST("Interpreter toString formats a SortedSet by count, not contents - matches the LLVM "
-     "backend's own identical choice (see docs/language/0041-sorted-sets.md)")
+TEST("Interpreter toString formats SortedSet as its own real struct fields, since it's a real, "
+     "user-declared generic struct now (not a compiler intrinsic)")
 {
-    EXPECT_EQ(toString(run("x = SortedSet<i32>()")), "SortedSet(0 entries)");
+    EXPECT_EQ(toString(run(kSortedSetPrelude + "x = newSortedSet<i32>()")),
+             "SortedSet$i32 { length: 0, root: () }");
 }
 
 TEST("Interpreter Set<T>/Map<K,V>/SortedMap<K,V>/SortedSet<T> contains/remove resolve "
      "independently despite sharing the same method names")
 {
-    const std::string source = "f() -> i32 { "
-                               "  st = Set<i32>()  st.add(1) "
-                               "  mp = Map<i32,i32>()  mp.set(1, 20) "
-                               "  sm = SortedMap<i32,i32>()  sm.set(1, 300) "
-                               "  ss = SortedSet<i32>()  ss.add(1) "
+    const std::string source = kMapPrelude + kSetPrelude + kSortedMapPrelude + kSortedSetPrelude +
+                               "f() -> i32 { "
+                               "  st = newSet<i32>()  st.add(1) "
+                               "  mp = newMap<i32,i32>()  mp.set(1, 20) "
+                               "  sm = newSortedMap<i32,i32>()  sm.set(1, 300) "
+                               "  ss = newSortedSet<i32>()  ss.add(1) "
                                "  a = if st.contains(1) { 1 } else { 0 } "
                                "  b = mp.get(1) "
                                "  c = sm.get(1) "
@@ -1474,8 +2173,9 @@ TEST("Interpreter SortedSet keeps elements correctly ordered under insertion and
      "SortedMap's own exhaustive stress test - see docs/language/0041-sorted-sets.md)")
 {
     const std::string source =
+        kSortedSetPrelude +
         "f() -> i32 { "
-        "  s = SortedSet<i32>() "
+        "  s = newSortedSet<i32>() "
         "  s.add(50)  s.add(30)  s.add(70)  s.add(20) "
         "  s.add(40)  s.add(60)  s.add(80)  s.add(10) "
         "  s.add(25)  s.add(35)  s.add(45)  s.add(90) "

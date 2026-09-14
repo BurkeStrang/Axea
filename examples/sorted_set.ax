@@ -1,6 +1,8 @@
+use collections
+
 build() -> SortedSet<i32>
 {
-    ids = SortedSet<i32>()
+    ids: SortedSet<i32> = collections.newSortedSet<i32>()
     ids.add(93)
     ids.add(87)
     ids.add(98)
