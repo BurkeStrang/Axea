@@ -24,7 +24,50 @@ private:
     bool match(TokenKind kind);
     const Token& expect(TokenKind kind, const char* message);
 
-    std::unique_ptr<Stmt> parseItem();
+    // Pushes one top-level item into `out` (two, for a struct with embedded methods - see
+    // parseStructDecl's own comment) - not a return value, for the same reason.
+    void parseItem(std::vector<std::unique_ptr<Stmt>>& out);
+    // C-style declaration syntax (see docs/language/0068-c-style-syntax.md) - `ReturnType
+    // name(params) { body }` instead of `name(params) -> ReturnType { body }`. Tried via a
+    // speculative parse + rollback (see parseItem's own use, and tryParseCStyleFunctionDecl's own
+    // comment) rather than a bounded lookahead scanner like looksLikeFunctionDecl/
+    // looksLikeGenericCall above - a return type can itself be arbitrarily rich type grammar
+    // (`*T`, `[T;N]`, `fn(T)->R`, `List<T,U>`), too rich to duplicate as a second hand-rolled
+    // scanner without it silently drifting out of sync with parseTypeName's own grammar.
+    // Attempts a C-style top-level function declaration at the current position; returns nullptr
+    // (with `index_` restored to its original position) if the current position doesn't parse as
+    // one, so the caller can fall through to ordinary statement parsing unchanged. Never partially
+    // consumes tokens on failure.
+    std::unique_ptr<Stmt> tryParseCStyleFunctionDecl();
+    // Shared by tryParseCStyleFunctionDecl (selfType == "") and struct-embedded methods
+    // (selfType == the enclosing struct's own self-type text, see buildSelfTypeText) - parses
+    // everything after a C-style header's own already-parsed `ReturnType name` prefix: optional
+    // `<T,U>` type params, `(params)`, then a body (`{ ... }` or `=> expr`). `mangledName` is the
+    // FunctionDecl's own name ("increment" for a bare top-level function, "Counter.increment" for
+    // an embedded method - see parseImplMethod's own identical mangling).
+    std::unique_ptr<FunctionDecl> parseCStyleFunctionTail(std::string mangledName,
+                                                          std::optional<std::string> returnType,
+                                                          const std::string& selfType);
+    // One parameter in C-style order (`Type name` instead of parseParam's own `name: Type`) -
+    // mirrors parseParam's own capability-prefix handling exactly, just with the type/name order
+    // swapped.
+    Param parseParamCStyle();
+    // Self-aware C-style param, mirroring parseSelfAwareParam's own relationship to parseParam -
+    // recognizes a bare `self` (unambiguous here since a real C-style param named `self` would
+    // need an explicit type token before it, i.e. two tokens, not one) when `selfType` is
+    // non-empty, else delegates to parseParamCStyle() unconditionally (a top-level C-style
+    // function has no receiver, so `self` is never special there - `selfType == ""` disables the
+    // check entirely, matching how a top-level old-style function already lets `self` be an
+    // ordinary, explicitly-typed parameter name).
+    Param parseSelfAwareParamCStyle(const std::string& selfType);
+    // `Name<T, ...>` self-type text for a possibly-generic type (see parseImplDecl's own
+    // identical construction, which this factors out of) - "Name" alone if typeParams is empty,
+    // else "Name<T,U,...>" with no space after each comma (see parseImplDecl's own comment on why
+    // that space previously caused a real, previously-undiscovered infinite-monomorphization-loop
+    // bug). Shared by parseImplDecl and struct-embedded-method parsing (parseStructDecl), both of
+    // which need the exact same text for a method's own bare `self` parameter.
+    static std::string buildSelfTypeText(const std::string& typeName,
+                                         const std::vector<std::string>& typeParams);
     // Disambiguates `Identifier '('` at item level - a function
     // declaration (`foo(x: i32) -> i32 { ... }`) or a bare top-level call
     // kept for its side effect (`print("hi")`) - both start identically.
@@ -44,6 +87,13 @@ private:
     // Identical scan, checking for '(' instead of '{' at the end - see
     // looksLikeGenericStructLiteral's own comment.
     bool looksLikeGenericCall() const;
+    // Identical scan, checking for '.' instead of '('/'{' at the end - `Box<i32>.new(41)` (an
+    // associated function called on an *explicit* generic instantiation, see
+    // docs/language/0068-c-style-syntax.md's own "Associated functions on an explicit generic
+    // instantiation" section) vs. `x < y > .z` (never valid - a bare '.' can't start an
+    // expression - so no real comparison-chain shape is ever lost by preferring this reading
+    // whenever it matches).
+    bool looksLikeGenericTypeRefBeforeDot() const;
     std::unique_ptr<Stmt> parseFunctionDecl();
     // `fn(x: i32) -> i32 { x + 1 }` (see docs/language/0067-closures.md) - a closure literal,
     // same (params, optional return type, body) shape as parseFunctionDecl, as an expression.
@@ -54,7 +104,14 @@ private:
     // parseParam's own read/write/take-aware version).
     std::unique_ptr<Stmt> parseExternDecl();
     Param parseExternParam();
-    std::unique_ptr<Stmt> parseStructDecl();
+    // A struct body may now contain C-style embedded methods alongside its fields (see
+    // docs/language/0068-c-style-syntax.md), which desugar into a synthesized ImplDecl - so a
+    // single `struct { ... }` can yield *two* top-level items (the StructDecl plus that ImplDecl)
+    // where it used to always yield exactly one. Pushes directly into `out` instead of returning a
+    // single Stmt for that reason; a struct body with no embedded methods still pushes just the
+    // one StructDecl, so old-style `struct { }` + a separate `impl { }` elsewhere is completely
+    // unaffected.
+    void parseStructDecl(std::vector<std::unique_ptr<Stmt>>& out);
     // `trait Name { format(self, buf: Buffer)  ... }` (see
     // docs/language/0062-display-trait.md) - a method signature has no
     // body, just a name/params/optional return type, and its own first

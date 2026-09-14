@@ -1204,7 +1204,6 @@ void RegionChecker::check(
     // function body's own moves persist across its own statements.
     static const FunctionDecl topLevelFunction("<top-level>", {}, std::nullopt, nullptr);
     RegionEnv topLevelEnv;
-    std::vector<std::string> topLevelBindingNames;
     for (const auto& item : program.items)
     {
         if (dynamic_cast<const FunctionDecl*>(item.get()) ||
@@ -1215,27 +1214,8 @@ void RegionChecker::check(
         {
             continue;
         }
-        if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
-        {
-            topLevelBindingNames.push_back(assignment->name);
-        }
         regionOfStmt(*item, topLevelEnv, topLevelFunction, nullptr);
     }
-
-    // See movedTopLevelBindings()'s own doc comment - IrGenerator's synthetic top-level auto-print
-    // needs this, since it never goes through regionOfStmt/regionOfExpr at all (it isn't real AST).
-    for (const auto& name : topLevelBindingNames)
-    {
-        if (topLevelEnv.get(name).moved)
-        {
-            movedTopLevelBindings_.insert(name);
-        }
-    }
-}
-
-const std::unordered_set<std::string>& RegionChecker::movedTopLevelBindings() const
-{
-    return movedTopLevelBindings_;
 }
 
 const std::unordered_map<std::string, std::vector<Region>>& RegionChecker::regions() const

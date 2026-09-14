@@ -650,10 +650,6 @@ struct IrProgram
     std::vector<IrFunction> functions;
     std::vector<IrExtern> externs;
     std::vector<std::unique_ptr<IrInst>> topLevel;
-    // (name, final register) for each top-level assignment, in source order -
-    // mirrors how `ax run` reports top-level bindings, and is what a
-    // generated `main` (LlvmIrEmitter) prints.
-    std::vector<std::pair<std::string, int>> topLevelBindings;
     // struct name -> its fields, in declared order, as (fieldName, fieldType) pairs.
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> structs;
     // struct name -> its `impl Display for <name>`'s own mangled `format`

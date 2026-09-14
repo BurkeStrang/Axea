@@ -3678,8 +3678,7 @@ IrProgram IrGenerator::generate(
     const std::unordered_map<std::string, std::vector<Capability>>& capabilities,
     const std::unordered_map<std::string, std::vector<Region>>& regions,
     const std::unordered_map<const ClosureExpr*, std::vector<Capability>>& closureCapabilities,
-    const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions,
-    const std::unordered_set<std::string>& movedTopLevelBindings)
+    const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions)
 {
     closureParamCapabilities_ = closureCapabilities;
     closureParamRegions_ = closureRegions;
@@ -3784,31 +3783,12 @@ IrProgram IrGenerator::generate(
         else if (const auto* assignment = dynamic_cast<const AssignmentStmt*>(item.get()))
         {
             lowerStmt(*assignment, topScope, topCtx);
-            // Move semantics: a top-level binding that RegionChecker determined was consumed by
-            // some later top-level statement (e.g. `u = User{...}; archive(u)`, where `archive`
-            // takes `u`) must not be auto-printed - this synthetic print is codegen-only, never
-            // part of the real AST RegionChecker itself walks, so it's the one place that has to
-            // separately honor a move it can't see for itself.
-            if (!movedTopLevelBindings.contains(assignment->name))
-            {
-                // `&name` (see docs/language/0019-unsafe.md) - readLocal, not a bare
-                // topScope.find: an address-taken name's own IrScope binding is its alloca's
-                // pointer register, not its logical value, so this must dereference through it
-                // (an extra IrDeref, harmless for every ordinary non-address-taken name, which
-                // readLocal already passes straight through unchanged) to auto-print the actual
-                // current value rather than the slot's own address.
-                irProgram.topLevelBindings.emplace_back(
-                    assignment->name, readLocal(assignment->name, topScope, topCtx));
-            }
         }
         else if (const auto* exprStmt = dynamic_cast<const ExprStmt*>(item.get()))
         {
             // A bare top-level call kept for its side effect
             // (`print("hi")`, `write("...")`) - see
-            // Parser::looksLikeFunctionDecl's own doc comment. No
-            // topLevelBindings entry (there's no name to bind), which is
-            // exactly right - it should run once, not also be
-            // auto-printed as if it were a binding.
+            // Parser::looksLikeFunctionDecl's own doc comment.
             lowerStmt(*exprStmt, topScope, topCtx);
         }
     }

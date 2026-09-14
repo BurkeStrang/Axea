@@ -329,6 +329,16 @@ private:
     // parameter threaded through every one of those signatures. Consulted only to exempt a
     // module's own qualified self-reference (`math.helper()` called from within math's own code)
     // from the `pub` check a genuinely external qualified reference needs.
+    // A real, previously-undiscovered bug found while adding C-style struct-embedded methods (see
+    // docs/language/0068-c-style-syntax.md): genuine top-level/root code was never explicitly
+    // reset back to "" before being checked, so it silently inherited whatever the *last*
+    // checkFunction call (in file order, not hash order - program.items is a plain vector) left
+    // this as - e.g. `struct Counter { Counter new(...) {...} }  x = Counter.new(5)` would
+    // incorrectly treat the top-level `x = ...` line as if it were "inside Counter's own module",
+    // silently exempting a non-`pub` associated function's own privacy check right after its own
+    // struct declaration. Fixed in TypeChecker::check's own top-level loop, mirroring
+    // insideUnsafe_'s own identical "reset for every top-level item, regardless of what a
+    // previous one left it as" pattern just above it.
     std::string currentFunctionModule_;
     // `unsafe { ... }` (see docs/language/0019-unsafe.md) - true only while checkExpr's own
     // UnsafeBlockExpr case is actively walking that block's body. A plain member field with

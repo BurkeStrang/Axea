@@ -695,10 +695,13 @@ private:
     // Axea function names are emitted unmangled as `@name`.
     void emitStructPrintHelpers(const IrProgram& program, std::ostringstream& out);
     // `main`: lowers the top-level script (program.topLevel) exactly like a
-    // zero-parameter function body, then prints each of
-    // program.topLevelBindings as "name = value\n" - matching `ax run`'s own
-    // printer (compiler/main.cpp) byte for byte, so the interpreter and the
-    // compiled binary can be diffed directly.
+    // zero-parameter function body. No separate binding-echo pass - commit
+    // 9af0af4 ("remove auto output") removed this from `ax run`'s own
+    // interpreted path but left the equivalent codegen here in place,
+    // causing every compiled binary to silently double-print all top-level
+    // state in addition to whatever the program itself explicitly printed.
+    // Removed here too, so a compiled binary's stdout is silent unless the
+    // program itself calls print(), matching `ax run` exactly again.
     void emitMain(const IrProgram& program, std::ostringstream& out);
     void emitStructNew(const IrStructNew& structNew, FunctionContext& fctx);
     void emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx);

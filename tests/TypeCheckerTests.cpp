@@ -28,6 +28,79 @@ TEST("TypeChecker accepts a well-typed program")
     check(source);
 }
 
+TEST("TypeChecker accepts a C-style struct - embedded fields/methods desugar into the same "
+     "StructDecl + ImplDecl shape old-style syntax already produces (see "
+     "docs/language/0068-c-style-syntax.md), so this type-checks with no special-casing needed "
+     "anywhere in this pass")
+{
+    const std::string source = "struct Counter { "
+                               "  i32 value "
+                               "  pub Counter new(i32 initial) { return Counter { value: initial } } "
+                               "  pub void increment(self) { self.value++ } "
+                               "  pub i32 current(self) { return self.value } "
+                               "} "
+                               "run() -> i32 { "
+                               "  c = Counter.new(5) "
+                               "  c.increment() "
+                               "  return c.current() "
+                               "} "
+                               "x = run()";
+    check(source);
+}
+
+TEST("TypeChecker accepts a C-style top-level function ('ReturnType name(params) { body }') "
+     "identically to its old-style equivalent")
+{
+    check("i32 addTwo(i32 a, i32 b) { return a + b }  x = addTwo(1, 2)");
+}
+
+TEST("TypeChecker accepts a C-style generic struct's own embedded methods, with the same "
+     "bracket-syntax self-type ('Box<T>') an old-style 'impl<T> Box<T> { }' block already has")
+{
+    const std::string source = "struct Box<T> { "
+                               "  T value "
+                               "  pub T get(self) { return self.value } "
+                               "  void set(self, T v) { self.value = v } "
+                               "} "
+                               "run() -> i32 { "
+                               "  b = Box<i32> { value: 41 } "
+                               "  b.set(42) "
+                               "  return b.get() "
+                               "} "
+                               "x = run()";
+    check(source);
+}
+
+TEST("TypeChecker accepts an associated-function call on an explicit generic instantiation - "
+     "'Box<i32>.new(41)' - correctly monomorphizing Box<T> and resolving 'new' against the "
+     "synthesized Box$i32 module (see docs/language/0068-c-style-syntax.md)")
+{
+    const std::string source = "struct Box<T> { "
+                               "  T value "
+                               "  pub Box<T> new(T v) { return Box<T> { value: v } } "
+                               "  pub T get(self) { return self.value } "
+                               "} "
+                               "run() -> i32 { "
+                               "  b = Box<i32>.new(41) "
+                               "  return b.get() "
+                               "} "
+                               "x = run()";
+    check(source);
+}
+
+TEST("TypeChecker's non-public C-style associated function ('new' with no 'self') is rejected "
+     "when called from outside its own module - the same privacy rule an ordinary non-pub "
+     "top-level function already has for module-qualified calls; not a new mechanism (see "
+     "docs/language/0068-c-style-syntax.md's own note on the pre-existing "
+     "'moduleNames_ derived from every dotted function key' quirk this relies on)")
+{
+    EXPECT_THROWS(check("struct Counter { "
+                        "  i32 value "
+                        "  Counter new(i32 initial) { return Counter { value: initial } } "
+                        "} "
+                        "x = Counter.new(5)"));
+}
+
 TEST("TypeChecker rejects wrong argument count")
 {
     EXPECT_THROWS(check("f(a: i32, b: i32) -> i32 { return a + b }  x = f(1)"));

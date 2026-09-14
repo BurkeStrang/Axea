@@ -897,8 +897,7 @@ int main(int argc, char** argv)
                                                   capabilityChecker.effectiveCapabilities(),
                                                   regionChecker.regions(),
                                                   capabilityChecker.closureEffectiveCapabilities(),
-                                                  regionChecker.closureRegions(),
-                                                  regionChecker.movedTopLevelBindings());
+                                                  regionChecker.closureRegions());
 
             for (const auto& externDecl : irProgram.externs)
             {
@@ -941,8 +940,7 @@ int main(int argc, char** argv)
                                                   capabilityChecker.effectiveCapabilities(),
                                                   regionChecker.regions(),
                                                   capabilityChecker.closureEffectiveCapabilities(),
-                                                  regionChecker.closureRegions(),
-                                                  regionChecker.movedTopLevelBindings());
+                                                  regionChecker.closureRegions());
 
             LlvmIrEmitter emitter;
             std::cout << emitter.emit(irProgram);

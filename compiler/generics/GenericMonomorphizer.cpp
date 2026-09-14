@@ -342,6 +342,23 @@ namespace
         else if (auto* e = dynamic_cast<MethodCallExpr*>(&expr))
         {
             collectTypeRefsInExpr(*e->object, refs, callSites, moduleGenericCalls);
+            // `Box<i32>.new(41)` (see docs/language/0068-c-style-syntax.md) - an associated
+            // function called on an *explicit* generic instantiation. The parser already
+            // canonicalized `object` to an ordinary NameExpr carrying the bracket-syntax type
+            // text ("Box<i32>") rather than a bare struct name (see parsePrimary's own
+            // looksLikeGenericTypeRefBeforeDot branch) - collected as a type ref here exactly like
+            // any other type-position reference, so the fixed-point loop below registers/
+            // synthesizes the real "Box$i32" instantiation (including its own embedded methods,
+            // via synthesizeGenericImplMethods) and rewrites this NameExpr's own text in place to
+            // match. By the time TypeChecker et al. see it, `object` is an ordinary
+            // NameExpr("Box$i32") - indistinguishable from any other associated-function call
+            // (`Counter.new(5)`'s own NameExpr("Counter") never has a '<', so this never fires for
+            // that case).
+            if (auto* objectName = dynamic_cast<NameExpr*>(e->object.get());
+                objectName && objectName->name.find('<') != std::string::npos)
+            {
+                refs.push_back(&objectName->name);
+            }
             for (auto& arg : e->arguments)
             {
                 collectTypeRefsInExpr(*arg, refs, callSites, moduleGenericCalls);
@@ -701,8 +718,21 @@ namespace
             }
             std::string typeArgument =
                 e->typeArgument.empty() ? std::string() : substituteTypeParams(e->typeArgument, subst);
+            // `SomeType<T>.assocFn(...)` (see docs/language/0068-c-style-syntax.md) called from
+            // *inside* another generic function/method's own body, using that enclosing generic's
+            // own type param T - e->object is a NameExpr carrying bracket-syntax type text
+            // ("SomeType<T>"), which plain cloneExpr(*e->object, subst) would copy verbatim (its
+            // own NameExpr case never substitutes type params within a name - ordinary variable
+            // names never contain any). Substituted the same way typeArgument just above already
+            // is, so "SomeType<T>" correctly becomes e.g. "SomeType<i32>" per instantiation,
+            // matching what collectTypeRefsInExpr's own identical NameExpr-with-'<' check expects
+            // to find.
+            auto* objectName = dynamic_cast<const NameExpr*>(e->object.get());
+            auto object = objectName && objectName->name.find('<') != std::string::npos
+                              ? std::make_unique<NameExpr>(substituteTypeParams(objectName->name, subst))
+                              : cloneExpr(*e->object, subst);
             return std::make_unique<MethodCallExpr>(
-                cloneExpr(*e->object, subst), e->method, std::move(args), std::move(typeArgument));
+                std::move(object), e->method, std::move(args), std::move(typeArgument));
         }
         if (const auto* e = dynamic_cast<const StringNewExpr*>(&expr))
         {
@@ -880,10 +910,22 @@ namespace
                 // method->name is "genericName.methodName" (see Parser::parseImplMethod) - strip
                 // the generic template's own bare name, re-prefix with the mangled one.
                 const std::string methodName = method->name.substr(genericName.size() + 1);
-                program.items.push_back(std::make_unique<FunctionDecl>(mangled + "." + methodName,
-                                                                       std::move(params),
-                                                                       std::move(returnType),
-                                                                       cloneExpr(*method->body, subst)));
+                auto clone = std::make_unique<FunctionDecl>(mangled + "." + methodName,
+                                                            std::move(params),
+                                                            std::move(returnType),
+                                                            cloneExpr(*method->body, subst));
+                // A real, previously-undiscovered bug found while adding
+                // `Box<i32>.new(...)`-style associated-call support on generic instantiations (see
+                // docs/language/0068-c-style-syntax.md): `isPublic` was never copied from the
+                // template method onto its synthesized clone here, defaulting to false regardless
+                // of the source's own `pub`. Harmless before that feature - an impl method's own
+                // `pub`-ness never affected anything, since ordinary `obj.method()` dispatch never
+                // checks it - but a self-less associated function reached via the
+                // module-qualified-call mechanism (`moduleNames_`, see that same doc) *does* check
+                // `isPublic`, so a `pub`-declared generic associated function was silently treated
+                // as private once monomorphized.
+                clone->isPublic = method->isPublic;
+                program.items.push_back(std::move(clone));
             }
         }
     }

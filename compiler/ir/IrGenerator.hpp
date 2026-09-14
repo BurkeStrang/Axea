@@ -123,14 +123,7 @@ public:
              const std::unordered_map<std::string, std::vector<Region>>& regions,
              const std::unordered_map<const ClosureExpr*, std::vector<Capability>>&
                  closureCapabilities = {},
-             const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions = {},
-             // Top-level bindings move-checking (RegionChecker::movedTopLevelBindings) determined
-             // were consumed somewhere in the program's own top-level statements (e.g. `u =
-             // User{...}; archive(u)`) - skipped by the synthetic top-level auto-print below (see
-             // its own use), since printing a moved-away binding would read memory a real
-             // user-written program already gave away. Defaults to empty so existing callers/test
-             // helpers that never call RegionChecker at all keep compiling and behaving unchanged.
-             const std::unordered_set<std::string>& movedTopLevelBindings = {});
+             const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions = {});
 
 private:
     // Where instructions currently being lowered get appended, the running

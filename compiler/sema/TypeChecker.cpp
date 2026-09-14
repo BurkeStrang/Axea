@@ -1301,6 +1301,11 @@ void TypeChecker::check(const Program& program)
     {
         insideUnsafe_ = false; // see insideUnsafe_'s own comment - every top-level item starts
                                // fresh, regardless of what a previous one left it as
+        // currentFunctionModule_ (see its own comment) - reset for the same reason. checkFunction
+        // (called just below for a FunctionDecl/ImplDecl-method item) immediately re-sets this
+        // itself, so this assignment only actually matters for genuine top-level code
+        // (AssignmentStmt/ExprStmt below) - root-file code is never "inside" any module.
+        currentFunctionModule_ = "";
         if (const auto* function = dynamic_cast<const FunctionDecl*>(item.get()))
         {
             // A generic top-level function template's own body is never checked directly

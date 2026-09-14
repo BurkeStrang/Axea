@@ -15,7 +15,7 @@ Program Parser::parseProgram()
     Program program;
     while (current().kind != TokenKind::EndOfFile)
     {
-        program.items.push_back(parseItem());
+        parseItem(program.items);
     }
     program.moduleName = moduleName_;
     return program;
@@ -200,7 +200,7 @@ std::string Parser::parseTypeNameAtom()
     return name.text;
 }
 
-std::unique_ptr<Stmt> Parser::parseItem()
+void Parser::parseItem(std::vector<std::unique_ptr<Stmt>>& out)
 {
     // `pub` (see docs/language/0066-modules.md) - only meaningful on a function/extern
     // declaration (gates whether `use`-ing code outside this file's own module can reach it);
@@ -210,39 +210,65 @@ std::unique_ptr<Stmt> Parser::parseItem()
 
     if (current().kind == TokenKind::Module)
     {
-        return parseModuleDecl();
+        out.push_back(parseModuleDecl());
+        return;
     }
 
     if (current().kind == TokenKind::Use)
     {
-        return parseUseDecl();
+        out.push_back(parseUseDecl());
+        return;
     }
 
     if (current().kind == TokenKind::Struct)
     {
-        return parseStructDecl();
+        parseStructDecl(out);
+        return;
     }
 
     if (current().kind == TokenKind::Extern)
     {
         auto decl = parseExternDecl();
         static_cast<ExternDecl&>(*decl).isPublic = isPublic;
-        return decl;
+        out.push_back(std::move(decl));
+        return;
     }
 
     if (current().kind == TokenKind::Trait)
     {
-        return parseTraitDecl();
+        out.push_back(parseTraitDecl());
+        return;
     }
 
     if (current().kind == TokenKind::Impl)
     {
-        return parseImplDecl();
+        out.push_back(parseImplDecl());
+        return;
     }
 
     if (current().kind == TokenKind::Enum)
     {
-        return parseEnumDecl();
+        out.push_back(parseEnumDecl());
+        return;
+    }
+
+    // C-style function declaration (see docs/language/0068-c-style-syntax.md) -
+    // `ReturnType name(params) { body }`. Tried before every remaining Identifier-led branch
+    // below: a speculative parse that rolls back cleanly on failure (see
+    // tryParseCStyleFunctionDecl's own comment), so every existing shape below - including
+    // `name<T,U>(...)` old-style generic function decls, which would otherwise collide with a
+    // C-style header carrying a *generic return type* like `List<T> makeList(...)` (both start
+    // `Identifier '<'`) - still falls through to its own correct handling unchanged whenever the
+    // speculative attempt doesn't find a real C-style header.
+    if (current().kind == TokenKind::Identifier || current().kind == TokenKind::Star ||
+        current().kind == TokenKind::LeftBracket || current().kind == TokenKind::Fn)
+    {
+        if (auto decl = tryParseCStyleFunctionDecl())
+        {
+            static_cast<FunctionDecl&>(*decl).isPublic = isPublic;
+            out.push_back(std::move(decl));
+            return;
+        }
     }
 
     // `name<T, U>(...)` (see docs/language/0006-generics.md's own List<T> port follow-up) -
@@ -254,7 +280,8 @@ std::unique_ptr<Stmt> Parser::parseItem()
     {
         auto decl = parseFunctionDecl();
         static_cast<FunctionDecl&>(*decl).isPublic = isPublic;
-        return decl;
+        out.push_back(std::move(decl));
+        return;
     }
 
     if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::LeftParen)
@@ -263,7 +290,8 @@ std::unique_ptr<Stmt> Parser::parseItem()
         {
             auto decl = parseFunctionDecl();
             static_cast<FunctionDecl&>(*decl).isPublic = isPublic;
-            return decl;
+            out.push_back(std::move(decl));
+            return;
         }
         // A bare top-level call (e.g. `print("hi")`), kept for its side
         // effect and its result discarded - mirrors parseBlock's own
@@ -275,7 +303,8 @@ std::unique_ptr<Stmt> Parser::parseItem()
         // so this is unambiguous once looksLikeFunctionDecl() has already
         // ruled out a declaration.
         auto expr = parseExpression();
-        return std::make_unique<ExprStmt>(std::move(expr));
+        out.push_back(std::make_unique<ExprStmt>(std::move(expr)));
+        return;
     }
 
     // `write(...)` at the top level - "write" is the `TokenKind::Write`
@@ -291,7 +320,8 @@ std::unique_ptr<Stmt> Parser::parseItem()
     if (current().kind == TokenKind::Write && peek().kind == TokenKind::LeftParen)
     {
         auto expr = parseExpression();
-        return std::make_unique<ExprStmt>(std::move(expr));
+        out.push_back(std::make_unique<ExprStmt>(std::move(expr)));
+        return;
     }
 
     // `unsafe { ... }` at the top level (see docs/language/0019-unsafe.md), kept for its side
@@ -302,10 +332,11 @@ std::unique_ptr<Stmt> Parser::parseItem()
     if (current().kind == TokenKind::Unsafe)
     {
         auto expr = parseUnsafeExpr();
-        return std::make_unique<ExprStmt>(std::move(expr));
+        out.push_back(std::make_unique<ExprStmt>(std::move(expr)));
+        return;
     }
 
-    return parseAssignment();
+    out.push_back(parseAssignment());
 }
 
 bool Parser::looksLikeFunctionDecl() const
@@ -402,6 +433,32 @@ bool Parser::looksLikeGenericCall() const
     return peek(offset).kind == TokenKind::LeftParen;
 }
 
+bool Parser::looksLikeGenericTypeRefBeforeDot() const
+{
+    // Identical scan to looksLikeGenericCall/looksLikeGenericStructLiteral, checking for '.'
+    // instead of '('/'{' once the brackets balance back to zero.
+    std::size_t offset = 2;
+    int depth = 1;
+    while (depth > 0)
+    {
+        switch (peek(offset).kind)
+        {
+            case TokenKind::Less: ++depth; break;
+            case TokenKind::Greater: --depth; break;
+            case TokenKind::Identifier:
+            case TokenKind::Comma:
+            case TokenKind::LeftBracket:
+            case TokenKind::RightBracket:
+            case TokenKind::Semicolon:
+            case TokenKind::Integer:
+            case TokenKind::Star: break;
+            default: return false;
+        }
+        ++offset;
+    }
+    return peek(offset).kind == TokenKind::Dot;
+}
+
 Param Parser::parseParam()
 {
     std::optional<Capability> capability;
@@ -490,6 +547,165 @@ std::unique_ptr<Stmt> Parser::parseFunctionDecl()
         name.text, std::move(params), returnType, std::move(body));
     decl->typeParams = std::move(typeParams);
     return decl;
+}
+
+Param Parser::parseParamCStyle()
+{
+    std::optional<Capability> capability;
+    if (current().kind == TokenKind::Read)
+    {
+        capability = Capability::Read;
+        advance();
+    }
+    else if (current().kind == TokenKind::Write)
+    {
+        capability = Capability::Write;
+        advance();
+    }
+    else if (current().kind == TokenKind::Take)
+    {
+        capability = Capability::Take;
+        advance();
+    }
+
+    const std::string type = parseTypeName();
+    const auto& name = expect(TokenKind::Identifier, "expected parameter name");
+    return Param{name.text, type, capability};
+}
+
+Param Parser::parseSelfAwareParamCStyle(const std::string& selfType)
+{
+    // A bare `self` is unambiguous here exactly the way parseSelfAwareParam's own colon check
+    // is unambiguous for the old param order: a real C-style param literally named `self` (with
+    // some other explicit type) is always *two* tokens - `SomeType self` - so a lone `self` token
+    // immediately followed by ',' or ')' can only be the special receiver. `selfType` empty
+    // disables this check entirely (a top-level C-style function has no receiver - see
+    // tryParseCStyleFunctionDecl's own call site).
+    if (!selfType.empty() && current().kind == TokenKind::Identifier && current().text == "self" &&
+        (peek().kind == TokenKind::Comma || peek().kind == TokenKind::RightParen))
+    {
+        advance();
+        return Param{"self", selfType, std::nullopt};
+    }
+    return parseParamCStyle();
+}
+
+std::string Parser::buildSelfTypeText(const std::string& typeName,
+                                      const std::vector<std::string>& typeParams)
+{
+    if (typeParams.empty())
+    {
+        return typeName;
+    }
+    std::string selfType = typeName + "<";
+    for (std::size_t i = 0; i < typeParams.size(); ++i)
+    {
+        if (i > 0)
+        {
+            // No space after the comma - see parseImplDecl's own identical construction and its
+            // own comment on why that space once caused a real infinite-monomorphization-loop bug.
+            selfType += ",";
+        }
+        selfType += typeParams[i];
+    }
+    selfType += ">";
+    return selfType;
+}
+
+std::unique_ptr<FunctionDecl> Parser::parseCStyleFunctionTail(std::string mangledName,
+                                                               std::optional<std::string> returnType,
+                                                               const std::string& selfType)
+{
+    // current() is already positioned right after the declaration's own name, at '<' or '(' -
+    // the caller (tryParseCStyleFunctionDecl, or struct-embedded-method parsing in
+    // parseStructDecl) has already consumed `ReturnType name`.
+    std::vector<std::string> typeParams;
+    if (match(TokenKind::Less))
+    {
+        typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        while (match(TokenKind::Comma))
+        {
+            typeParams.push_back(expect(TokenKind::Identifier, "expected type parameter name").text);
+        }
+        expect(TokenKind::Greater, "expected '>' after function type parameters");
+    }
+
+    expect(TokenKind::LeftParen, "expected '(' after function name");
+
+    std::vector<Param> params;
+    if (current().kind != TokenKind::RightParen)
+    {
+        params.push_back(parseSelfAwareParamCStyle(selfType));
+        while (match(TokenKind::Comma))
+        {
+            if (current().kind == TokenKind::RightParen)
+            {
+                break;
+            }
+            params.push_back(parseSelfAwareParamCStyle(selfType));
+        }
+    }
+    expect(TokenKind::RightParen, "expected ')' after parameters");
+
+    std::unique_ptr<Expr> body;
+    if (match(TokenKind::FatArrow))
+    {
+        // Same `=>` sugar parseFunctionDecl's own body parsing already has - see that function's
+        // own comment.
+        auto expr = parseExpression();
+        std::vector<std::unique_ptr<Stmt>> statements;
+        statements.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
+        body = std::make_unique<BlockExpr>(std::move(statements), nullptr);
+    }
+    else
+    {
+        body = parseBlock();
+    }
+
+    auto decl = std::make_unique<FunctionDecl>(
+        std::move(mangledName), std::move(params), std::move(returnType), std::move(body));
+    decl->typeParams = std::move(typeParams);
+    return decl;
+}
+
+std::unique_ptr<Stmt> Parser::tryParseCStyleFunctionDecl()
+{
+    // Speculative parse + rollback (see this function's own declaration comment in Parser.hpp for
+    // why, unlike every other disambiguation in this file, a bounded lookahead scanner isn't used
+    // here instead). Never partially consumes tokens: every exit path either fully commits (the
+    // final `return decl` at the bottom) or restores `index_` to exactly where it started.
+    const std::size_t saved = index_;
+    try
+    {
+        std::string returnTypeText = parseTypeName();
+        // The name may be followed directly by '(' (no type params) or by its own '<T,U>' list
+        // first (see parseCStyleFunctionTail's own optional-type-params handling just below) -
+        // either is a plausible function header; anything else (including a bare name followed by
+        // nothing header-shaped at all) rolls back below.
+        if (current().kind != TokenKind::Identifier ||
+            (peek().kind != TokenKind::LeftParen && peek().kind != TokenKind::Less))
+        {
+            index_ = saved;
+            return nullptr;
+        }
+        const std::string name = advance().text;
+        // `void` (see docs/language/0068-c-style-syntax.md) - the new, explicit spelling for "no
+        // return type" that prefix-return-type syntax needs (old-style syntax already has one:
+        // simply omitting `-> Type`). No new TypeKind, no lexer keyword - just this one text
+        // comparison, canonicalizing straight to the same std::nullopt omitting `-> Type` already
+        // means, so every downstream pass is unaffected.
+        std::optional<std::string> returnType =
+            returnTypeText == "void" ? std::nullopt : std::optional(std::move(returnTypeText));
+        // Top-level function: no receiver, so `self` is never special here (see
+        // parseSelfAwareParamCStyle's own empty-selfType handling) - matches how a top-level
+        // old-style function already lets `self` be an ordinary, explicitly-typed parameter name.
+        return parseCStyleFunctionTail(name, std::move(returnType), "");
+    }
+    catch (const std::exception&)
+    {
+        index_ = saved;
+        return nullptr;
+    }
 }
 
 std::unique_ptr<Expr> Parser::parseClosureExpr()
@@ -711,34 +927,13 @@ std::unique_ptr<Stmt> Parser::parseImplDecl()
     expect(TokenKind::LeftBrace, "expected '{' after impl header");
 
     // Inside a generic impl, `self`'s own type text is the bracket-syntax `Name<T, ...>` (not
-    // the bare name) - see this function's own comment above.
-    std::string selfType = decl->typeName;
-    if (!typeParams.empty())
-    {
-        selfType += "<";
-        for (std::size_t i = 0; i < typeParams.size(); ++i)
-        {
-            if (i > 0)
-            {
-                // No space after the comma (see docs/language/0034-maps-and-sets.md's own "2026
-                // Update") - a real, previously-undiscovered bug found while porting Map<K,V>:
-                // every other multi-argument generic type text in this codebase (parseTypeName's
-                // own Map<key,value> construction, splitGenericInstantiation's own comma split)
-                // joins with a bare ',', no space - this self-type text is the one place that
-                // didn't, silently latent because no impl block ever had 2+ type params before
-                // Map<K,V>/Set<T>. The mismatch meant `self`'s own declared type text
-                // ("Pair<K, V>") never exactly matched the mangled/canonical form
-                // (splitGenericInstantiation's own comma-adjacent character becoming part of the
-                // *next* argument's own text, e.g. " V" with a leading space) - GenericMonomorphizer
-                // then treated it as a perpetually-new, never-converging ref every fixed-point
-                // iteration, growing one extra space each time forever (infinite loop, not a
-                // crash).
-                selfType += ",";
-            }
-            selfType += typeParams[i];
-        }
-        selfType += ">";
-    }
+    // the bare name) - see this function's own comment above. buildSelfTypeText's own comment
+    // carries the full history of why the comma has no trailing space (a real,
+    // previously-undiscovered infinite-monomorphization-loop bug found while porting Map<K,V>,
+    // see docs/language/0034-maps-and-sets.md's own "2026 Update") - factored out so
+    // struct-embedded-method parsing (parseStructDecl) can build the identical text for its own
+    // synthesized ImplDecl.
+    const std::string selfType = buildSelfTypeText(decl->typeName, typeParams);
 
     while (current().kind != TokenKind::RightBrace)
     {
@@ -799,7 +994,7 @@ std::unique_ptr<Stmt> Parser::parseExternDecl()
     return std::make_unique<ExternDecl>(name.text, std::move(params), returnType);
 }
 
-std::unique_ptr<Stmt> Parser::parseStructDecl()
+void Parser::parseStructDecl(std::vector<std::unique_ptr<Stmt>>& out)
 {
     expect(TokenKind::Struct, "expected 'struct'");
     const auto& name = expect(TokenKind::Identifier, "expected struct name");
@@ -819,16 +1014,85 @@ std::unique_ptr<Stmt> Parser::parseStructDecl()
 
     expect(TokenKind::LeftBrace, "expected '{' after struct name");
 
+    // Same self-type text a separate `impl<T,...> Name<T,...> { }` block would build (see
+    // buildSelfTypeText) - only ever consulted below if the struct body actually contains an
+    // embedded method with a bare `self` parameter.
+    const std::string selfType = buildSelfTypeText(name.text, typeParams);
+
     std::vector<Field> fields;
-    while (current().kind == TokenKind::Identifier)
+    std::vector<std::unique_ptr<FunctionDecl>> methods;
+
+    // A struct body member is either an old-style field (`name: Type`, unambiguous whenever a
+    // ':' immediately follows the leading identifier - checked first, unchanged from before this
+    // phase) or a C-style field/method (`[pub] Type name` - see docs/language/0068-c-style-
+    // syntax.md): once a `:` doesn't immediately follow, `Type` itself might start with any of
+    // Identifier/Star/LeftBracket/Fn (see parseTypeNameAtom), so the loop condition below accepts
+    // all four in addition to a leading `pub`, not just Identifier the way the old-style-only loop
+    // did.
+    while (current().kind == TokenKind::Identifier || current().kind == TokenKind::Pub ||
+           current().kind == TokenKind::Star || current().kind == TokenKind::LeftBracket ||
+           current().kind == TokenKind::Fn)
     {
-        const auto& fieldName = advance();
-        expect(TokenKind::Colon, "expected ':' after field name");
-        fields.push_back(Field{fieldName.text, parseTypeName()});
+        // `pub` on a field or method (see docs/language/0068-c-style-syntax.md) - parsed
+        // wherever the new syntax puts it, for the new syntax to look right; not wired into any
+        // new visibility enforcement (structs have no enforced visibility gate today, `pub` or
+        // not - see parseItem's own identical "harmlessly consumed-and-ignored" struct handling).
+        // On a method, sets FunctionDecl::isPublic exactly like a `pub` top-level function does
+        // today (same field, same existing meaning) - see the isPub use below.
+        const bool isPub = match(TokenKind::Pub);
+
+        // Old-style field: `Identifier ':' Type` - unambiguous (checked first), completely
+        // unchanged from before this phase.
+        if (current().kind == TokenKind::Identifier && peek().kind == TokenKind::Colon)
+        {
+            const auto& fieldName = advance();
+            advance(); // ':'
+            fields.push_back(Field{fieldName.text, parseTypeName()});
+            continue;
+        }
+
+        // C-style field or method: `Type name`, optionally followed by '(' for a method. Unlike
+        // tryParseCStyleFunctionDecl's own top-level speculative parse, no rollback is needed
+        // here - the old-style branch above has already claimed the one shape ('Identifier ':')
+        // that could otherwise collide, so anything reaching this point commits unconditionally
+        // (a genuine parse failure here is a real syntax error, not "maybe old-style instead").
+        std::string typeText = parseTypeName();
+        const auto& memberName = expect(TokenKind::Identifier, "expected field or method name");
+
+        if (current().kind == TokenKind::LeftParen)
+        {
+            // `void` (see tryParseCStyleFunctionDecl's own identical handling) - the new, explicit
+            // "no return type" spelling.
+            std::optional<std::string> returnType =
+                typeText == "void" ? std::nullopt : std::optional(std::move(typeText));
+            auto method = parseCStyleFunctionTail(
+                name.text + "." + memberName.text, std::move(returnType), selfType);
+            method->isPublic = isPub;
+            methods.push_back(std::move(method));
+        }
+        else
+        {
+            fields.push_back(Field{memberName.text, std::move(typeText)});
+        }
     }
     expect(TokenKind::RightBrace, "expected '}' after struct fields");
 
-    return std::make_unique<StructDecl>(name.text, std::move(fields), std::move(typeParams));
+    out.push_back(std::make_unique<StructDecl>(name.text, std::move(fields), typeParams));
+
+    // (typeParams intentionally NOT moved above - still needed below if there are methods.)
+
+    // Only synthesize an ImplDecl when the struct body actually had at least one embedded method
+    // (see parseStructDecl's own declaration comment in Parser.hpp) - a struct with no embedded
+    // methods still yields exactly the one StructDecl, so old-style `struct { }` plus a separate
+    // `impl { }` elsewhere is unaffected.
+    if (!methods.empty())
+    {
+        auto impl = std::make_unique<ImplDecl>();
+        impl->typeName = name.text;
+        impl->typeParams = std::move(typeParams);
+        impl->methods = std::move(methods);
+        out.push_back(std::move(impl));
+    }
 }
 
 std::unique_ptr<Stmt> Parser::parseEnumDecl()
@@ -2222,6 +2486,32 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             expect(TokenKind::RightParen, "expected ')' after arguments");
 
             return std::make_unique<CallExpr>(name.text, std::move(args), typeArgument);
+        }
+
+        // `Box<i32>.new(41)` (see docs/language/0068-c-style-syntax.md) - an associated function
+        // called on an *explicit* generic instantiation. Reuses the identical "bare NameExpr,
+        // resolved as a known struct/module name by every downstream pass' own module-qualified-
+        // call check" mechanism `Counter.new(5)` already gets for free (see that same document) -
+        // the only difference is the NameExpr's own text is the bracket-syntax type reference
+        // ("Box<i32>") rather than a bare struct name, canonicalized here exactly like any other
+        // type-position generic reference (parseTypeName's own "Name<Arg1,Arg2,...>" shape).
+        // GenericMonomorphizer resolves this text to a real, mangled struct name later (see its
+        // own MethodCallExpr case, which now also treats *this* NameExpr's own text as a type
+        // reference needing registration/rewriting) - by the time TypeChecker et al. see it,
+        // `object` is an ordinary NameExpr("Box$i32"), indistinguishable from any other
+        // associated-function call.
+        if (peek().kind == TokenKind::Less && looksLikeGenericTypeRefBeforeDot())
+        {
+            const auto& name = advance();
+            advance(); // '<'
+            std::string typeName = name.text + "<" + parseTypeName();
+            while (match(TokenKind::Comma))
+            {
+                typeName += "," + parseTypeName();
+            }
+            expect(TokenKind::Greater, "expected '>' after generic type reference's type arguments");
+            typeName += ">";
+            return std::make_unique<NameExpr>(std::move(typeName));
         }
 
         if (peek().kind == TokenKind::LeftParen)

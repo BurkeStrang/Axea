@@ -239,6 +239,163 @@ TEST("Parser builds a struct declaration with newline-separated fields")
     EXPECT_EQ(structDecl->fields[1].name, "y");
 }
 
+TEST("Parser builds a C-style top-level function declaration - 'ReturnType name(params) { body }' "
+     "instead of 'name(params) -> ReturnType { body }' (see docs/language/0068-c-style-syntax.md)")
+{
+    auto program = parseOne("i32 addTwo(i32 a, i32 b) { return a + b }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_EQ(function->name, "addTwo");
+    EXPECT_EQ(function->params.size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(function->params[0].name, "a");
+    EXPECT_EQ(function->params[0].type, "i32");
+    EXPECT_EQ(function->params[1].name, "b");
+    EXPECT_TRUE(function->returnType.has_value());
+    EXPECT_EQ(*function->returnType, "i32");
+}
+
+TEST("Parser's C-style function declaration accepts 'void' as the explicit 'no return type' "
+     "spelling, canonicalizing to the same nullopt omitting '-> Type' already means")
+{
+    auto program = parseOne("void doNothing() { }");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    EXPECT_TRUE(!function->returnType.has_value());
+}
+
+TEST("Parser's C-style function declaration supports the '=>' single-expression body shorthand, "
+     "same as old-style")
+{
+    auto program = parseOne("i32 square(i32 x) => x * x");
+
+    auto* function = dynamic_cast<FunctionDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(function != nullptr);
+    auto* body = dynamic_cast<BlockExpr*>(function->body.get());
+    EXPECT_TRUE(body != nullptr);
+    EXPECT_EQ(body->statements.size(), static_cast<std::size_t>(1));
+    EXPECT_TRUE(dynamic_cast<ReturnStmt*>(body->statements[0].get()) != nullptr);
+}
+
+TEST("Parser's C-style top-level function declaration doesn't collide with an old-style generic "
+     "function declaration sharing the same 'Identifier <' start - 'List<T> makeList(...)' (a "
+     "C-style header with a generic return type) and 'newList<T>() -> List<T> {...}' (an "
+     "old-style generic function) both still parse to their own correct shape")
+{
+    auto program = parseOne("struct List<T> { length: i32 } "
+                            "List<T> makeList<T>() { return List<T> { length: 0 } } "
+                            "newList<T>() -> List<T> { return List<T> { length: 0 } }");
+
+    auto* cStyle = dynamic_cast<FunctionDecl*>(program.items.at(1).get());
+    EXPECT_TRUE(cStyle != nullptr);
+    EXPECT_EQ(cStyle->name, "makeList");
+    EXPECT_TRUE(cStyle->returnType.has_value());
+    EXPECT_EQ(*cStyle->returnType, "List<T>");
+    EXPECT_EQ(cStyle->typeParams.size(), static_cast<std::size_t>(1));
+
+    auto* oldStyle = dynamic_cast<FunctionDecl*>(program.items.at(2).get());
+    EXPECT_TRUE(oldStyle != nullptr);
+    EXPECT_EQ(oldStyle->name, "newList");
+    EXPECT_TRUE(oldStyle->returnType.has_value());
+    EXPECT_EQ(*oldStyle->returnType, "List<T>");
+}
+
+TEST("Parser builds a struct with C-style embedded fields and methods, desugaring into a "
+     "StructDecl plus a synthesized ImplDecl (see docs/language/0068-c-style-syntax.md) - a "
+     "struct with no embedded methods still yields just the one StructDecl (mirrors an old-style "
+     "'struct { }' with no separate 'impl' block at all)")
+{
+    auto program = parseOne("struct Counter { "
+                            "  i32 value "
+                            "  pub Counter new(i32 initial) { return Counter { value: initial } } "
+                            "  pub void increment(self) { self.value++ } "
+                            "  pub i32 current(self) { return self.value } "
+                            "}");
+
+    EXPECT_EQ(program.items.size(), static_cast<std::size_t>(2));
+
+    auto* structDecl = dynamic_cast<StructDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(structDecl != nullptr);
+    EXPECT_EQ(structDecl->name, "Counter");
+    EXPECT_EQ(structDecl->fields.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(structDecl->fields[0].name, "value");
+    EXPECT_EQ(structDecl->fields[0].type, "i32");
+
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(1).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->typeName, "Counter");
+    EXPECT_EQ(impl->methods.size(), static_cast<std::size_t>(3));
+
+    EXPECT_EQ(impl->methods[0]->name, "Counter.new");
+    EXPECT_TRUE(impl->methods[0]->isPublic);
+    EXPECT_EQ(impl->methods[0]->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(impl->methods[0]->params[0].name, "initial");
+    EXPECT_EQ(impl->methods[0]->params[0].type, "i32");
+    EXPECT_TRUE(impl->methods[0]->returnType.has_value());
+    EXPECT_EQ(*impl->methods[0]->returnType, "Counter");
+
+    EXPECT_EQ(impl->methods[1]->name, "Counter.increment");
+    EXPECT_EQ(impl->methods[1]->params.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(impl->methods[1]->params[0].name, "self");
+    EXPECT_EQ(impl->methods[1]->params[0].type, "Counter");
+    EXPECT_TRUE(!impl->methods[1]->returnType.has_value());
+
+    EXPECT_EQ(impl->methods[2]->name, "Counter.current");
+    EXPECT_TRUE(impl->methods[2]->returnType.has_value());
+    EXPECT_EQ(*impl->methods[2]->returnType, "i32");
+}
+
+TEST("Parser builds a generic struct's own C-style embedded methods with the bracket-syntax "
+     "self-type text ('Box<T>', not the bare name), mirroring an old-style 'impl<T> Box<T> { }' "
+     "block's own identical self-type construction")
+{
+    auto program = parseOne("struct Box<T> { "
+                            "  T value "
+                            "  pub T get(self) { return self.value } "
+                            "}");
+
+    EXPECT_EQ(program.items.size(), static_cast<std::size_t>(2));
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(1).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->typeParams.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(impl->typeParams[0], "T");
+    EXPECT_EQ(impl->methods[0]->params[0].name, "self");
+    EXPECT_EQ(impl->methods[0]->params[0].type, "Box<T>");
+}
+
+TEST("Parser parses an associated-function call on an explicit generic instantiation - "
+     "'Box<i32>.new(41)' - into a MethodCallExpr whose object is a NameExpr holding the "
+     "bracket-syntax type text 'Box<i32>' (see docs/language/0068-c-style-syntax.md)")
+{
+    auto program = parseOne("x = Box<i32>.new(41)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    EXPECT_TRUE(assignment != nullptr);
+    auto* call = dynamic_cast<MethodCallExpr*>(assignment->value.get());
+    EXPECT_TRUE(call != nullptr);
+    EXPECT_EQ(call->method, "new");
+    EXPECT_EQ(call->arguments.size(), static_cast<std::size_t>(1));
+
+    auto* object = dynamic_cast<NameExpr*>(call->object.get());
+    EXPECT_TRUE(object != nullptr);
+    EXPECT_EQ(object->name, "Box<i32>");
+}
+
+TEST("Parser's old-style 'struct { }' plus a separate 'impl { }' block still parses exactly as "
+     "before - C-style struct-embedded methods coexist with, and don't disturb, the old syntax")
+{
+    auto program = parseOne("struct OldPoint { x: i32  y: i32 } "
+                            "impl OldPoint { sum(self) -> i32 { return self.x + self.y } }");
+
+    EXPECT_EQ(program.items.size(), static_cast<std::size_t>(2));
+    auto* structDecl = dynamic_cast<StructDecl*>(program.items.at(0).get());
+    EXPECT_TRUE(structDecl != nullptr);
+    auto* impl = dynamic_cast<ImplDecl*>(program.items.at(1).get());
+    EXPECT_TRUE(impl != nullptr);
+    EXPECT_EQ(impl->methods[0]->name, "OldPoint.sum");
+}
+
 TEST("Parser builds a struct literal with named fields")
 {
     auto program = parseOne("p = Point { x: 1  y: 2 }");

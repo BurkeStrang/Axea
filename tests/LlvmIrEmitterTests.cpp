@@ -437,16 +437,6 @@ TEST("LlvmIrEmitter passes a String argument as a bare i8* at a str-parameter ca
     EXPECT_TRUE(ir.find("call i8* @useStr(i8* %") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter prints a top-level String binding via a direct %s of its data pointer, not "
-     "the generic byte-print loop that would misread each byte as a struct pointer")
-{
-    auto ir = emitLlvmIr("s = String(\"hi\")");
-    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
-    // No struct-print-helper call - a byte-print loop misreading "i8" as a
-    // nested struct element type would emit one of these.
-    EXPECT_TRUE(ir.find("@axea.print.i8") == std::string::npos);
-}
-
 TEST("LlvmIrEmitter represents Buffer as a 3-field {i32, i32, i8*}* header - one field more "
      "than String's own 2-field header")
 {
@@ -569,16 +559,6 @@ TEST("LlvmIrEmitter Buffer.append and String.append resolve to distinct emit fun
                          "s.append(\"c\") }");
     EXPECT_TRUE(ir.find("buffer.grow") != std::string::npos);
     EXPECT_TRUE(ir.find("string.append.copyold.header") != std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level Buffer binding via a direct %s of its data pointer at "
-     "field index 2, not the generic byte-print loop or the isDequeType-shaped field-2 print "
-     "branch (Queue<T>'s own header shape now, since the Deque<T> intrinsic this branch "
-     "originally served is retired)")
-{
-    auto ir = emitLlvmIr("b = Buffer()");
-    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
-    EXPECT_TRUE(ir.find("@axea.print.i8") == std::string::npos);
 }
 
 TEST("LlvmIrEmitter's @axea.tostring.<Name> calls the user's own compiled 'format' function "
@@ -734,15 +714,6 @@ TEST("LlvmIrEmitter stringifies an i64 print argument via a real sprintf(\"%lld\
     EXPECT_TRUE(ir.find("c\"%g\\00\"") != std::string::npos);
 }
 
-TEST("LlvmIrEmitter prints a top-level i64/f64 binding via the same \"%s = %s\\n\" path char/"
-     "str/String already use, not a bare \"%d\" (which would misread a 64-bit value's upper "
-     "bits, or crash entirely for a double)")
-{
-    auto ir = emitLlvmIr("a = 100i64 b = 1.5");
-    EXPECT_TRUE(ir.find("call i8* @axea.i64.to_str(") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i8* @axea.f64.to_str(") != std::string::npos);
-}
-
 TEST("LlvmIrEmitter prints an i64/f64 struct field via the same stringifyValueOfType path top-"
      "level bindings use, not the generic byte-print loop or a misread as a nested struct "
      "pointer")
@@ -792,16 +763,6 @@ TEST("LlvmIrEmitter's String `==` first resolves both operands to their own bare
         emitLlvmIr("f() -> bool { a = String(\"hello\")  b = String(\"hello\")  return a == b }");
     EXPECT_TRUE(ir.find("call i1 @axea.eq.str(") != std::string::npos);
     EXPECT_TRUE(ir.find("icmp eq {i32, i8*}*") == std::string::npos);
-}
-
-TEST("LlvmIrEmitter prints a top-level char binding via a real UTF-8 encoder, not the numeric "
-     "codepoint - exercises the malloc'd 5-byte buffer and the codepoint-range branch")
-{
-    auto ir = emitLlvmIr("a = 'A'");
-    EXPECT_TRUE(ir.find("call i8* @malloc(i64 5)") != std::string::npos);
-    EXPECT_TRUE(ir.find("char.utf8.len1") != std::string::npos);
-    EXPECT_TRUE(ir.find("char.utf8.check2") != std::string::npos);
-    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(i8* getelementptr") != std::string::npos);
 }
 
 TEST("LlvmIrEmitter prints a char struct field via the same UTF-8 encoder, not the generic "
@@ -1265,26 +1226,18 @@ TEST("LlvmIrEmitter does not double-terminate the merge block when both branches
     EXPECT_TRUE(ir.compare(afterUnreachable, 1, "}") == 0);
 }
 
-TEST("LlvmIrEmitter emits a main that returns i32 and prints an i32 top-level binding")
+TEST("LlvmIrEmitter emits a main that returns i32 with no auto-echo of a top-level binding that "
+     "was never explicitly printed - a real, previously-undiscovered bug: commit 9af0af4 ('remove "
+     "auto output') removed this echo from `ax run`'s own interpreted path but left the "
+     "equivalent codegen here in place, so every compiled binary silently double-printed all "
+     "top-level state (see LlvmIrEmitter.hpp's own note on emitMain)")
 {
     auto ir = emitLlvmIr("x = 1 + 2");
     EXPECT_TRUE(ir.find("define i32 @main() {") != std::string::npos);
     EXPECT_TRUE(ir.find("ret i32 0") != std::string::npos);
-    EXPECT_TRUE(ir.find("@printf") != std::string::npos);
-    EXPECT_TRUE(ir.find("c\"x\\00\"") != std::string::npos); // the binding's own name, hoisted
-    EXPECT_TRUE(ir.find("c\"%s = %d\\0A\\00\"") != std::string::npos); // i32 binding format
-}
-
-TEST("LlvmIrEmitter prints multiple top-level bindings in source order")
-{
-    auto ir = emitLlvmIr("a = 1  b = 2  c = 3");
-    const std::size_t aPos = ir.find("c\"a\\00\"");
-    const std::size_t bPos = ir.find("c\"b\\00\"");
-    const std::size_t cPos = ir.find("c\"c\\00\"");
-    EXPECT_TRUE(aPos != std::string::npos && bPos != std::string::npos &&
-                cPos != std::string::npos);
-    EXPECT_TRUE(aPos < bPos);
-    EXPECT_TRUE(bPos < cPos);
+    // "declare i32 @printf(i8*, ...)" (the shared runtime's own unconditional extern
+    // declaration) is always present - what must be absent is an actual *call*.
+    EXPECT_TRUE(ir.find("call i32 (i8*, ...) @printf(") == std::string::npos);
 }
 
 TEST("LlvmIrEmitter every printf call captures its (discarded) result into a numbered register")
@@ -1305,12 +1258,14 @@ TEST("LlvmIrEmitter every printf call captures its (discarded) result into a num
     }
 }
 
-TEST("LlvmIrEmitter prints a struct top-level binding via its type's print helper")
+TEST("LlvmIrEmitter's compiled main does not auto-call a struct's own print helper for a "
+     "top-level binding that was never explicitly printed - the helper function itself is still "
+     "generated unconditionally (see the '@axea.print.<Name>' test above, for explicit print() "
+     "call sites and nested struct fields), just never called from an unprompted top-level echo")
 {
     auto ir = emitLlvmIr("struct Point { x: i32  y: i32 }  p = Point { x: 1  y: 2 }");
     EXPECT_TRUE(ir.find("define void @axea.print.Point(%Point* %0) {") != std::string::npos);
-    EXPECT_TRUE(ir.find("call void @axea.print.Point(%Point* ") != std::string::npos);
-    EXPECT_TRUE(ir.find("c\"Point { \\00\"") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.print.Point(%Point* ") == std::string::npos);
     EXPECT_TRUE(ir.find("c\"x: \\00\"") != std::string::npos);
 }
 
@@ -1865,6 +1820,43 @@ TEST("LlvmIrEmitter lowers an inherent struct method call to an ordinary LLVM 'c
                          "r = run()");
     EXPECT_TRUE(ir.find("define i32 @Point.sum(%Point* %0) {") != std::string::npos);
     EXPECT_TRUE(ir.find("call i32 @Point.sum(%Point*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers a C-style struct-embedded method identically to an old-style 'impl' "
+     "method - same mangled 'TypeName.method' function, same receiver-as-first-argument shape "
+     "(see docs/language/0068-c-style-syntax.md) - and lowers a self-less C-style associated "
+     "function ('new') to an ordinary call with no receiver argument at all, via the pre-existing "
+     "module-qualified-call mechanism (moduleNames_ is derived from every '.'-containing "
+     "function key, so 'Counter.new' already makes 'Counter' look like a module name for free -"
+     " no new IrGenerator dispatch branch was needed for this)")
+{
+    auto ir = emitLlvmIr("struct Counter { "
+                         "  i32 value "
+                         "  pub Counter new(i32 initial) { return Counter { value: initial } } "
+                         "  pub void increment(self) { self.value++ } "
+                         "} "
+                         "run() -> i32 { c = Counter.new(5)  c.increment()  return c.value } "
+                         "r = run()");
+    EXPECT_TRUE(ir.find("define %Counter* @Counter.new(i32 %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call %Counter* @Counter.new(i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("define void @Counter.increment(%Counter* %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @Counter.increment(%Counter*") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter lowers an associated-function call on an explicit generic instantiation - "
+     "'Box<i32>.new(41)' - to a plain call against the monomorphized 'Box$i32.new' function, "
+     "same mangled-name shape GenericMonomorphizer already produces for any other Box<i32> "
+     "usage (see docs/language/0068-c-style-syntax.md)")
+{
+    auto ir = emitLlvmIr("struct Box<T> { "
+                         "  T value "
+                         "  pub Box<T> new(T v) { return Box<T> { value: v } } "
+                         "  pub T get(self) { return self.value } "
+                         "} "
+                         "run() -> i32 { b = Box<i32>.new(41)  return b.get() } "
+                         "r = run()");
+    EXPECT_TRUE(ir.find("define %Box$i32* @Box$i32.new(i32 %0) {") != std::string::npos);
+    EXPECT_TRUE(ir.find("call %Box$i32* @Box$i32.new(i32") != std::string::npos);
 }
 
 TEST("LlvmIrEmitter emits sizeof<T>() via the null-pointer-GEP + ptrtoint idiom, matching real "

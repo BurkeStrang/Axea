@@ -1,0 +1,98 @@
+// C-style declaration syntax (see docs/language/0068-c-style-syntax.md): a prefix return type
+// instead of a trailing '-> Type' arrow, and methods declared directly inside the struct body
+// instead of in a separate 'impl' block. Old-style syntax keeps working everywhere too - see
+// OldPoint below, mixed into this same file with no conflict.
+
+struct Counter
+{
+    i32 value
+
+    pub Counter new(i32 initial)
+    {
+        return Counter { value: initial }
+    }
+
+    pub void increment(self)
+    {
+        self.value++
+    }
+
+    pub i32 current(self)
+    {
+        return self.value
+    }
+}
+
+struct Box<T>
+{
+    T value
+
+    pub Box<T> new(T v)
+    {
+        return Box<T> { value: v }
+    }
+
+    pub T get(self)
+    {
+        return self.value
+    }
+
+    void set(self, T v)
+    {
+        self.value = v
+    }
+}
+
+struct OldPoint
+{
+    x: i32
+    y: i32
+}
+
+impl OldPoint
+{
+    sum(self) -> i32
+    {
+        return self.x + self.y
+    }
+}
+
+i32 addTwo(i32 a, i32 b)
+{
+    return a + b
+}
+
+i32 square(i32 x) => x * x
+
+buildCounter() -> Counter
+{
+    c = Counter.new(5)
+    c.increment()
+    c.increment()
+    return c
+}
+
+buildBox() -> Box<i32>
+{
+    b = Box<i32>.new(41)
+    b.set(42)
+    return b
+}
+
+c = buildCounter()
+counterValue = c.current()
+
+b = buildBox()
+boxValue = b.get()
+
+p = OldPoint { x: 10, y: 20 }
+pointSum = p.sum()
+
+sumResult = addTwo(3, 4)
+squareResult = square(9)
+
+print("counterValue = {counterValue}")
+print("boxValue = {boxValue}")
+print("pointSum = {pointSum}")
+print("sumResult = {sumResult}")
+print("squareResult = {squareResult}")

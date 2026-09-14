@@ -109,14 +109,6 @@ public:
     // closure-keyed analogue, the same relationship closureEffectiveCapabilities() has to
     // effectiveCapabilities().
     const std::unordered_map<const ClosureExpr*, std::vector<Region>>& closureRegions() const;
-    // Top-level bindings (see docs/language/0020-compiler-architecture.md) that move-checking
-    // determined were consumed somewhere in the program's own top-level statement sequence (e.g.
-    // `u = User{...}; archive(u)` where `archive` takes `u`) - IrGenerator's own auto-generated
-    // "print every top-level binding" pass must skip a name in this set, since it's synthesized
-    // codegen, not real user-written code RegionChecker itself ever sees or could reject; printing
-    // a moved-away binding would silently read memory that (once Part B of the move-semantics work
-    // lands) has already been freed for real.
-    const std::unordered_set<std::string>& movedTopLevelBindings() const;
 
 private:
     void registerDecls(const Program& program);
@@ -185,5 +177,4 @@ private:
     // capabilities_, may not be true - regions_ is still being built function-by-function in the
     // same pass that consults it).
     std::unordered_map<std::string, std::vector<Capability>> capabilities_;
-    std::unordered_set<std::string> movedTopLevelBindings_;
 };

@@ -1082,6 +1082,101 @@ TEST("Interpreter field increment mutates the shared struct instance")
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
+TEST("Interpreter runs a C-style struct end to end (see docs/language/0068-c-style-syntax.md) - "
+     "embedded fields/methods, a self-less associated function ('new') called via "
+     "'Counter.new(...)', 'self.value++', and a 'void' method - all desugar into ordinary "
+     "StructDecl/ImplDecl/FunctionDecl AST with zero interpreter-level special-casing needed")
+{
+    const std::string source = "struct Counter { "
+                               "  i32 value "
+                               "  pub Counter new(i32 initial) { return Counter { value: initial } } "
+                               "  pub void increment(self) { self.value++ } "
+                               "  pub i32 current(self) { return self.value } "
+                               "} "
+                               "run() -> i32 { "
+                               "  c = Counter.new(100) "
+                               "  c.increment() "
+                               "  c.increment() "
+                               "  c.increment() "
+                               "  return c.current() "
+                               "} "
+                               "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 103);
+}
+
+TEST("Interpreter runs a C-style top-level function ('ReturnType name(params) { body }') "
+     "identically to its old-style equivalent")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("i32 addTwo(i32 a, i32 b) { return a + b }  "
+                                         "x = addTwo(3, 4)")),
+             7);
+}
+
+TEST("Interpreter runs a C-style function using the '=>' single-expression body shorthand")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run("i32 square(i32 x) => x * x  x = square(9)")), 81);
+}
+
+TEST("Interpreter runs a C-style generic struct's own embedded instance methods (self-based "
+     "dispatch, no associated-function call involved) - constructed via an ordinary struct "
+     "literal (see the next test for construction via 'Box<i32>.new(...)' instead)")
+{
+    const std::string source = "struct Box<T> { "
+                               "  T value "
+                               "  pub T get(self) { return self.value } "
+                               "  void set(self, T v) { self.value = v } "
+                               "} "
+                               "run() -> i32 { "
+                               "  b = Box<i32> { value: 41 } "
+                               "  b.set(42) "
+                               "  return b.get() "
+                               "} "
+                               "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
+}
+
+TEST("Interpreter runs an associated-function call on an explicit generic instantiation - "
+     "'Box<i32>.new(41)' - correctly monomorphizing Box<T> to Box$i32 and dispatching 'new' "
+     "against it (see docs/language/0068-c-style-syntax.md); a second, differently-typed "
+     "instantiation ('Box<i32>' vs a hypothetical 'Box<str>') in the same run confirms each "
+     "instantiation's own synthesized 'new' is independently correct, not aliased")
+{
+    const std::string source = "struct Box<T> { "
+                               "  T value "
+                               "  pub Box<T> new(T v) { return Box<T> { value: v } } "
+                               "  pub T get(self) { return self.value } "
+                               "  void set(self, T v) { self.value = v } "
+                               "} "
+                               "run() -> i32 { "
+                               "  a = Box<i32>.new(10) "
+                               "  b = Box<i32>.new(32) "
+                               "  a.set(a.get() + 1) "
+                               "  return a.get() + b.get() "
+                               "} "
+                               "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 43);
+}
+
+TEST("Interpreter runs a file mixing old-style 'struct { } + impl { }' and new C-style "
+     "struct-embedded methods side by side, confirming true additive coexistence")
+{
+    const std::string source = "struct Box<T> { "
+                               "  T value "
+                               "  pub T get(self) { return self.value } "
+                               "  void set(self, T v) { self.value = v } "
+                               "} "
+                               "struct OldPoint { x: i32  y: i32 } "
+                               "impl OldPoint { sum(self) -> i32 { return self.x + self.y } } "
+                               "run() -> i32 { "
+                               "  b = Box<i32> { value: 41 } "
+                               "  b.set(42) "
+                               "  p = OldPoint { x: 10, y: 20 } "
+                               "  return b.get() + p.sum() "
+                               "} "
+                               "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 72);
+}
+
 TEST("Interpreter dispatches a real user-declared 'clone' method instead of Shared<T>'s own "
      "hardcoded clone shortcut - a real, previously-undiscovered bug: the shortcut used to fire "
      "unconditionally for any struct's own method literally named 'clone', silently bypassing "
