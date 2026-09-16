@@ -1,26 +1,26 @@
 struct User
 {
-    name: str
-    age: i32
+    str name
+    i32 age
 }
 
-display(user: User) -> str
+str display(User user)
 {
     return user.name
 }
 
-birthday(user: User) -> i32
+i32 birthday(User user)
 {
     user.age++
     return user.age
 }
 
-celebrate(user: User) -> i32
+i32 celebrate(User user)
 {
     return birthday(user)
 }
 
-archive(take user: User) -> str
+str archive(take User user)
 {
     return user.name
 }

@@ -1,4 +1,4 @@
-sumTo(limit: i32) -> i32
+i32 sumTo(i32 limit)
 {
     n = 0
     total = 0
@@ -10,7 +10,7 @@ sumTo(limit: i32) -> i32
     return total
 }
 
-firstMultipleOver(limit: i32, step: i32) -> i32
+i32 firstMultipleOver(i32 limit, i32 step)
 {
     n = 0
     return loop
@@ -23,7 +23,7 @@ firstMultipleOver(limit: i32, step: i32) -> i32
     }
 }
 
-sumRange(start: i32, end: i32) -> i32
+i32 sumRange(i32 start, i32 end)
 {
     total = 0
     for n in start..end

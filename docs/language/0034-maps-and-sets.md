@@ -203,9 +203,13 @@ struct SetInstance { std::unordered_set<Value, ValueHash, ValueEq> elements; };
 `examples/map_set.ax`'s generic section (the file also keeps the original `i32`-keyed resize-forcing section from the first phase):
 
 ```ax
-struct Point { x: i32  y: i32 }
+struct Point
+{
+    i32 x
+    i32 y
+}
 
-wordCounts() -> Map<str,i32>
+Map<str,i32> wordCounts()
 {
     counts = Map<str,i32>()
     counts.set("apple", 3)
@@ -214,7 +218,7 @@ wordCounts() -> Map<str,i32>
     return counts
 }
 
-uniquePoints() -> Set<Point>
+Set<Point> uniquePoints()
 {
     seen = Set<Point>()
     seen.add(Point { x: 1  y: 1 })
@@ -223,7 +227,7 @@ uniquePoints() -> Set<Point>
     return seen
 }
 
-locations() -> Map<str,Point>
+Map<str,Point> locations()
 {
     places = Map<str,Point>()
     places.set("origin", Point { x: 0  y: 0 })

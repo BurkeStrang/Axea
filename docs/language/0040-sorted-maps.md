@@ -408,7 +408,7 @@ rotation case).
 `examples/sorted_map.ax`:
 
 ```ax
-build() -> SortedMap<i32,i32>
+SortedMap<i32,i32> build()
 {
     scores = SortedMap<i32,i32>()
     scores.set(93, 1)
@@ -417,12 +417,12 @@ build() -> SortedMap<i32,i32>
     return scores
 }
 
-updateOne(scores: SortedMap<i32,i32>)
+void updateOne(SortedMap<i32,i32> scores)
 {
     scores.set(87, 99)
 }
 
-drainSmallest(scores: SortedMap<i32,i32>) -> i32
+i32 drainSmallest(SortedMap<i32,i32> scores)
 {
     total = 0
     total = total + scores.get(87)

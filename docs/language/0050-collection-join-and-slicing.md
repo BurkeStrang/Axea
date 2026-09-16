@@ -163,7 +163,7 @@ stringifier, already generic over every printable type since `docs/language/0049
 `examples/collection_join_and_slicing.ax`:
 
 ```ax
-describe(numbers: [i32; 4]) -> String
+String describe([i32; 4] numbers)
 {
     firstTwo = numbers[..2]
     comma = ", "

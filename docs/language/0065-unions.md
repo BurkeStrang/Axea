@@ -14,7 +14,7 @@ one that prompted this phase. The goal: a *structural*, auto-instantiated union 
 with `|` directly in a type position, requiring no declaration at all:
 
 ```ax
-f(x: i32 | str) -> str
+str f(i32 | str x)
 {
     return match x
     {
@@ -138,9 +138,13 @@ account for this (harmless for real enums, whose own registration happens in
 # Worked Example
 
 ```ax
-struct Point { x: i32  y: i32 }
+struct Point
+{
+    i32 x
+    i32 y
+}
 
-describe(v: Point | i32) -> str
+str describe(Point | i32 v)
 {
     return match v
     {
@@ -149,7 +153,7 @@ describe(v: Point | i32) -> str
     }
 }
 
-run() -> i32
+i32 run()
 {
     p = Point { x: 1, y: 2 }
     print(describe(p))    // "a point"

@@ -1,12 +1,12 @@
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
 struct Box<T>
 {
-    value: T
+    T value
 }
 
 b = Box<i32> { value: 5 }

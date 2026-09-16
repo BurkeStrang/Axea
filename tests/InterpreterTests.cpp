@@ -201,55 +201,23 @@ namespace
     // kPriorityQueuePrelude below so a test that already has kStackPrelude's own List<T> (and
     // doesn't want a second, redeclared copy of it) can append just this instead.
     const std::string kPriorityQueueImplOnly =
-        "struct PriorityQueue<T> { items: List<T> } "
-        "newPriorityQueue<T>() -> PriorityQueue<T> { "
-        "  return PriorityQueue<T> { items: newList<T>() } "
-        "} "
-        "impl<T> PriorityQueue<T> { "
-        "  push(self, value: T) { "
-        "    self.items.push(value) "
-        "    i = self.items.length - 1 "
-        "    loop { "
-        "      if i <= 0 { break } "
-        "      parent = (i - 1) / 2 "
-        "      if self.items.get(i) < self.items.get(parent) { "
-        "        tmp = self.items.get(parent) "
-        "        self.items.set(parent, self.items.get(i)) "
-        "        self.items.set(i, tmp) "
-        "        i = parent "
-        "      } else { "
-        "        break "
-        "      } "
-        "    } "
-        "  } "
-        "  pop(self) -> T { "
-        "    top = self.items.get(0) "
-        "    lastValue = self.items.pop() "
-        "    if self.items.length > 0 { "
-        "      self.items.set(0, lastValue) "
-        "      i = 0 "
-        "      loop { "
-        "        left = i * 2 + 1 "
-        "        right = i * 2 + 2 "
-        "        smallest = i "
-        "        if left < self.items.length { "
-        "          if self.items.get(left) < self.items.get(smallest) { smallest = left } "
-        "        } "
-        "        if right < self.items.length { "
-        "          if self.items.get(right) < self.items.get(smallest) { smallest = right } "
-        "        } "
-        "        if smallest == i { break } "
-        "        tmp = self.items.get(i) "
-        "        self.items.set(i, self.items.get(smallest)) "
-        "        self.items.set(smallest, tmp) "
-        "        i = smallest "
-        "      } "
-        "    } "
-        "    return top "
-        "  } "
-        "  peek(self) -> T { return self.items.get(0) } "
-        "  length(self) -> i32 { return self.items.length } "
-        "} ";
+        R"AXEA(struct PriorityQueue<T>
+{
+    List<T> items
+
+    void push(self, T value)
+    {     self.items.push(value)     i = self.items.length - 1     loop {       if i <= 0 { break }       parent = (i - 1) / 2       if self.items.get(i) < self.items.get(parent) {         tmp = self.items.get(parent)         self.items.set(parent, self.items.get(i))         self.items.set(i, tmp)         i = parent       } else {         break       }     }   }
+
+    T pop(self)
+    {     top = self.items.get(0)     lastValue = self.items.pop()     if self.items.length > 0 {       self.items.set(0, lastValue)       i = 0       loop {         left = i * 2 + 1         right = i * 2 + 2         smallest = i         if left < self.items.length {           if self.items.get(left) < self.items.get(smallest) { smallest = left }         }         if right < self.items.length {           if self.items.get(right) < self.items.get(smallest) { smallest = right }         }         if smallest == i { break }         tmp = self.items.get(i)         self.items.set(i, self.items.get(smallest))         self.items.set(smallest, tmp)         i = smallest       }     }     return top   }
+
+    T peek(self)
+    { return self.items.get(0) }
+
+    i32 length(self)
+    { return self.items.length }
+} PriorityQueue<T> newPriorityQueue<T>()
+{   return PriorityQueue<T> { items: newList<T>() } })AXEA";
 
     // Built on top of kListPrelude, exactly like kStackPrelude - tests needing a real
     // PriorityQueue<T> (and no other List<T>-composing collection already in scope) prepend
@@ -447,101 +415,29 @@ namespace
     // actual Set<T> - built on top of kMapPrelude's own extern malloc/free declarations, so a
     // test needing both prepends kMapPrelude + kSetPrelude, not kSetPrelude alone.
     const std::string kSetPrelude =
-        "struct SetEntry<T> { value: T  next: *SetEntry<T> } "
-        "struct Set<T> { length: i32  bucketCount: i32  buckets: **SetEntry<T> } "
-        "newSet<T>() -> Set<T> { "
-        "  bucketCount = 8 "
-        "  raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>()) "
-        "  buckets = unsafe { raw as **SetEntry<T> } "
-        "  i = 0 "
-        "  loop { "
-        "    if i >= bucketCount { break } "
-        "    unsafe { *(buckets + i) = null } "
-        "    i = i + 1 "
-        "  } "
-        "  return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets } "
-        "} "
-        "impl<T> Set<T> { "
-        "  resize(self) { "
-        "    newBucketCount = self.bucketCount * 2 "
-        "    raw = malloc(newBucketCount as i64 * sizeof<*SetEntry<T>>()) "
-        "    newBuckets = unsafe { raw as **SetEntry<T> } "
-        "    i = 0 "
-        "    loop { "
-        "      if i >= newBucketCount { break } "
-        "      unsafe { *(newBuckets + i) = null } "
-        "      i = i + 1 "
-        "    } "
-        "    j = 0 "
-        "    loop { "
-        "      if j >= self.bucketCount { break } "
-        "      cur = unsafe { *(self.buckets + j) } "
-        "      loop { "
-        "        if cur == null { break } "
-        "        curNode = unsafe { *cur } "
-        "        nextNode = curNode.next "
-        "        idx = hash<T>(curNode.value) & (newBucketCount - 1) "
-        "        oldHead = unsafe { *(newBuckets + idx) } "
-        "        curNode.next = oldHead "
-        "        unsafe { *(newBuckets + idx) = cur } "
-        "        cur = nextNode "
-        "      } "
-        "      j = j + 1 "
-        "    } "
-        "    self.bucketCount = newBucketCount "
-        "    self.buckets = newBuckets "
-        "  } "
-        "  add(self, value: T) { "
-        "    idx = hash<T>(value) & (self.bucketCount - 1) "
-        "    cur = unsafe { *(self.buckets + idx) } "
-        "    loop { "
-        "      if cur == null { break } "
-        "      curNode = unsafe { *cur } "
-        "      if keyEq<T>(curNode.value, value) { return } "
-        "      cur = curNode.next "
-        "    } "
-        "    raw = malloc(sizeof<SetEntry<T>>()) "
-        "    newEntry = unsafe { raw as *SetEntry<T> } "
-        "    oldHead = unsafe { *(self.buckets + idx) } "
-        "    unsafe { *newEntry = SetEntry<T> { value: value, next: oldHead } } "
-        "    unsafe { *(self.buckets + idx) = newEntry } "
-        "    self.length = self.length + 1 "
-        "    if self.length * 4 > self.bucketCount * 3 { "
-        "      self.resize() "
-        "    } "
-        "  } "
-        "  contains(self, value: T) -> bool { "
-        "    idx = hash<T>(value) & (self.bucketCount - 1) "
-        "    cur = unsafe { *(self.buckets + idx) } "
-        "    loop { "
-        "      if cur == null { return false } "
-        "      curNode = unsafe { *cur } "
-        "      if keyEq<T>(curNode.value, value) { return true } "
-        "      cur = curNode.next "
-        "    } "
-        "  } "
-        "  remove(self, value: T) { "
-        "    idx = hash<T>(value) & (self.bucketCount - 1) "
-        "    cur = unsafe { *(self.buckets + idx) } "
-        "    prev: *SetEntry<T> = null "
-        "    loop { "
-        "      if cur == null { return } "
-        "      curNode = unsafe { *cur } "
-        "      if keyEq<T>(curNode.value, value) { "
-        "        if prev == null { "
-        "          unsafe { *(self.buckets + idx) = curNode.next } "
-        "        } else { "
-        "          prevNode = unsafe { *prev } "
-        "          prevNode.next = curNode.next "
-        "        } "
-        "        self.length = self.length - 1 "
-        "        return "
-        "      } "
-        "      prev = cur "
-        "      cur = curNode.next "
-        "    } "
-        "  } "
-        "} ";
+        R"AXEA(struct SetEntry<T>
+{
+    T value
+    *SetEntry<T> next
+} struct Set<T>
+{
+    i32 length
+    i32 bucketCount
+    **SetEntry<T> buckets
+
+    void resize(self)
+    {     newBucketCount = self.bucketCount * 2     raw = malloc(newBucketCount as i64 * sizeof<*SetEntry<T>>())     newBuckets = unsafe { raw as **SetEntry<T> }     i = 0     loop {       if i >= newBucketCount { break }       unsafe { *(newBuckets + i) = null }       i = i + 1     }     j = 0     loop {       if j >= self.bucketCount { break }       cur = unsafe { *(self.buckets + j) }       loop {         if cur == null { break }         curNode = unsafe { *cur }         nextNode = curNode.next         idx = hash<T>(curNode.value) & (newBucketCount - 1)         oldHead = unsafe { *(newBuckets + idx) }         curNode.next = oldHead         unsafe { *(newBuckets + idx) = cur }         cur = nextNode       }       j = j + 1     }     self.bucketCount = newBucketCount     self.buckets = newBuckets   }
+
+    void add(self, T value)
+    {     idx = hash<T>(value) & (self.bucketCount - 1)     cur = unsafe { *(self.buckets + idx) }     loop {       if cur == null { break }       curNode = unsafe { *cur }       if keyEq<T>(curNode.value, value) { return }       cur = curNode.next     }     raw = malloc(sizeof<SetEntry<T>>())     newEntry = unsafe { raw as *SetEntry<T> }     oldHead = unsafe { *(self.buckets + idx) }     unsafe { *newEntry = SetEntry<T> { value: value, next: oldHead } }     unsafe { *(self.buckets + idx) = newEntry }     self.length = self.length + 1     if self.length * 4 > self.bucketCount * 3 {       self.resize()     }   }
+
+    bool contains(self, T value)
+    {     idx = hash<T>(value) & (self.bucketCount - 1)     cur = unsafe { *(self.buckets + idx) }     loop {       if cur == null { return false }       curNode = unsafe { *cur }       if keyEq<T>(curNode.value, value) { return true }       cur = curNode.next     }   }
+
+    void remove(self, T value)
+    {     idx = hash<T>(value) & (self.bucketCount - 1)     cur = unsafe { *(self.buckets + idx) }     prev: *SetEntry<T> = null     loop {       if cur == null { return }       curNode = unsafe { *cur }       if keyEq<T>(curNode.value, value) {         if prev == null {           unsafe { *(self.buckets + idx) = curNode.next }         } else {           prevNode = unsafe { *prev }           prevNode.next = curNode.next         }         self.length = self.length - 1         return       }       prev = cur       cur = curNode.next     }   }
+} Set<T> newSet<T>()
+{   bucketCount = 8   raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>())   buckets = unsafe { raw as **SetEntry<T> }   i = 0   loop {     if i >= bucketCount { break }     unsafe { *(buckets + i) = null }     i = i + 1   }   return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets } })AXEA";
 
     // A real AVL tree SortedMap<K,V>, mirroring std/collections.ax's own actual SortedMap<K,V>
     // (see docs/language/0040-sorted-maps.md's own "2026 Update") - a faithful translation of the
@@ -982,7 +878,8 @@ TEST("Interpreter throws when arithmetic operand is not an integer")
 
 TEST("Interpreter calls a function and evaluates its block result")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("square(n: i32) -> i32 { return n * n }  x = square(6)")),
+    EXPECT_EQ(std::get<std::int64_t>(run(R"AXEA(i32 square(i32 n)
+{ return n * n } x = square(6))AXEA")),
               36);
 }
 
@@ -993,11 +890,8 @@ TEST("Interpreter evaluates a fat-arrow function body")
 
 TEST("Interpreter handles recursive calls via early return and forward reference")
 {
-    const std::string source = "factorial(n: i32) -> i32 { "
-                               "  if n <= 1 { return 1 } "
-                               "  return n * factorial(n - 1) "
-                               "} "
-                               "x = factorial(5)";
+    const std::string source = R"AXEA(i32 factorial(i32 n)
+{   if n <= 1 { return 1 }   return n * factorial(n - 1) } x = factorial(5))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 120);
 }
 
@@ -1015,7 +909,8 @@ TEST("Interpreter function parameters shadow same-named top-level variables inde
 
 TEST("Interpreter throws on wrong argument count")
 {
-    EXPECT_THROWS(runProgram("f(a: i32, b: i32) -> i32 { return a + b }  x = f(1)"));
+    EXPECT_THROWS(runProgram(R"AXEA(i32 f(i32 a, i32 b)
+{ return a + b } x = f(1))AXEA"));
 }
 
 TEST("Interpreter throws on call to an undefined function")
@@ -1025,16 +920,21 @@ TEST("Interpreter throws on call to an undefined function")
 
 TEST("Interpreter constructs a struct and reads its fields")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "p = Point { x: 3  y: 4 } "
-                               "x = p.x + p.y";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} p = Point { x: 3  y: 4 } x = p.x + p.y)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 7);
 }
 
 TEST("Interpreter builds struct literal fields in declared order regardless of source order")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "x = Point { y: 2  x: 1 }";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} x = Point { y: 2  x: 1 })AXEA";
     const auto instance = std::get<std::shared_ptr<StructInstance>>(run(source));
     EXPECT_EQ(instance->fields[0].first, "x");
     EXPECT_EQ(instance->fields[1].first, "y");
@@ -1042,7 +942,11 @@ TEST("Interpreter builds struct literal fields in declared order regardless of s
 
 TEST("Interpreter throws on struct literal missing a field")
 {
-    EXPECT_THROWS(runProgram("struct Point { x: i32  y: i32 }  x = Point { x: 1 }"));
+    EXPECT_THROWS(runProgram(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} x = Point { x: 1 })AXEA"));
 }
 
 TEST("Interpreter throws on field access on a non-struct value")
@@ -1052,33 +956,39 @@ TEST("Interpreter throws on field access on a non-struct value")
 
 TEST("Interpreter throws on access to an undefined field")
 {
-    EXPECT_THROWS(runProgram("struct Point { x: i32 }  p = Point { x: 1 }  x = p.y"));
+    EXPECT_THROWS(runProgram(R"AXEA(struct Point
+{
+    i32 x
+} p = Point { x: 1 }  x = p.y)AXEA"));
 }
 
 TEST("toString formats a struct instance deterministically by declared field order")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "x = Point { x: 1  y: 2 }";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} x = Point { x: 1  y: 2 })AXEA";
     EXPECT_EQ(toString(run(source)), "Point { x: 1, y: 2 }");
 }
 
 TEST("Interpreter field assignment mutates the shared struct instance")
 {
-    const std::string source = "struct Point { x: i32 } "
-                               "update(p: Point) -> i32 { p.x = 99  return p.x } "
-                               "p = Point { x: 1 } "
-                               "called = update(p) "
-                               "x = p.x";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+} i32 update(Point p)
+{ p.x = 99  return p.x } p = Point { x: 1 } called = update(p) x = p.x)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
 TEST("Interpreter field increment mutates the shared struct instance")
 {
-    const std::string source = "struct Point { x: i32 } "
-                               "bump(p: Point) -> i32 { p.x++  return p.x } "
-                               "p = Point { x: 1 } "
-                               "called = bump(p) "
-                               "x = p.x";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+} i32 bump(Point p)
+{ p.x++  return p.x } p = Point { x: 1 } called = bump(p) x = p.x)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
@@ -1183,14 +1093,14 @@ TEST("Interpreter dispatches a real user-declared 'clone' method instead of Shar
      "the method body and returning the exact same shared instance as the receiver instead of "
      "a real, independent copy")
 {
-    const std::string source = "struct Box { value: i32 } "
-                               "impl Box { clone(self) -> Box { return Box { value: self.value } } } "
-                               "bump(b: Box) -> i32 { b.value = b.value + 1  return b.value } "
-                               "a = Box { value: 1 } "
-                               "b = a.clone() "
-                               "called = bump(b) "
-                               "x = a.value "
-                               "y = b.value";
+    const std::string source = R"AXEA(struct Box
+{
+    i32 value
+
+    Box clone(self)
+    { return Box { value: self.value } }
+} i32 bump(Box b)
+{ b.value = b.value + 1  return b.value } a = Box { value: 1 } b = a.clone() called = bump(b) x = a.value y = b.value)AXEA";
     auto vars = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 1);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("y")), 2);
@@ -1200,13 +1110,11 @@ TEST("Interpreter's Shared<T>.clone() still returns a second handle to the exact
      "allocation - the intrinsic clone shortcut's own real case, unaffected by the fix above "
      "that lets a real struct method named 'clone' take precedence over it")
 {
-    const std::string source = "struct Counter { count: i32 } "
-                               "bump(c: Shared<Counter>) { c.count = c.count + 1 } "
-                               "original = Shared(Counter { count: 1 }) "
-                               "copy = original.clone() "
-                               "called = bump(copy) "
-                               "x = original.count "
-                               "y = copy.count";
+    const std::string source = R"AXEA(struct Counter
+{
+    i32 count
+} void bump(Shared<Counter> c)
+{ c.count = c.count + 1 } original = Shared(Counter { count: 1 }) copy = original.clone() called = bump(copy) x = original.count y = copy.count)AXEA";
     auto vars = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 2);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("y")), 2);
@@ -1214,151 +1122,85 @@ TEST("Interpreter's Shared<T>.clone() still returns a second handle to the exact
 
 TEST("Interpreter increment of a plain parameter mutates it through nested blocks")
 {
-    const std::string source = "bump(n: i32) -> i32 { "
-                               "  if n > 0 { n++ } "
-                               "  return n "
-                               "} "
-                               "x = bump(5)";
+    const std::string source = R"AXEA(i32 bump(i32 n)
+{   if n > 0 { n++ }   return n } x = bump(5))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
 TEST("Interpreter decrement works on a plain parameter")
 {
-    EXPECT_EQ(std::get<std::int64_t>(run("f(n: i32) -> i32 { n--  return n }  x = f(5)")), 4);
+    EXPECT_EQ(std::get<std::int64_t>(run(R"AXEA(i32 f(i32 n)
+{ n--  return n } x = f(5))AXEA")), 4);
 }
 
 TEST("Interpreter runs a while loop, mutating an outer variable via plain assignment")
 {
-    const std::string source = "sumTo(limit: i32) -> i32 { "
-                               "  n = 0  total = 0 "
-                               "  while n < limit { n = n + 1  total = total + n } "
-                               "  return total "
-                               "} "
-                               "x = sumTo(5)";
+    const std::string source = R"AXEA(i32 sumTo(i32 limit)
+{   n = 0  total = 0   while n < limit { n = n + 1  total = total + n }   return total } x = sumTo(5))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 15);
 }
 
 TEST("Interpreter runs an infinite loop that exits via break with a value")
 {
-    const std::string source = "findFirstOver(limit: i32) -> i32 { "
-                               "  n = 0 "
-                               "  return loop { "
-                               "    n = n + 1 "
-                               "    if n > limit { break n } "
-                               "  } "
-                               "} "
-                               "x = findFirstOver(8)";
+    const std::string source = R"AXEA(i32 findFirstOver(i32 limit)
+{   n = 0   return loop {     n = n + 1     if n > limit { break n }   } } x = findFirstOver(8))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
 }
 
 TEST("Interpreter continue skips the rest of the current iteration")
 {
     // Sums only odd numbers from 1 to limit.
-    const std::string source = "sumOdds(limit: i32) -> i32 { "
-                               "  n = 0  total = 0 "
-                               "  while n < limit { "
-                               "    n = n + 1 "
-                               "    if n / 2 * 2 == n { continue } "
-                               "    total = total + n "
-                               "  } "
-                               "  return total "
-                               "} "
-                               "x = sumOdds(6)"; // 1 + 3 + 5 = 9
+    const std::string source = R"AXEA(i32 sumOdds(i32 limit)
+{   n = 0  total = 0   while n < limit {     n = n + 1     if n / 2 * 2 == n { continue }     total = total + n   }   return total } x = sumOdds(6))AXEA"; // 1 + 3 + 5 = 9
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
 }
 
 TEST("Interpreter nested loops: an inner break does not affect the outer loop")
 {
-    const std::string source = "f() -> i32 { "
-                               "  total = 0 "
-                               "  i = 0 "
-                               "  while i < 3 { "
-                               "    i = i + 1 "
-                               "    j = 0 "
-                               "    while true { "
-                               "      j = j + 1 "
-                               "      if j > 2 { break } "
-                               "      total = total + 1 "
-                               "    } "
-                               "  } "
-                               "  return total "
-                               "} "
-                               "x = f()"; // 3 outer iterations * 2 inner increments = 6
+    const std::string source = R"AXEA(i32 f()
+{   total = 0   i = 0   while i < 3 {     i = i + 1     j = 0     while true {       j = j + 1       if j > 2 { break }       total = total + 1     }   }   return total } x = f())AXEA"; // 3 outer iterations * 2 inner increments = 6
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
 TEST("Interpreter bare break exits a while loop early, discarding no useful value")
 {
-    const std::string source = "f() -> i32 { "
-                               "  n = 0 "
-                               "  while true { "
-                               "    n = n + 1 "
-                               "    if n == 4 { break } "
-                               "  } "
-                               "  return n "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   n = 0   while true {     n = n + 1     if n == 4 { break }   }   return n } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
 }
 
 TEST("Interpreter for-in sums a range with an exclusive upper bound")
 {
-    const std::string source = "f() -> i32 { "
-                               "  total = 0 "
-                               "  for i in 0..5 { total = total + i } "
-                               "  return total "
-                               "} "
-                               "x = f()"; // 0+1+2+3+4 = 10
+    const std::string source = R"AXEA(i32 f()
+{   total = 0   for i in 0..5 { total = total + i }   return total } x = f())AXEA"; // 0+1+2+3+4 = 10
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
 }
 
 TEST("Interpreter break inside a for-in loop exits early")
 {
-    const std::string source = "f() -> i32 { "
-                               "  count = 0 "
-                               "  for i in 0..10 { "
-                               "    if i == 4 { break } "
-                               "    count = count + 1 "
-                               "  } "
-                               "  return count "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   count = 0   for i in 0..10 {     if i == 4 { break }     count = count + 1   }   return count } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
 }
 
 TEST("Interpreter continue inside a for-in loop skips the rest of that iteration")
 {
-    const std::string source = "f() -> i32 { "
-                               "  total = 0 "
-                               "  for i in 0..6 { "
-                               "    if i / 2 * 2 == i { continue } "
-                               "    total = total + i "
-                               "  } "
-                               "  return total "
-                               "} "
-                               "x = f()"; // 1 + 3 + 5 = 9
+    const std::string source = R"AXEA(i32 f()
+{   total = 0   for i in 0..6 {     if i / 2 * 2 == i { continue }     total = total + i   }   return total } x = f())AXEA"; // 1 + 3 + 5 = 9
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
 }
 
 TEST("Interpreter for-in's induction variable never leaks or mutates a same-named outer variable")
 {
-    const std::string source = "f() -> i32 { "
-                               "  i = 99 "
-                               "  for i in 0..3 { } "
-                               "  return i "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   i = 99   for i in 0..3 { }   return i } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
 TEST("Interpreter nested for-in loops reusing the same variable name do not collide")
 {
-    const std::string source = "f() -> i32 { "
-                               "  total = 0 "
-                               "  for i in 0..3 { for i in 0..2 { total = total + 1 } } "
-                               "  return total "
-                               "} "
-                               "x = f()"; // 3 * 2 = 6
+    const std::string source = R"AXEA(i32 f()
+{   total = 0   for i in 0..3 { for i in 0..2 { total = total + 1 } }   return total } x = f())AXEA"; // 3 * 2 = 6
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
@@ -1374,46 +1216,35 @@ TEST("Interpreter's .length reports an array literal's element count")
 
 TEST("Interpreter index-assignment mutates the shared array instance")
 {
-    const std::string source = "bump(values: [i32; 3]) -> i32 { values[1] = 99  return values[1] } "
-                               "values = [1, 2, 3] "
-                               "called = bump(values) "
-                               "x = values[1]";
+    const std::string source = R"AXEA(i32 bump([i32; 3] values)
+{ values[1] = 99  return values[1] } values = [1, 2, 3] called = bump(values) x = values[1])AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 99);
 }
 
 TEST("Interpreter throws on a runtime out-of-range index")
 {
     EXPECT_THROWS(
-        runProgram("f(i: i32) -> i32 { values = [1, 2, 3]  return values[i] }  x = f(5)"));
+        runProgram(R"AXEA(i32 f(i32 i)
+{ values = [1, 2, 3]  return values[i] } x = f(5))AXEA"));
 }
 
 TEST("Interpreter throws on index-assignment out of range")
 {
-    EXPECT_THROWS(runProgram("f(i: i32) { values = [1, 2, 3]  values[i] = 9 }  y = f(5)  x = 1"));
+    EXPECT_THROWS(runProgram(R"AXEA(void f(i32 i)
+{ values = [1, 2, 3]  values[i] = 9 } y = f(5)  x = 1)AXEA"));
 }
 
 TEST("Interpreter for-in-over-an-array sums its elements")
 {
-    const std::string source = "sum(values: [i32; 4]) -> i32 { "
-                               "  total = 0 "
-                               "  for v in values { total = total + v } "
-                               "  return total "
-                               "} "
-                               "x = sum([1, 2, 3, 4])"; // 10
+    const std::string source = R"AXEA(i32 sum([i32; 4] values)
+{   total = 0   for v in values { total = total + v }   return total } x = sum([1, 2, 3, 4]))AXEA"; // 10
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
 }
 
 TEST("Interpreter break inside a for-in-over-an-array loop exits early")
 {
-    const std::string source = "f(values: [i32; 5]) -> i32 { "
-                               "  count = 0 "
-                               "  for v in values { "
-                               "    if v == 3 { break } "
-                               "    count = count + 1 "
-                               "  } "
-                               "  return count "
-                               "} "
-                               "x = f([1, 2, 3, 4, 5])";
+    const std::string source = R"AXEA(i32 f([i32; 5] values)
+{   count = 0   for v in values {     if v == 3 { break }     count = count + 1   }   return count } x = f([1, 2, 3, 4, 5]))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
@@ -1424,39 +1255,33 @@ TEST("Interpreter toString formats an array literally, matching array-literal sy
 
 TEST("Interpreter accepts arrays of different sizes through the same slice<T> parameter")
 {
-    const std::string source = "sum(values: slice<i32>) -> i32 { "
-                               "  total = 0 "
-                               "  for v in values { total = total + v } "
-                               "  return total "
-                               "} "
-                               "f() -> i32 { return sum([1, 2, 3]) + sum([1, 2, 3, 4, 5]) } "
-                               "x = f()"; // 6 + 15 = 21
+    const std::string source = R"AXEA(i32 sum(slice<i32> values)
+{   total = 0   for v in values { total = total + v }   return total } i32 f()
+{ return sum([1, 2, 3]) + sum([1, 2, 3, 4, 5]) } x = f())AXEA"; // 6 + 15 = 21
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 21);
 }
 
 TEST("Interpreter's .length on a slice reports the actual passed-in array's size, not a fixed one")
 {
-    const std::string source = "len(values: slice<i32>) -> i32 { return values.length } "
-                               "f() -> i32 { return len([1, 2]) + len([1, 2, 3, 4, 5, 6, 7]) } "
-                               "x = f()"; // 2 + 7 = 9
+    const std::string source = R"AXEA(i32 len(slice<i32> values)
+{ return values.length } i32 f()
+{ return len([1, 2]) + len([1, 2, 3, 4, 5, 6, 7]) } x = f())AXEA"; // 2 + 7 = 9
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
 }
 
 TEST("Interpreter index-assignment through a slice parameter writes through to the caller's array")
 {
-    const std::string source = "zeroFirst(values: slice<i32>) { values[0] = 0 } "
-                               "a = [1, 2, 3] "
-                               "called = zeroFirst(a) "
-                               "x = a[0]";
+    const std::string source = R"AXEA(void zeroFirst(slice<i32> values)
+{ values[0] = 0 } a = [1, 2, 3] called = zeroFirst(a) x = a[0])AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
 }
 
 TEST("Interpreter forwards an existing slice to another slice parameter without double-wrapping")
 {
     const std::string source =
-        "helper(values: slice<i32>) -> i32 { return values[0] + values.length } "
-        "wrapper(values: slice<i32>) -> i32 { return helper(values) } "
-        "x = wrapper([7, 8, 9])"; // 7 + 3 = 10
+        R"AXEA(i32 helper(slice<i32> values)
+{ return values[0] + values.length } i32 wrapper(slice<i32> values)
+{ return helper(values) } x = wrapper([7, 8, 9]))AXEA"; // 7 + 3 = 10
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 10);
 }
 
@@ -2303,12 +2128,8 @@ TEST("Interpreter constructs a String from a str literal and reads .length")
 
 TEST("Interpreter String.append mutates in place and grows .length")
 {
-    const std::string source = "f() -> i32 { "
-                               "  s = String(\"Axea\") "
-                               "  s.append(\" Language\") "
-                               "  return s.length "
-                               "} "
-                               "x = f()"; // 4 + 9 = 13
+    const std::string source = R"AXEA(i32 f()
+{   s = String("Axea")   s.append(" Language")   return s.length } x = f())AXEA"; // 4 + 9 = 13
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 13);
 }
 
@@ -2319,22 +2140,15 @@ TEST("Interpreter toString on a String prints its own content, bare, same as a p
 
 TEST("Interpreter String.append accepts another String, not just a str literal")
 {
-    const std::string source = "f() -> i32 { "
-                               "  a = String(\"Axea\") "
-                               "  b = String(\" Language\") "
-                               "  a.append(b) "
-                               "  return a.length "
-                               "} "
-                               "x = f()"; // 4 + 9 = 13
+    const std::string source = R"AXEA(i32 f()
+{   a = String("Axea")   b = String(" Language")   a.append(b)   return a.length } x = f())AXEA"; // 4 + 9 = 13
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 13);
 }
 
 TEST("Interpreter 'append' through a String parameter writes through to the caller")
 {
-    const std::string source = "appendOne(s: String) { s.append(\"!\") } "
-                               "a = String(\"hi\") "
-                               "called = appendOne(a) "
-                               "x = a.length";
+    const std::string source = R"AXEA(void appendOne(String s)
+{ s.append("!") } a = String("hi") called = appendOne(a) x = a.length)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }
 
@@ -2343,27 +2157,17 @@ TEST("Interpreter passes a String where a str parameter is expected, as a real i
      "already-passed str (str is an immutable value, not an alias - see "
      "docs/language/0042-string.md)")
 {
-    const std::string source = "identity(s: str) -> str { return s } "
-                               "f() -> i32 { "
-                               "  s = String(\"hi\") "
-                               "  snapshot = identity(s) "
-                               "  s.append(\"!\") "
-                               "  return s.length "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(str identity(str s)
+{ return s } i32 f()
+{   s = String("hi")   snapshot = identity(s)   s.append("!")   return s.length } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }
 
 TEST("Interpreter String(text) copies text's content rather than aliasing it - a later "
      ".append() on the source must not retroactively change an already-constructed String")
 {
-    const std::string source = "f() -> i32 { "
-                               "  a = String(\"hi\") "
-                               "  b = String(a) "
-                               "  a.append(\"!\") "
-                               "  return b.length "
-                               "} "
-                               "x = f()"; // b snapshot at 2, unaffected by a's later append
+    const std::string source = R"AXEA(i32 f()
+{   a = String("hi")   b = String(a)   a.append("!")   return b.length } x = f())AXEA"; // b snapshot at 2, unaffected by a's later append
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
@@ -2374,71 +2178,40 @@ TEST("Interpreter constructs an empty Buffer with length 0")
 
 TEST("Interpreter Buffer.append mutates in place and grows .length")
 {
-    const std::string source = "f() -> i32 { "
-                               "  b = Buffer() "
-                               "  b.append(\"Axea\") "
-                               "  b.append(\" Language\") "
-                               "  return b.length "
-                               "} "
-                               "x = f()"; // 4 + 9 = 13
+    const std::string source = R"AXEA(i32 f()
+{   b = Buffer()   b.append("Axea")   b.append(" Language")   return b.length } x = f())AXEA"; // 4 + 9 = 13
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 13);
 }
 
 TEST("Interpreter Buffer.write behaves identically to Buffer.append, including interpolated "
      "arguments (see docs/language/0061-buffer-write.md)")
 {
-    const std::string source = "f() -> String { "
-                               "  name = \"Ada\" "
-                               "  age = 30 "
-                               "  b = Buffer() "
-                               "  b.write(\"Name: {name}\\n\") "
-                               "  b.write(\"Age: {age}\\n\") "
-                               "  return b.finish() "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(String f()
+{   name = "Ada"   age = 30   b = Buffer()   b.write("Name: {name}\n")   b.write("Age: {age}\n")   return b.finish() } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "Name: Ada\\nAge: 30\\n");
 }
 
 TEST("Interpreter Buffer.append_line appends its text plus a trailing newline")
 {
-    const std::string source = "f() -> String { "
-                               "  b = Buffer() "
-                               "  b.append_line(\"hi\") "
-                               "  return b.finish() "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(String f()
+{   b = Buffer()   b.append_line("hi")   return b.finish() } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "hi\n");
 }
 
 TEST("Interpreter Buffer.clear resets length to 0 without preventing reuse")
 {
-    const std::string source = "f() -> i32 { "
-                               "  b = Buffer() "
-                               "  b.append(\"hello\") "
-                               "  b.clear() "
-                               "  afterClear = b.length "
-                               "  b.append(\"re\") "
-                               "  return b.length "
-                               "} "
-                               "x = f()"; // afterClear = 0 (unused here), final length = 2
+    const std::string source = R"AXEA(i32 f()
+{   b = Buffer()   b.append("hello")   b.clear()   afterClear = b.length   b.append("re")   return b.length } x = f())AXEA"; // afterClear = 0 (unused here), final length = 2
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
 TEST("Interpreter Buffer.reserve grows .capacity without changing .length or content")
 {
-    const std::string source = "f() -> i32 { "
-                               "  b = Buffer() "
-                               "  b.reserve(64) "
-                               "  return b.length "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   b = Buffer()   b.reserve(64)   return b.length } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
-    const std::string capSource = "f() -> i32 { "
-                                  "  b = Buffer() "
-                                  "  b.reserve(64) "
-                                  "  return b.capacity "
-                                  "} "
-                                  "x = f()";
+    const std::string capSource = R"AXEA(i32 f()
+{   b = Buffer()   b.reserve(64)   return b.capacity } x = f())AXEA";
     EXPECT_TRUE(std::get<std::int64_t>(run(capSource)) >= 64);
 }
 
@@ -2479,41 +2252,24 @@ TEST("Interpreter Buffer.capacity tracks the compiled backend's own explicit dou
 TEST("Interpreter Buffer.finish transfers content into a fresh String and resets the buffer to "
      "a fresh, empty, reusable state - not left dangling")
 {
-    const std::string source = "f() -> i32 { "
-                               "  b = Buffer() "
-                               "  b.append(\"finished content\") "
-                               "  s = b.finish() "
-                               "  afterFinish = b.length "
-                               "  b.append(\"reused\") "
-                               "  return b.length "
-                               "} "
-                               "x = f()"; // afterFinish = 0, final length = 6 ("reused")
+    const std::string source = R"AXEA(i32 f()
+{   b = Buffer()   b.append("finished content")   s = b.finish()   afterFinish = b.length   b.append("reused")   return b.length } x = f())AXEA"; // afterFinish = 0, final length = 6 ("reused")
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
 TEST("Interpreter toString on a Buffer.finish() result matches the buffer's own content at the "
      "moment of the call")
 {
-    const std::string source = "f() -> String { "
-                               "  b = Buffer() "
-                               "  b.append(\"finished content\") "
-                               "  return b.finish() "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(String f()
+{   b = Buffer()   b.append("finished content")   return b.finish() } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "finished content");
 }
 
 TEST("Interpreter Buffer.finish() result is independent of later mutation on the original "
      "buffer - a genuine ownership transfer, not an alias")
 {
-    const std::string source = "f() -> i32 { "
-                               "  b = Buffer() "
-                               "  b.append(\"hi\") "
-                               "  s = b.finish() "
-                               "  b.append(\"!!!\") "
-                               "  return s.length "
-                               "} "
-                               "x = f()"; // s snapshot at 2, unaffected by b's later append
+    const std::string source = R"AXEA(i32 f()
+{   b = Buffer()   b.append("hi")   s = b.finish()   b.append("!!!")   return s.length } x = f())AXEA"; // s snapshot at 2, unaffected by b's later append
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
@@ -2524,25 +2280,16 @@ TEST("Interpreter toString on a Buffer prints its own content, bare, same as Str
 
 TEST("Interpreter 'append' through a Buffer parameter writes through to the caller")
 {
-    const std::string source = "appendOne(b: Buffer) { b.append(\"!\") } "
-                               "a = Buffer() "
-                               "t = a.append(\"hi\") "
-                               "called = appendOne(a) "
-                               "x = a.length";
+    const std::string source = R"AXEA(void appendOne(Buffer b)
+{ b.append("!") } a = Buffer() t = a.append("hi") called = appendOne(a) x = a.length)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }
 
 TEST("Interpreter distinguishes Buffer.append from String.append at runtime despite the shared "
      "method name")
 {
-    const std::string source = "f() -> i32 { "
-                               "  buf = Buffer() "
-                               "  buf.append(\"ab\") "
-                               "  s = String(\"cde\") "
-                               "  s.append(\"f\") "
-                               "  return buf.length + s.length "
-                               "} "
-                               "x = f()"; // 2 + 4 = 6
+    const std::string source = R"AXEA(i32 f()
+{   buf = Buffer()   buf.append("ab")   s = String("cde")   s.append("f")   return buf.length + s.length } x = f())AXEA"; // 2 + 4 = 6
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 6);
 }
 
@@ -2659,15 +2406,17 @@ TEST("Interpreter compares str/String values by real content, not identity, even
 
 TEST("Interpreter passes a char through a function parameter and return value unchanged")
 {
-    const std::string source = "identity(c: char) -> char { return c } "
-                               "x = identity('Z')";
+    const std::string source = R"AXEA(char identity(char c)
+{ return c } x = identity('Z'))AXEA";
     EXPECT_EQ(toString(run(source)), "Z");
 }
 
 TEST("Interpreter reads a char struct field, printed via the struct's own toString")
 {
-    const std::string source = "struct Letter { value: char } "
-                               "x = Letter { value: 'Q' }";
+    const std::string source = R"AXEA(struct Letter
+{
+    char value
+} x = Letter { value: 'Q' })AXEA";
     EXPECT_EQ(toString(run(source)), "Letter { value: Q }");
 }
 
@@ -2708,13 +2457,8 @@ TEST("Interpreter slices a String, str-coerced the same way .append's own argume
 TEST("Interpreter's str slice is a real, independent copy - mutating the source String "
      "afterward must not retroactively change an already-taken slice")
 {
-    const std::string source = "f() -> str { "
-                               "  s = String(\"Axea\") "
-                               "  sliced = s[0..4] "
-                               "  s.append(\" Language\") "
-                               "  return sliced "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(str f()
+{   s = String("Axea")   sliced = s[0..4]   s.append(" Language")   return sliced } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "Axea");
 }
 
@@ -2850,17 +2594,8 @@ TEST("Interpreter's Ok(x)/Err(e)/unwrap_or/is_ok/is_err work end to end, mirrori
      "Optional<T>'s own toString/unwrap_or/is_some/is_none precedent (see "
      "docs/language/0063-result.md)")
 {
-    const std::string source = "divide(a: i32, b: i32) -> Result<i32, str> { "
-                               "  if b == 0 { return Err(\"division by zero\") } "
-                               "  return Ok(a / b) "
-                               "} "
-                               "good = divide(10, 2) "
-                               "bad = divide(10, 0) "
-                               "goodVal = good.unwrap_or(0 - 1) "
-                               "badVal = bad.unwrap_or(0 - 1) "
-                               "goodIsOk = good.is_ok() "
-                               "badIsErr = bad.is_err() "
-                               "x = goodVal";
+    const std::string source = R"AXEA(Result<i32, str> divide(i32 a, i32 b)
+{   if b == 0 { return Err("division by zero") }   return Ok(a / b) } good = divide(10, 2) bad = divide(10, 0) goodVal = good.unwrap_or(0 - 1) badVal = bad.unwrap_or(0 - 1) goodIsOk = good.is_ok() badIsErr = bad.is_err() x = goodVal)AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("good")), "Ok(5)");
     EXPECT_EQ(toString(results.at("bad")), "Err(division by zero)");
@@ -2874,18 +2609,9 @@ TEST("Interpreter's '?' propagates Err(e) out of the enclosing function, preserv
      "error value, and never evaluates code after the failing '?' - mirrors "
      "docs/language/0052-optional.md's own None-propagation precedent for Optional<T>")
 {
-    const std::string source = "parseDigit(a: i32, b: i32) -> Result<i32, i32> { "
-                               "  if b == 0 { return Err(0 - 1) } "
-                               "  return Ok(a / b) "
-                               "} "
-                               "sumTwo(a: i32, b: i32, c: i32, d: i32) -> Result<i32, i32> { "
-                               "  x = parseDigit(a, b)? "
-                               "  y = parseDigit(c, d)? "
-                               "  return Ok(x + y) "
-                               "} "
-                               "good = sumTwo(10, 2, 20, 4) "
-                               "bad = sumTwo(10, 2, 20, 0) "
-                               "x = good";
+    const std::string source = R"AXEA(Result<i32, i32> parseDigit(i32 a, i32 b)
+{   if b == 0 { return Err(0 - 1) }   return Ok(a / b) } Result<i32, i32> sumTwo(i32 a, i32 b, i32 c, i32 d)
+{   x = parseDigit(a, b)?   y = parseDigit(c, d)?   return Ok(x + y) } good = sumTwo(10, 2, 20, 4) bad = sumTwo(10, 2, 20, 0) x = good)AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("good")), "Ok(10)");
     EXPECT_EQ(toString(results.at("bad")), "Err(-1)");
@@ -2894,18 +2620,11 @@ TEST("Interpreter's '?' propagates Err(e) out of the enclosing function, preserv
 TEST("Interpreter dispatches '?' correctly between Optional<T> and Result<T,E> based on the "
      "operand's own runtime shape, inside functions returning each kind respectively")
 {
-    const std::string source = "asOptional(s: str) -> Optional<i32> { return s.parse<i32>() } "
-                               "useOptional(s: str) -> Optional<i32> { x = asOptional(s)?  return "
-                               "Some(x + 1) } "
-                               "asResult(a: i32, b: i32) -> Result<i32, i32> { "
-                               "  if b == 0 { return Err(0 - 1) } return Ok(a / b) "
-                               "} "
-                               "useResult(a: i32, b: i32) -> Result<i32, i32> { "
-                               "  x = asResult(a, b)?  return Ok(x + 1) "
-                               "} "
-                               "o = useOptional(\"5\") "
-                               "r = useResult(10, 2) "
-                               "x = o";
+    const std::string source = R"AXEA(Optional<i32> asOptional(str s)
+{ return s.parse<i32>() } Optional<i32> useOptional(str s)
+{ x = asOptional(s)?  return Some(x + 1) } Result<i32, i32> asResult(i32 a, i32 b)
+{   if b == 0 { return Err(0 - 1) } return Ok(a / b) } Result<i32, i32> useResult(i32 a, i32 b)
+{   x = asResult(a, b)?  return Ok(x + 1) } o = useOptional("5") r = useResult(10, 2) x = o)AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("o")), "Some(6)");
     EXPECT_EQ(toString(results.at("r")), "Ok(6)");
@@ -2914,12 +2633,10 @@ TEST("Interpreter dispatches '?' correctly between Optional<T> and Result<T,E> b
 TEST("Interpreter's Result<T,E> value nested inside a collection and inside a struct field "
      "prints correctly via the default field/element printer")
 {
-    const std::string source = "struct Wrapper { r: Result<i32, i32> } "
-                               "good = Ok(1) "
-                               "bad = Err(0 - 1) "
-                               "results = [good, bad] "
-                               "w = Wrapper { r: good } "
-                               "x = results";
+    const std::string source = R"AXEA(struct Wrapper
+{
+    Result<i32, i32> r
+} good = Ok(1) bad = Err(0 - 1) results = [good, bad] w = Wrapper { r: good } x = results)AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("results")), "[Ok(1), Err(-1)]");
     EXPECT_EQ(toString(results.at("w")), "Wrapper { r: Ok(1) }");
@@ -3032,7 +2749,8 @@ TEST("Interpreter's hand-implemented extern 'abs' matches real libc abs()")
 TEST("Interpreter's print() writes space-separated arguments plus a trailing newline "
      "(see docs/language/Axea_Printing_Formatting.md)")
 {
-    const std::string source = "run() -> i32 { print(\"hello\", 1, true) return 0 } r = run()";
+    const std::string source = R"AXEA(i32 run()
+{ print("hello", 1, true) return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3044,7 +2762,8 @@ TEST("Interpreter's print() writes space-separated arguments plus a trailing new
 
 TEST("Interpreter's write() writes space-separated arguments with no trailing newline")
 {
-    const std::string source = "run() -> i32 { write(\"a\") write(\"b\") return 0 } r = run()";
+    const std::string source = R"AXEA(i32 run()
+{ write("a") write("b") return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3056,7 +2775,8 @@ TEST("Interpreter's write() writes space-separated arguments with no trailing ne
 
 TEST("Interpreter's print() with zero arguments writes just a newline")
 {
-    const std::string source = "run() -> i32 { print() return 0 } r = run()";
+    const std::string source = R"AXEA(i32 run()
+{ print() return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3085,16 +2805,11 @@ TEST("Interpreter's print(...)/write(...) and interpolation now accept an Array/
      "docs/language/0054-collection-printing.md) - toString() itself needed no changes, "
      "already fully general")
 {
-    const std::string source = "struct Point { x: i32 } "
-                               "run() -> i32 { "
-                               "  arr = [1, 2, 3] "
-                               "  p = Point { x: 5 } "
-                               "  print(arr, p) "
-                               "  s = \"arr={arr} p={p}\" "
-                               "  print(s) "
-                               "  return 0 "
-                               "} "
-                               "r = run()";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+} i32 run()
+{   arr = [1, 2, 3]   p = Point { x: 5 }   print(arr, p)   s = "arr={arr} p={p}"   print(s)   return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3141,7 +2856,8 @@ TEST("Interpreter interpolates bool and char values via the same UTF-8-aware toS
 TEST("Interpreter's print()/write() and interpolation both stringify a plain str literal with no "
      "quotes added")
 {
-    const std::string source = "run() -> i32 { print(\"plain\") return 0 } r = run()";
+    const std::string source = R"AXEA(i32 run()
+{ print("plain") return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3159,42 +2875,30 @@ TEST("Interpreter's print()/write() and interpolation both stringify a plain str
 TEST("Interpreter defaults a missing slice start to 0 and a missing end to the collection's own "
      "length, matching str slicing's own precedent")
 {
-    const std::string source = "f() -> i32 { "
-                               "  numbers = [1, 2, 3] "
-                               "  whole = numbers[..] "
-                               "  return whole.length "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   numbers = [1, 2, 3]   whole = numbers[..]   return whole.length } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }
 
 TEST("Interpreter throws on an out-of-bounds Array/List slice range, matching str slicing's own "
      "runtime bounds check")
 {
-    EXPECT_THROWS(runProgram("f() -> i32 { numbers = [1, 2, 3] bad = numbers[1..10] return "
-                             "bad.length } x = f()"));
+    EXPECT_THROWS(runProgram(R"AXEA(i32 f()
+{ numbers = [1, 2, 3] bad = numbers[1..10] return bad.length } x = f())AXEA"));
 }
 
 TEST("Interpreter's .join(separator) stringifies each element via the same generic toString() "
      "print()/interpolation already use, joined with separator")
 {
-    const std::string source = "f() -> String { "
-                               "  numbers = [1, 2, 3] "
-                               "  return numbers.join(\",\") "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(String f()
+{   numbers = [1, 2, 3]   return numbers.join(",") } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "1,2,3");
 }
 
 TEST("Interpreter's .join() on an empty Array/List returns an empty String")
 {
-    const std::string source = "f() -> i32 { "
-                               "  numbers = [1, 2, 3] "
-                               "  empty = numbers[2..2] "
-                               "  joined = empty.join(\",\") "
-                               "  return joined.length "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(i32 f()
+{   numbers = [1, 2, 3]   empty = numbers[2..2]   joined = empty.join(",")   return joined.length } x = f())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 0);
 }
 
@@ -3249,7 +2953,8 @@ TEST("Interpreter's print() prints a slice<T>-typed parameter with the same brac
      "an Array (see docs/language/0056-slice-printing.md)")
 {
     const std::string source =
-        "f(s: slice<i32>) -> i32 { print(s) return 0 } arr = [1, 2, 3] r = f(arr)";
+        R"AXEA(i32 f(slice<i32> s)
+{ print(s) return 0 } arr = [1, 2, 3] r = f(arr))AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3262,24 +2967,26 @@ TEST("Interpreter's print() prints a slice<T>-typed parameter with the same brac
 TEST("Interpreter interpolates a slice<T>-typed parameter into a string, same bracket format "
      "as print()")
 {
-    const std::string source = "f(s: slice<i32>) -> String { return \"vals: {s}\" } "
-                               "arr = [4, 5] x = f(arr)";
+    const std::string source = R"AXEA(String f(slice<i32> s)
+{ return "vals: {s}" } arr = [4, 5] x = f(arr))AXEA";
     EXPECT_EQ(toString(run(source)), "vals: [4, 5]");
 }
 
 TEST("Interpreter's .join() works on a slice<T>-typed parameter, same as Array/List")
 {
-    const std::string source = "f(s: slice<i32>) -> String { return s.join(\"-\") } "
-                               "arr = [1, 2, 3] x = f(arr)";
+    const std::string source = R"AXEA(String f(slice<i32> s)
+{ return s.join("-") } arr = [1, 2, 3] x = f(arr))AXEA";
     EXPECT_EQ(toString(run(source)), "1-2-3");
 }
 
 TEST("Interpreter prints/joins a slice<T> of struct elements, each stringified via the same "
      "@axea.tostring.<Name>-equivalent toString() print()/join() already use for Array")
 {
-    const std::string source = "struct Point { x: i32 } "
-                               "f(s: slice<Point>) -> String { return s.join(\", \") } "
-                               "pts = [Point{x:1}, Point{x:2}] x = f(pts)";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+} String f(slice<Point> s)
+{ return s.join(", ") } pts = [Point{x:1}, Point{x:2}] x = f(pts))AXEA";
     EXPECT_EQ(toString(run(source)), "Point { x: 1 }, Point { x: 2 }");
 }
 
@@ -3346,11 +3053,8 @@ TEST("Interpreter's debug format '{value:?}' is identical to the unformatted cas
 
 TEST("Interpreter's debug format quotes an owned String the same way it quotes a bare str")
 {
-    const std::string source = "f() -> String { "
-                               "  greeting: String = \"hi\" "
-                               "  return \"{greeting:?}\" "
-                               "} "
-                               "x = f()";
+    const std::string source = R"AXEA(String f()
+{   greeting: String = "hi"   return "{greeting:?}" } x = f())AXEA";
     EXPECT_EQ(toString(run(source)), "\"hi\"");
 }
 
@@ -3358,10 +3062,10 @@ TEST("Interpreter's debug format on a struct is identical to the unformatted cas
      "Display/Debug distinction exists yet for struct printing (see "
      "docs/language/0058-debug-formatting.md's own Known Imprecision)")
 {
-    const std::string source = "struct Point { x: i32 } "
-                               "p = Point { x: 1 } "
-                               "normal = \"{p}\" "
-                               "debug = \"{p:?}\"";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+} p = Point { x: 1 } normal = "{p}" debug = "{p:?}")AXEA";
     auto bindings = runProgram(source);
     EXPECT_EQ(toString(bindings.at("normal")), toString(bindings.at("debug")));
 }
@@ -3377,10 +3081,14 @@ TEST("Interpreter dispatches an ordinary obj.method(args) call to an inherent (n
      "generic-methods follow-up)")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "impl Point { sum(self) -> i32 { return self.x + self.y } } "
-        "p = Point { x: 3, y: 4 } "
-        "x = p.sum()";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+
+    i32 sum(self)
+    { return self.x + self.y }
+} p = Point { x: 3, y: 4 } x = p.sum())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 7);
 }
 
@@ -3388,33 +3096,36 @@ TEST("Interpreter's inherent method mutates self and the caller observes the mut
      "aliasing (by shared_ptr), not a copy")
 {
     const std::string source =
-        "struct Counter { value: i32 } "
-        "impl Counter { increment(self) { self.value = self.value + 1 } } "
-        "run() -> i32 { "
-        "  c = Counter { value: 0 } "
-        "  c.increment() "
-        "  c.increment() "
-        "  return c.value "
-        "} "
-        "x = run()";
+        R"AXEA(struct Counter
+{
+    i32 value
+
+    void increment(self)
+    { self.value = self.value + 1 }
+} i32 run()
+{   c = Counter { value: 0 }   c.increment()   c.increment()   return c.value } x = run())AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 2);
 }
 
 TEST("Interpreter throws for an undefined method on a struct")
 {
-    EXPECT_THROWS(run("struct Point { x: i32 } p = Point { x: 1 } x = p.missing()"));
+    EXPECT_THROWS(run(R"AXEA(struct Point
+{
+    i32 x
+} p = Point { x: 1 } x = p.missing())AXEA"));
 }
 
 TEST("Interpreter dispatches a generic struct's method call correctly for two different "
      "concrete instantiations in the same program")
 {
     const std::string source =
-        "struct Box<T> { value: T } "
-        "impl<T> Box<T> { get(self) -> T { return self.value } } "
-        "a = Box<i32>{value: 42} "
-        "b = Box<bool>{value: true} "
-        "x = a.get() "
-        "y = b.get()";
+        R"AXEA(struct Box<T>
+{
+    T value
+
+    T get(self)
+    { return self.value }
+} a = Box<i32>{value: 42} b = Box<bool>{value: true} x = a.get() y = b.get())AXEA";
     auto vars = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("x")), 42);
     EXPECT_EQ(std::get<bool>(vars.at("y")), true);
@@ -3425,24 +3136,23 @@ TEST("Interpreter dispatches to a user's impl Display for a struct interpolated 
      "docs/language/0062-display-trait.md)")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "p = Point { x: 10, y: 20 } "
-        "x = \"Position: {p}\"";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } p = Point { x: 10, y: 20 } x = "Position: {p}")AXEA";
     EXPECT_EQ(toString(run(source)), "Position: (10, 20)");
 }
 
 TEST("Interpreter dispatches to a user's impl Display for a bare print() struct argument")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "run() -> i32 { p = Point { x: 1, y: 2 }  print(p)  return 0 } "
-        "r = run()";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } i32 run()
+{ p = Point { x: 1, y: 2 }  print(p)  return 0 } r = run())AXEA";
 
     std::ostringstream captured;
     std::streambuf* originalCout = std::cout.rdbuf(captured.rdbuf());
@@ -3456,25 +3166,26 @@ TEST("Interpreter dispatches to a user's impl Display for a struct nested inside
      "struct's own default field printer")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "struct Line { a: Point  b: Point } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "line = Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 } } "
-        "x = \"{line}\"";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} struct Line
+{
+    Point a
+    Point b
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } line = Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 } } x = "{line}")AXEA";
     EXPECT_EQ(toString(run(source)), "Line { a: (1, 2), b: (3, 4) }");
 }
 
 TEST("Interpreter dispatches to a user's impl Display for a struct nested inside an array")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] "
-        "x = \"{points}\"";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] x = "{points}")AXEA";
     EXPECT_EQ(toString(run(source)), "[(1, 2), (3, 4)]");
 }
 
@@ -3483,11 +3194,11 @@ TEST("Interpreter dispatches to Display for a struct's top-level auto-printed bi
      "the Interpreter instance itself is alive")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "p = Point { x: 7, y: 8 }";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } p = Point { x: 7, y: 8 })AXEA";
 
     Lexer lexer(source);
     Parser parser(lexer.lex());
@@ -3502,12 +3213,14 @@ TEST("Interpreter falls back to the default per-field printer for a struct type 
      "registered impl Display, even when other structs in the same program have one")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "struct Other { n: i32 } "
-        "impl Display for Point { "
-        "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-        "} "
-        "x = Other { n: 5 }";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} struct Other
+{
+    i32 n
+} impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } } x = Other { n: 5 })AXEA";
     EXPECT_EQ(toString(run(source)), "Other { n: 5 }");
 }
 
@@ -3515,12 +3228,8 @@ TEST("Interpreter implicitly wraps a plain value into a union-typed call argumen
      "local, and return, with no wrapper syntax, and 'match' dispatches on it by each "
      "alternative's own type name (see docs/language/0065-unions.md)")
 {
-    const std::string source = "f(x: i32 | str) -> str { "
-                               "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
-                               "} "
-                               "a = f(5) "
-                               "b = f(\"hi\") "
-                               "w: i32 | str = 5";
+    const std::string source = R"AXEA(str f(i32 | str x)
+{   return match x { i32(n) => "number"  str(s) => "string" } } a = f(5) b = f("hi") w: i32 | str = 5)AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("a")), "number");
     EXPECT_EQ(toString(results.at("b")), "string");
@@ -3530,10 +3239,9 @@ TEST("Interpreter implicitly wraps a plain value into a union-typed call argumen
 TEST("Interpreter forwards an already-union-typed value through another union-typed boundary "
      "without re-wrapping it")
 {
-    const std::string source = "f(x: i32 | str) -> i32 | str { return x } "
-                               "g(x: i32 | str) -> i32 | str { return f(x) } "
-                               "a = g(5) "
-                               "b = g(\"hi\")";
+    const std::string source = R"AXEA(i32 | str f(i32 | str x)
+{ return x } i32 | str g(i32 | str x)
+{ return f(x) } a = g(5) b = g("hi"))AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("a")), "i32(5)");
     EXPECT_EQ(toString(results.at("b")), "str(hi)");
@@ -3541,13 +3249,12 @@ TEST("Interpreter forwards an already-union-typed value through another union-ty
 
 TEST("Interpreter's union value wraps a struct alternative by its own type name")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "f(v: Point | i32) -> str { "
-                               "  return match v { Point(p) => \"point\"  i32(n) => \"number\" } "
-                               "} "
-                               "p = Point { x: 1, y: 2 } "
-                               "a = f(p) "
-                               "b = f(5)";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} str f(Point | i32 v)
+{   return match v { Point(p) => "point"  i32(n) => "number" } } p = Point { x: 1, y: 2 } a = f(p) b = f(5))AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(toString(results.at("a")), "point");
     EXPECT_EQ(toString(results.at("b")), "number");
@@ -3566,13 +3273,8 @@ TEST("Interpreter calls a closure literal assigned to a declared local (see "
 TEST("Interpreter's closure closes over an enclosing function's own param by value - returned, "
      "and called later, each captured value stays independent of any other closure's own copy")
 {
-    const std::string source = "makeAdder(base: i32) -> fn(i32) -> i32 { "
-                               "  return fn(x: i32) -> i32 { return x + base } "
-                               "} "
-                               "add5 = makeAdder(5) "
-                               "add10 = makeAdder(10) "
-                               "a = add5(1) "
-                               "b = add10(1)";
+    const std::string source = R"AXEA(fn(i32) -> i32 makeAdder(i32 base)
+{   return fn(x: i32) -> i32 { return x + base } } add5 = makeAdder(5) add10 = makeAdder(10) a = add5(1) b = add10(1))AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 6);
     EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 11);
@@ -3580,11 +3282,8 @@ TEST("Interpreter's closure closes over an enclosing function's own param by val
 
 TEST("Interpreter calls a closure-typed parameter - a higher-order function")
 {
-    const std::string source = "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
-                               "doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } "
-                               "tripler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 3 } "
-                               "a = apply(doubler, 5) "
-                               "b = apply(tripler, 5)";
+    const std::string source = R"AXEA(i32 apply(fn(i32) -> i32 f, i32 x)
+{ return f(x) } doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } tripler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 3 } a = apply(doubler, 5) b = apply(tripler, 5))AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 10);
     EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 15);
@@ -3594,18 +3293,11 @@ TEST("Interpreter wraps a bare top-level function name into a real closure value
      "three boundaries that need it - call argument, declared-local assignment, and return (see "
      "docs/language/0067-closures.md's implicit function-reference-to-closure coercion)")
 {
-    const std::string source = "double(x: i32) -> i32 { return x * 2 } "
-                               "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
-                               "getDouble() -> fn(i32) -> i32 { return double } "
-                               "run() -> i32 { "
-                               "  d: fn(i32) -> i32 = double "
-                               "  a = apply(double, 5) "
-                               "  b = d(7) "
-                               "  g = getDouble() "
-                               "  c = g(9) "
-                               "  return a + b + c "
-                               "} "
-                               "y = run()";
+    const std::string source = R"AXEA(i32 double(i32 x)
+{ return x * 2 } i32 apply(fn(i32) -> i32 f, i32 x)
+{ return f(x) } fn(i32) -> i32 getDouble()
+{ return double } i32 run()
+{   d: fn(i32) -> i32 = double   a = apply(double, 5)   b = d(7)   g = getDouble()   c = g(9)   return a + b + c } y = run())AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 42);
 }
@@ -3613,13 +3305,12 @@ TEST("Interpreter wraps a bare top-level function name into a real closure value
 TEST("Interpreter's closure captures a struct-typed local by move, still readable through the "
      "captured copy after the closure is created")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "run() -> i32 { "
-                               "  p = Point { x: 3, y: 4 } "
-                               "  sum: fn() -> i32 = fn() -> i32 { return p.x + p.y } "
-                               "  return sum() "
-                               "} "
-                               "y = run()";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} i32 run()
+{   p = Point { x: 3, y: 4 }   sum: fn() -> i32 = fn() -> i32 { return p.x + p.y }   return sum() } y = run())AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 7);
 }
@@ -3628,14 +3319,8 @@ TEST("Interpreter computes a self-referential (recursive) closure correctly - no
      "`f`'s own name resolves to the closure being constructed even from inside its own body "
      "(see docs/language/0067-closures.md)")
 {
-    const std::string source = "run() -> i32 { "
-                               "  fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
-                               "    if n <= 1 { return 1 } "
-                               "    return n * fact(n - 1) "
-                               "  } "
-                               "  return fact(5) "
-                               "} "
-                               "y = run()";
+    const std::string source = R"AXEA(i32 run()
+{   fact: fn(i32) -> i32 = fn(n: i32) -> i32 {     if n <= 1 { return 1 }     return n * fact(n - 1)   }   return fact(5) } y = run())AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 120);
 }
@@ -3643,15 +3328,8 @@ TEST("Interpreter computes a self-referential (recursive) closure correctly - no
 TEST("Interpreter's self-referential closure also works with no declared type on its own "
      "binding, and alongside an ordinary capture from the enclosing scope")
 {
-    const std::string source = "run() -> i32 { "
-                               "  base = 0 "
-                               "  fib = fn(n: i32) -> i32 { "
-                               "    if n <= 1 { return n + base } "
-                               "    return fib(n - 1) + fib(n - 2) "
-                               "  } "
-                               "  return fib(10) "
-                               "} "
-                               "y = run()";
+    const std::string source = R"AXEA(i32 run()
+{   base = 0   fib = fn(n: i32) -> i32 {     if n <= 1 { return n + base }     return fib(n - 1) + fib(n - 2)   }   return fib(10) } y = run())AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("y")), 55);
 }
@@ -3660,10 +3338,11 @@ TEST("Interpreter calls a closure with a real struct-typed *parameter* (as oppos
      "- passed in fresh at each call, not captured at the point the literal was created (see "
      "docs/language/0067-closures.md)")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "sum: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x + p.y } "
-                               "a = sum(Point { x: 3, y: 4 }) "
-                               "b = sum(Point { x: 10, y: 20 })";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} sum: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x + p.y } a = sum(Point { x: 3, y: 4 }) b = sum(Point { x: 10, y: 20 }))AXEA";
     auto results = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(results.at("a")), 7);
     EXPECT_EQ(std::get<std::int64_t>(results.at("b")), 30);
@@ -3671,18 +3350,23 @@ TEST("Interpreter calls a closure with a real struct-typed *parameter* (as oppos
 
 TEST("Interpreter constructs and reads fields of an explicitly-instantiated generic struct")
 {
-    const std::string source = "struct Box<T> { value: T } "
-                               "b = Box<i32> { value: 5 } "
-                               "x = b.value";
+    const std::string source = R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32> { value: 5 } x = b.value)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 5);
 }
 
 TEST("Interpreter supports a struct type argument in a generic struct instantiation")
 {
-    const std::string source = "struct Point { x: i32  y: i32 } "
-                               "struct Box<T> { value: T } "
-                               "b = Box<Point> { value: Point { x: 1  y: 2 } } "
-                               "x = b.value.x + b.value.y";
+    const std::string source = R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} struct Box<T>
+{
+    T value
+} b = Box<Point> { value: Point { x: 1  y: 2 } } x = b.value.x + b.value.y)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 3);
 }
 
@@ -3794,12 +3478,8 @@ TEST("Interpreter throws pointer arithmetic past a '&x'-produced singleton point
 
 TEST("Interpreter's '&' works the same for a function parameter as for a local")
 {
-    const std::string source = "f(x: i32) -> i32 { "
-                               "  p = &x "
-                               "  unsafe { *p = 9 } "
-                               "  return x "
-                               "} "
-                               "x = f(5)";
+    const std::string source = R"AXEA(i32 f(i32 x)
+{   p = &x   unsafe { *p = 9 }   return x } x = f(5))AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 9);
 }
 
@@ -3822,11 +3502,11 @@ TEST("Interpreter's variables() still finds a top-level name after its address w
 TEST("Interpreter evaluates sizeof<T>() for a primitive and a struct")
 {
     const std::string source =
-        "struct Point { x: i32  y: i32 } "
-        "a = sizeof<i32>() "
-        "b = sizeof<i64>() "
-        "c = sizeof<Point>() "
-        "x = a";
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} a = sizeof<i32>() b = sizeof<i64>() c = sizeof<Point>() x = a)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 4);
     auto vars = runProgram(source);
     EXPECT_EQ(std::get<std::int64_t>(vars.at("b")), 8);
@@ -3854,10 +3534,8 @@ TEST("Interpreter dispatches a generic top-level function call correctly for two
      "concrete instantiations in the same program")
 {
     const std::string source =
-        "identity<T>(x: T) -> T { return x } "
-        "a = identity<i32>(42) "
-        "b = identity<bool>(true) "
-        "x = a";
+        R"AXEA(T identity<T>(T x)
+{ return x } a = identity<i32>(42) b = identity<bool>(true) x = a)AXEA";
     EXPECT_EQ(std::get<std::int64_t>(run(source)), 42);
     auto vars = runProgram(source);
     EXPECT_EQ(std::get<bool>(vars.at("b")), true);

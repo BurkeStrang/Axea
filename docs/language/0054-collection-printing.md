@@ -159,7 +159,11 @@ and both `-O0`/`-O1` compiled paths.
 # Worked Example
 
 ```ax
-struct Point { x: i32  y: i32 }
+struct Point
+{
+    i32 x
+    i32 y
+}
 
 arr = [1, 2, 3]
 p = Point { x: 3, y: 4 }

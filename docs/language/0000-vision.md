@@ -169,7 +169,7 @@ birthday -> write User
 Only exported APIs require explicit contracts:
 
 ```ax
-pub display(read user: User)
+pub void display(read User user)
 {
     print(user.name)
 }

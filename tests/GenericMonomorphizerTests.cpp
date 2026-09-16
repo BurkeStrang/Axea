@@ -43,7 +43,10 @@ namespace
 
 TEST("GenericMonomorphizer synthesizes a concrete StructDecl for a single explicit instantiation")
 {
-    auto program = monomorphize("struct Box<T> { value: T } b = Box<i32> { value: 5 }");
+    auto program = monomorphize(R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32> { value: 5 })AXEA");
 
     const auto* boxed = findStruct(program, "Box$i32");
     EXPECT_TRUE(boxed != nullptr);
@@ -54,7 +57,10 @@ TEST("GenericMonomorphizer synthesizes a concrete StructDecl for a single explic
 
 TEST("GenericMonomorphizer rewrites a struct literal's own typeName to the mangled struct name")
 {
-    auto program = monomorphize("struct Box<T> { value: T } b = Box<i32> { value: 5 }");
+    auto program = monomorphize(R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32> { value: 5 })AXEA");
 
     const AssignmentStmt* assignment = nullptr;
     for (const auto& item : program.items)
@@ -73,10 +79,14 @@ TEST("GenericMonomorphizer rewrites a struct literal's own typeName to the mangl
 TEST("GenericMonomorphizer substitutes a struct type parameter, not just a primitive")
 {
     auto program = monomorphize(
-        "struct Point { x: i32  y: i32 } "
-        "struct Box<T> { value: T } "
-        "p = Point { x: 1  y: 2 } "
-        "b = Box<Point> { value: p }");
+        R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} struct Box<T>
+{
+    T value
+} p = Point { x: 1  y: 2 } b = Box<Point> { value: p })AXEA");
 
     const auto* boxed = findStruct(program, "Box$Point");
     EXPECT_TRUE(boxed != nullptr);
@@ -86,9 +96,10 @@ TEST("GenericMonomorphizer substitutes a struct type parameter, not just a primi
 TEST("GenericMonomorphizer reuses one synthesized instantiation across repeated uses")
 {
     auto program = monomorphize(
-        "struct Box<T> { value: T } "
-        "a = Box<i32> { value: 1 } "
-        "b = Box<i32> { value: 2 }");
+        R"AXEA(struct Box<T>
+{
+    T value
+} a = Box<i32> { value: 1 } b = Box<i32> { value: 2 })AXEA");
 
     EXPECT_EQ(countStructs(program, "Box$i32"), std::size_t{1});
 }
@@ -96,9 +107,10 @@ TEST("GenericMonomorphizer reuses one synthesized instantiation across repeated 
 TEST("GenericMonomorphizer resolves nested generic instantiations to a fixed point")
 {
     auto program = monomorphize(
-        "struct Box<T> { value: T } "
-        "inner = Box<i32> { value: 5 } "
-        "outer = Box<Box<i32>> { value: inner }");
+        R"AXEA(struct Box<T>
+{
+    T value
+} inner = Box<i32> { value: 5 } outer = Box<Box<i32>> { value: inner })AXEA");
 
     const auto* innerDecl = findStruct(program, "Box$i32");
     EXPECT_TRUE(innerDecl != nullptr);
@@ -112,8 +124,11 @@ TEST("GenericMonomorphizer resolves nested generic instantiations to a fixed poi
 TEST("GenericMonomorphizer rejects a type-argument-count mismatch")
 {
     EXPECT_THROWS(monomorphize(
-        "struct Pair<A, B> { first: A  second: B } "
-        "p = Pair<i32> { first: 1 }"));
+        R"AXEA(struct Pair<A,B>
+{
+    A first
+    B second
+} p = Pair<i32> { first: 1 })AXEA"));
 }
 
 TEST("GenericMonomorphizer rejects an unknown generic struct name")
@@ -130,7 +145,8 @@ TEST("GenericMonomorphizer leaves a built-in generic type completely untouched")
     // sets.md's own "2026 Update") - they're all real, user-declared generic structs now
     // (std/collections.ax), so this uses Optional<T> instead, one of the few remaining
     // genuinely built-in generic types (see docs/language/0052-optional.md).
-    auto program = monomorphize("f() -> Optional<i32> { return None }");
+    auto program = monomorphize(R"AXEA(Optional<i32> f()
+{ return None })AXEA");
 
     // No "Optional"-named StructDecl should ever be synthesized - Optional<T> is a
     // compiler intrinsic, never StructDecl-backed.
@@ -155,10 +171,13 @@ namespace
 TEST("GenericMonomorphizer synthesizes a mangled method for a generic impl's own instantiation, "
      "self and return type both substituted")
 {
-    auto program = monomorphize("struct Box<T> { value: T } "
-                                "impl<T> Box<T> { get(self) -> T { return self.value } } "
-                                "b = Box<i32> { value: 5 } "
-                                "x = b.get()");
+    auto program = monomorphize(R"AXEA(struct Box<T>
+{
+    T value
+
+    T get(self)
+    { return self.value }
+} b = Box<i32> { value: 5 } x = b.get())AXEA");
 
     const auto* method = findFunction(program, "Box$i32.get");
     EXPECT_TRUE(method != nullptr);
@@ -172,12 +191,13 @@ TEST("GenericMonomorphizer synthesizes a mangled method for a generic impl's own
 TEST("GenericMonomorphizer synthesizes independent methods for two different concrete "
      "instantiations of the same generic impl")
 {
-    auto program = monomorphize("struct Box<T> { value: T } "
-                                "impl<T> Box<T> { get(self) -> T { return self.value } } "
-                                "a = Box<i32> { value: 1 } "
-                                "x = a.get() "
-                                "b = Box<bool> { value: true } "
-                                "y = b.get()");
+    auto program = monomorphize(R"AXEA(struct Box<T>
+{
+    T value
+
+    T get(self)
+    { return self.value }
+} a = Box<i32> { value: 1 } x = a.get() b = Box<bool> { value: true } y = b.get())AXEA");
 
     const auto* intMethod = findFunction(program, "Box$i32.get");
     const auto* boolMethod = findFunction(program, "Box$bool.get");
@@ -191,10 +211,13 @@ TEST("GenericMonomorphizer correctly rewrites a generic method's own body when i
      "another instance of its own generic struct")
 {
     auto program = monomorphize(
-        "struct Box<T> { value: T } "
-        "impl<T> Box<T> { wrap(self) -> Box<T> { return Box<T> { value: self.value } } } "
-        "b = Box<i32> { value: 5 } "
-        "w = b.wrap()");
+        R"AXEA(struct Box<T>
+{
+    T value
+
+    Box<T> wrap(self)
+    { return Box<T> { value: self.value } }
+} b = Box<i32> { value: 5 } w = b.wrap())AXEA");
 
     const auto* method = findFunction(program, "Box$i32.wrap");
     EXPECT_TRUE(method != nullptr);
@@ -212,8 +235,8 @@ TEST("GenericMonomorphizer correctly rewrites a generic method's own body when i
 TEST("GenericMonomorphizer synthesizes a mangled clone of a generic top-level function per "
      "explicit call-site type argument, rewriting the call site's own callee")
 {
-    auto program = monomorphize("identity<T>(x: T) -> T { return x } "
-                                "a = identity<i32>(42)");
+    auto program = monomorphize(R"AXEA(T identity<T>(T x)
+{ return x } a = identity<i32>(42))AXEA");
 
     const auto* clone = findFunction(program, "identity$i32");
     EXPECT_TRUE(clone != nullptr);
@@ -239,9 +262,8 @@ TEST("GenericMonomorphizer synthesizes a mangled clone of a generic top-level fu
 TEST("GenericMonomorphizer synthesizes independent clones for two different concrete call-site "
      "type arguments to the same generic top-level function")
 {
-    auto program = monomorphize("identity<T>(x: T) -> T { return x } "
-                                "a = identity<i32>(1) "
-                                "b = identity<bool>(true)");
+    auto program = monomorphize(R"AXEA(T identity<T>(T x)
+{ return x } a = identity<i32>(1) b = identity<bool>(true))AXEA");
 
     EXPECT_TRUE(findFunction(program, "identity$i32") != nullptr);
     EXPECT_TRUE(findFunction(program, "identity$bool") != nullptr);

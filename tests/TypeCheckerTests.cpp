@@ -103,12 +103,14 @@ TEST("TypeChecker's non-public C-style associated function ('new' with no 'self'
 
 TEST("TypeChecker rejects wrong argument count")
 {
-    EXPECT_THROWS(check("f(a: i32, b: i32) -> i32 { return a + b }  x = f(1)"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(i32 a, i32 b)
+{ return a + b } x = f(1))AXEA"));
 }
 
 TEST("TypeChecker rejects wrong argument type")
 {
-    EXPECT_THROWS(check(R"(f(a: i32) -> i32 { return a }  x = f("oops"))"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(i32 a)
+{ return a } x = f("oops"))AXEA"));
 }
 
 TEST("TypeChecker rejects a call to an undefined function")
@@ -123,17 +125,27 @@ TEST("TypeChecker rejects construction of an undefined struct")
 
 TEST("TypeChecker rejects access to an undefined field")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 }  p = Point { x: 1 }  y = p.missing"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} p = Point { x: 1 }  y = p.missing)AXEA"));
 }
 
 TEST("TypeChecker rejects a struct literal with a missing field")
 {
-    EXPECT_THROWS(check("struct Point { x: i32  y: i32 }  p = Point { x: 1 }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} p = Point { x: 1 })AXEA"));
 }
 
 TEST("TypeChecker rejects a struct literal field with the wrong type")
 {
-    EXPECT_THROWS(check(R"(struct Point { x: i32 }  p = Point { x: "oops" })"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} p = Point { x: "oops" })AXEA"));
 }
 
 TEST("TypeChecker rejects arithmetic on non-integer operands")
@@ -173,12 +185,14 @@ TEST("TypeChecker rejects a declared type that does not match the initializer")
 
 TEST("TypeChecker rejects a return value that does not match the declared return type")
 {
-    EXPECT_THROWS(check(R"(f() -> i32 { return "oops" })"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ return "oops" })AXEA"));
 }
 
 TEST("TypeChecker rejects a value-returning function whose body never explicitly returns")
 {
-    EXPECT_THROWS(check("f() -> i32 { 1 }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ 1 })AXEA"));
 }
 
 TEST("TypeChecker allows a unit-returning function to fall off the end past a discarded expression")
@@ -186,7 +200,8 @@ TEST("TypeChecker allows a unit-returning function to fall off the end past a di
     // Only value-producing functions must explicitly `return`
     // (docs/language/0027-explicit-return.md) - a unit function can still
     // fall off the end, and any trailing expression is simply discarded.
-    check("f() { 1 }");
+    check(R"AXEA(void f()
+{ 1 })AXEA");
 }
 
 TEST("TypeChecker rejects return used outside a function")
@@ -196,7 +211,8 @@ TEST("TypeChecker rejects return used outside a function")
 
 TEST("TypeChecker rejects a return value that does not match the function's return type")
 {
-    EXPECT_THROWS(check(R"(f() -> i32 { if true { return "oops" } 1 })"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ if true { return "oops" } 1 })AXEA"));
 }
 
 TEST("TypeChecker accepts a function whose entire body is an if/else where both branches return")
@@ -206,22 +222,26 @@ TEST("TypeChecker accepts a function whose entire body is an if/else where both 
     // value (both just `return`), so this previously failed to type-check
     // under implicit-return semantics (the if-expression's own inferred
     // type was unit, mismatching the declared i32).
-    check("sign(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { return 1 } }");
+    check(R"AXEA(i32 sign(i32 x)
+{ if x < 0 { return 0 - 1 } else { return 1 } })AXEA");
 }
 
 TEST("TypeChecker rejects an if/else where only one branch returns and the other falls through")
 {
-    EXPECT_THROWS(check("f(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { 1 } }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(i32 x)
+{ if x < 0 { return 0 - 1 } else { 1 } })AXEA"));
 }
 
 TEST("TypeChecker rejects a non-bool while condition")
 {
-    EXPECT_THROWS(check("f() { while 1 { } }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ while 1 { } })AXEA"));
 }
 
 TEST("TypeChecker accepts a loop typed by its break values")
 {
-    check("f() -> i32 { return loop { break 1 } }");
+    check(R"AXEA(i32 f()
+{ return loop { break 1 } })AXEA");
 }
 
 TEST("TypeChecker treats a loop with no break as unit")
@@ -229,47 +249,51 @@ TEST("TypeChecker treats a loop with no break as unit")
     // Documented imprecision (docs/language/0028-loops.md): a genuinely
     // infinite loop with no break is really `never`, but TypeKind::Never
     // has no checking logic wired up anywhere in this codebase.
-    EXPECT_THROWS(check("f() -> i32 { return loop { 1 } }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ return loop { 1 } })AXEA"));
 }
 
 TEST("TypeChecker rejects mismatched break value types in the same loop")
 {
     EXPECT_THROWS(check(
-        R"(f(flag: bool) -> i32 { return loop { if flag { break 1 } else { break "oops" } } })"));
+        R"AXEA(i32 f(bool flag)
+{ return loop { if flag { break 1 } else { break "oops" } } })AXEA"));
 }
 
 TEST("TypeChecker rejects a break with a value inside while")
 {
-    EXPECT_THROWS(check("f() { while true { break 1 } }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ while true { break 1 } })AXEA"));
 }
 
 TEST("TypeChecker allows a bare break inside while")
 {
-    check("f() { while true { break } }");
+    check(R"AXEA(void f()
+{ while true { break } })AXEA");
 }
 
 TEST("TypeChecker rejects break used outside a loop")
 {
-    EXPECT_THROWS(check("f() { break }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ break })AXEA"));
 }
 
 TEST("TypeChecker rejects continue used outside a loop")
 {
-    EXPECT_THROWS(check("f() { continue }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ continue })AXEA"));
 }
 
 TEST("TypeChecker scopes break/continue validity to the innermost loop, correctly nested")
 {
-    check("f() { while true { while true { break } continue } }");
+    check(R"AXEA(void f()
+{ while true { while true { break } continue } })AXEA");
 }
 
 TEST("TypeChecker accepts a well-typed array literal, indexing, .length, and index-assignment")
 {
-    check("f(values: [i32; 3]) -> i32 { "
-          "  values[0] = 99 "
-          "  return values[0] + values.length "
-          "} "
-          "x = f([1, 2, 3])");
+    check(R"AXEA(i32 f([i32; 3] values)
+{   values[0] = 99   return values[0] + values.length } x = f([1, 2, 3]))AXEA");
 }
 
 TEST("TypeChecker rejects an array literal with mismatched element types")
@@ -319,52 +343,53 @@ TEST("TypeChecker rejects an unknown field access on an array other than length"
 
 TEST("TypeChecker rejects an index-assignment whose value does not match the element type")
 {
-    EXPECT_THROWS(check(R"(f(values: [i32; 3]) { values[0] = "oops" })"));
+    EXPECT_THROWS(check(R"AXEA(void f([i32; 3] values)
+{ values[0] = "oops" })AXEA"));
 }
 
 TEST("TypeChecker accepts an array of any size for a slice<T> parameter")
 {
-    check("sum(values: slice<i32>) -> i32 { return values[0] } "
-          "a = sum([1, 2, 3]) "
-          "b = sum([1, 2, 3, 4, 5])");
+    check(R"AXEA(i32 sum(slice<i32> values)
+{ return values[0] } a = sum([1, 2, 3]) b = sum([1, 2, 3, 4, 5]))AXEA");
 }
 
 TEST("TypeChecker rejects an element-type mismatch when converting an array to a slice parameter")
 {
-    EXPECT_THROWS(check(R"(f(values: slice<i32>) -> i32 { return values[0] }  x = f(["a", "b"]))"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(slice<i32> values)
+{ return values[0] } x = f(["a", "b"]))AXEA"));
 }
 
 TEST("TypeChecker accepts forwarding an existing slice to another slice parameter")
 {
-    check("helper(values: slice<i32>) -> i32 { return values[0] } "
-          "wrapper(values: slice<i32>) -> i32 { return helper(values) } "
-          "x = wrapper([1, 2, 3])");
+    check(R"AXEA(i32 helper(slice<i32> values)
+{ return values[0] } i32 wrapper(slice<i32> values)
+{ return helper(values) } x = wrapper([1, 2, 3]))AXEA");
 }
 
 TEST("TypeChecker rejects slice<T> as a function return type")
 {
-    EXPECT_THROWS(check("f(values: slice<i32>) -> slice<i32> { return values }"));
+    EXPECT_THROWS(check(R"AXEA(slice<i32> f(slice<i32> values)
+{ return values })AXEA"));
 }
 
 TEST("TypeChecker rejects slice<T> as a local variable's declared type")
 {
-    EXPECT_THROWS(check("f(values: slice<i32>) -> i32 { x: slice<i32> = values  return x[0] }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(slice<i32> values)
+{ x: slice<i32> = values  return x[0] })AXEA"));
 }
 
 TEST("TypeChecker rejects slice<T> as a struct field type")
 {
-    EXPECT_THROWS(check("struct Wrapper { values: slice<i32> }"));
+    EXPECT_THROWS(check(R"AXEA(struct Wrapper
+{
+    slice<i32> values
+})AXEA"));
 }
 
 TEST("TypeChecker allows indexing, .length, index-assignment, and for-in on a slice parameter")
 {
-    check("f(values: slice<i32>) -> i32 { "
-          "  values[0] = 99 "
-          "  total = 0 "
-          "  for v in values { total = total + v } "
-          "  return total + values[0] + values.length "
-          "} "
-          "x = f([1, 2, 3])");
+    check(R"AXEA(i32 f(slice<i32> values)
+{   values[0] = 99   total = 0   for v in values { total = total + v }   return total + values[0] + values.length } x = f([1, 2, 3]))AXEA");
 }
 
 // List<T> is a real, user-declared generic struct now (see docs/language/0006-generics.md's own
@@ -376,55 +401,77 @@ TEST("TypeChecker allows indexing, .length, index-assignment, and for-in on a sl
 // module.
 TEST("TypeChecker accepts push/pop/.get/.set/.length on a generic struct via inherent methods")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  push(self, value: T) { } "
-          "  pop(self) -> T { return self.get(0) } "
-          "  get(self, index: i32) -> T { return self.get(index) } "
-          "  set(self, index: i32, value: T) { } "
-          "} "
-          "f() -> i32 { "
-          "  numbers = Box<i32> { length: 0 } "
-          "  numbers.push(4) "
-          "  numbers.push(5) "
-          "  last = numbers.pop() "
-          "  numbers.set(0, 99) "
-          "  return numbers.get(0) + numbers.length + last "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+
+    T pop(self)
+    { return self.get(0) }
+
+    T get(self, i32 index)
+    { return self.get(index) }
+
+    void set(self, i32 index, T value)
+    { }
+} i32 f()
+{   numbers = Box<i32> { length: 0 }   numbers.push(4)   numbers.push(5)   last = numbers.pop()   numbers.set(0, 99)   return numbers.get(0) + numbers.length + last } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'push' with the wrong element type")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { numbers = Box<i32> { length: 0 }  numbers.push(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ numbers = Box<i32> { length: 0 }  numbers.push(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'push' with the wrong argument count")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { numbers = Box<i32> { length: 0 }  numbers.push(1, 2) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ numbers = Box<i32> { length: 0 }  numbers.push(1, 2) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'pop' with arguments")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { pop(self) -> T { return self.length } } "
-                        "f() -> i32 { numbers = Box<i32> { length: 0 }  return numbers.pop(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    T pop(self)
+    { return self.length }
+} i32 f()
+{ numbers = Box<i32> { length: 0 }  return numbers.pop(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { numbers = Box<i32> { length: 0 }  numbers.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ numbers = Box<i32> { length: 0 }  numbers.size() })AXEA"));
 }
 
 TEST("TypeChecker rejects a method call on a non-generic-struct value")
 {
-    EXPECT_THROWS(check("f() { x = 5  x.push(1) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ x = 5  x.push(1) })AXEA"));
 }
 
 TEST("TypeChecker accepts a generic struct as a parameter, return type, and local declared type "
@@ -432,21 +479,24 @@ TEST("TypeChecker accepts a generic struct as a parameter, return type, and loca
      "construction needs std/collections.ax's actual malloc-based body, so this uses a small "
      "inline generic struct with the same shape instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(numbers: Box<i32>) -> i32 { return numbers.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> numbers)
+{ return numbers.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts List<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T> (see docs/language/0006-generics.md's "
@@ -454,62 +504,79 @@ TEST("TypeChecker accepts push/pop/peek/.length on a Stack<T> (see docs/language
      "std/collections.ax's actual malloc-based body, so this uses a small inline generic struct "
      "with the same push/pop/peek/length method shape instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  push(self, value: T) { } "
-          "  pop(self) -> T { return self.length } "
-          "  peek(self) -> T { return self.length } "
-          "} "
-          "f() -> i32 { "
-          "  s = Box<i32> { length: 0 } "
-          "  s.push(4) "
-          "  s.push(5) "
-          "  top = s.peek() "
-          "  last = s.pop() "
-          "  return top + last + s.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+
+    T pop(self)
+    { return self.length }
+
+    T peek(self)
+    { return self.length }
+} i32 f()
+{   s = Box<i32> { length: 0 }   s.push(4)   s.push(5)   top = s.peek()   last = s.pop()   return top + last + s.length } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'push' with the wrong element type on a Stack<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.push(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.push(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'peek' with arguments")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { peek(self) -> T { return self.length } } "
-                        "f() -> i32 { s = Box<i32> { length: 0 }  return s.peek(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    T peek(self)
+    { return self.length }
+} i32 f()
+{ s = Box<i32> { length: 0 }  return s.peek(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a Stack<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.size() })AXEA"));
 }
 
 TEST("TypeChecker accepts a Stack<T>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(s: Box<i32>) -> i32 { return s.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> s)
+{ return s.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts Stack<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a LinkedList<T> "
@@ -517,64 +584,83 @@ TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length on a L
      "construction needs std/collections.ax's actual self-referential *Node<T>-based body, so "
      "this uses a small inline generic struct with the same method shape instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  push_front(self, value: T) { } "
-          "  push_back(self, value: T) { } "
-          "  pop_front(self) -> T { return self.length } "
-          "  pop_back(self) -> T { return self.length } "
-          "} "
-          "f() -> i32 { "
-          "  s = Box<i32> { length: 0 } "
-          "  s.push_front(4) "
-          "  s.push_back(5) "
-          "  front = s.pop_front() "
-          "  back = s.pop_back() "
-          "  return front + back + s.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+
+    void push_back(self, T value)
+    { }
+
+    T pop_front(self)
+    { return self.length }
+
+    T pop_back(self)
+    { return self.length }
+} i32 f()
+{   s = Box<i32> { length: 0 }   s.push_front(4)   s.push_back(5)   front = s.pop_front()   back = s.pop_back()   return front + back + s.length } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'push_front' with the wrong element type on a LinkedList<T>-shaped "
      "struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push_front(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.push_front(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.push_front(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'pop_back' with arguments")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { pop_back(self) -> T { return self.length } } "
-                        "f() -> i32 { s = Box<i32> { length: 0 }  return s.pop_back(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    T pop_back(self)
+    { return self.length }
+} i32 f()
+{ s = Box<i32> { length: 0 }  return s.pop_back(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a LinkedList<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push_front(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.size() })AXEA"));
 }
 
 TEST("TypeChecker accepts a LinkedList<T>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(s: Box<i32>) -> i32 { return s.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> s)
+{ return s.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts LinkedList<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/.get/.set on a "
@@ -583,61 +669,76 @@ TEST("TypeChecker accepts push_front/push_back/pop_front/pop_back/.length/.get/.
      "malloc-based body, so this uses a small inline generic struct with the same method shape "
      "instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  push_front(self, value: T) { } "
-          "  push_back(self, value: T) { } "
-          "  pop_front(self) -> T { return self.get(0) } "
-          "  pop_back(self) -> T { return self.get(0) } "
-          "  get(self, index: i32) -> T { return self.get(index) } "
-          "  set(self, index: i32, value: T) { } "
-          "} "
-          "f() -> i32 { "
-          "  d = Box<i32> { length: 0 } "
-          "  d.push_front(4) "
-          "  d.push_back(5) "
-          "  front = d.pop_front() "
-          "  back = d.pop_back() "
-          "  d.push_back(9) "
-          "  d.set(0, 99) "
-          "  mid = d.get(0) "
-          "  return front + back + mid + d.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+
+    void push_back(self, T value)
+    { }
+
+    T pop_front(self)
+    { return self.get(0) }
+
+    T pop_back(self)
+    { return self.get(0) }
+
+    T get(self, i32 index)
+    { return self.get(index) }
+
+    void set(self, i32 index, T value)
+    { }
+} i32 f()
+{   d = Box<i32> { length: 0 }   d.push_front(4)   d.push_back(5)   front = d.pop_front()   back = d.pop_back()   d.push_back(9)   d.set(0, 99)   mid = d.get(0)   return front + back + mid + d.length } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'push_front' with the wrong element type on a Deque<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push_front(self, value: T) { } } "
-                        "f() { d = Box<i32> { length: 0 }  d.push_front(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+} void f()
+{ d = Box<i32> { length: 0 }  d.push_front(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a Deque<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push_front(self, value: T) { } } "
-                        "f() { d = Box<i32> { length: 0 }  d.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push_front(self, T value)
+    { }
+} void f()
+{ d = Box<i32> { length: 0 }  d.size() })AXEA"));
 }
 
 TEST("TypeChecker accepts a Deque<T>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(d: Box<i32>) -> i32 { return d.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> d)
+{ return d.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts Deque<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts enqueue/dequeue/.length() on a Queue<T>-shaped struct (see "
@@ -645,61 +746,79 @@ TEST("TypeChecker accepts enqueue/dequeue/.length() on a Queue<T>-shaped struct 
      "a real Queue<T>'s own construction needs std/collections.ax's actual malloc-based body, "
      "so this uses a small inline generic struct with the same method shape instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  enqueue(self, value: T) { } "
-          "  dequeue(self) -> T { return self.length } "
-          "  length(self) -> i32 { return self.length } "
-          "} "
-          "f() -> i32 { "
-          "  q = Box<i32> { length: 0 } "
-          "  q.enqueue(4) "
-          "  q.enqueue(5) "
-          "  first = q.dequeue() "
-          "  return first + q.length() "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void enqueue(self, T value)
+    { }
+
+    T dequeue(self)
+    { return self.length }
+
+    i32 length(self)
+    { return self.length }
+} i32 f()
+{   q = Box<i32> { length: 0 }   q.enqueue(4)   q.enqueue(5)   first = q.dequeue()   return first + q.length() } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'enqueue' with the wrong element type on a Queue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { enqueue(self, value: T) { } } "
-                        "f() { q = Box<i32> { length: 0 }  q.enqueue(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void enqueue(self, T value)
+    { }
+} void f()
+{ q = Box<i32> { length: 0 }  q.enqueue(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'dequeue' with arguments")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { dequeue(self) -> T { return self.length } } "
-                        "f() -> i32 { q = Box<i32> { length: 0 }  return q.dequeue(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    T dequeue(self)
+    { return self.length }
+} i32 f()
+{ q = Box<i32> { length: 0 }  return q.dequeue(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a Queue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { enqueue(self, value: T) { } } "
-                        "f() { q = Box<i32> { length: 0 }  q.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void enqueue(self, T value)
+    { }
+} void f()
+{ q = Box<i32> { length: 0 }  q.size() })AXEA"));
 }
 
 TEST("TypeChecker accepts a Queue<T>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(q: Box<i32>) -> i32 { return q.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> q)
+{ return q.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts Queue<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts push/pop/peek/.length() on a PriorityQueue<T>-shaped struct (see "
@@ -707,63 +826,82 @@ TEST("TypeChecker accepts push/pop/peek/.length() on a PriorityQueue<T>-shaped s
      "PriorityQueue<T>'s own construction needs std/collections.ax's actual List<T>-composing "
      "body, so this uses a small inline generic struct with the same method shape instead)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  push(self, value: T) { } "
-          "  pop(self) -> T { return self.length } "
-          "  peek(self) -> T { return self.length } "
-          "  length(self) -> i32 { return self.length } "
-          "} "
-          "f() -> i32 { "
-          "  q = Box<i32> { length: 0 } "
-          "  q.push(4) "
-          "  q.push(5) "
-          "  top = q.peek() "
-          "  smallest = q.pop() "
-          "  return top + smallest + q.length() "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+
+    T pop(self)
+    { return self.length }
+
+    T peek(self)
+    { return self.length }
+
+    i32 length(self)
+    { return self.length }
+} i32 f()
+{   q = Box<i32> { length: 0 }   q.push(4)   q.push(5)   top = q.peek()   smallest = q.pop()   return top + smallest + q.length() } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects 'push' with the wrong element type on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { q = Box<i32> { length: 0 }  q.push(true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ q = Box<i32> { length: 0 }  q.push(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'peek' with arguments on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { peek(self) -> T { return self.length } } "
-                        "f() -> i32 { q = Box<i32> { length: 0 }  return q.peek(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    T peek(self)
+    { return self.length }
+} i32 f()
+{ q = Box<i32> { length: 0 }  return q.peek(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a PriorityQueue<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { push(self, value: T) { } } "
-                        "f() { q = Box<i32> { length: 0 }  q.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void push(self, T value)
+    { }
+} void f()
+{ q = Box<i32> { length: 0 }  q.size() })AXEA"));
 }
 
 TEST("TypeChecker accepts a PriorityQueue<T>-shaped struct as a parameter, return type, and "
      "local declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(q: Box<i32>) -> i32 { return q.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> q)
+{ return q.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts PriorityQueue<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 // PriorityQueue<T>'s own "T must be orderable" restriction is no longer enforced eagerly at
@@ -776,12 +914,13 @@ TEST("TypeChecker accepts PriorityQueue<T> as a struct field type - unlike the r
 TEST("TypeChecker rejects a non-orderable element type used in a generic method's own '<' "
      "comparison - the same hazard PriorityQueue<T>'s own sift-up/sift-down relies on")
 {
-    EXPECT_THROWS(check("struct Box<T> { value: T } "
-                        "impl<T> Box<T> { less(self, other: Box<T>) -> bool { "
-                        "  return self.value < other.value } } "
-                        "a = Box<bool> { value: true } "
-                        "b = Box<bool> { value: false } "
-                        "c = a.less(b)"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    T value
+
+    bool less(self, Box<T> other)
+    {   return self.value < other.value }
+} a = Box<bool> { value: true } b = Box<bool> { value: false } c = a.less(b))AXEA"));
 }
 
 TEST("TypeChecker accepts a generic method's own '<' comparison for every type "
@@ -803,12 +942,13 @@ TEST("TypeChecker rejects the owned String type in a generic method's own '<' co
      "orderability, like Set<T>/Map<K,V>'s own hashability, only ever considers the bare str "
      "value type, not the owned String type it's otherwise str-coercible to")
 {
-    EXPECT_THROWS(check("struct Box<T> { value: T } "
-                        "impl<T> Box<T> { less(self, other: Box<T>) -> bool { "
-                        "  return self.value < other.value } } "
-                        "a = Box<String> { value: String(\"a\") } "
-                        "b = Box<String> { value: String(\"b\") } "
-                        "c = a.less(b)"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    T value
+
+    bool less(self, Box<T> other)
+    {   return self.value < other.value }
+} a = Box<String> { value: String("a") } b = Box<String> { value: String("b") } c = a.less(b))AXEA"));
 }
 
 TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<K,V>-shaped struct (see "
@@ -816,41 +956,41 @@ TEST("TypeChecker accepts set/get/contains/remove/.length on a Map<K,V>-shaped s
      "construction needs std/collections.ax's actual malloc-based body, so this uses a small "
      "inline generic struct with the same method shape instead)")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "impl<K,V> Box<K,V> { "
-          "  set(self, key: K, value: V) { } "
-          "  get(self, key: K) -> V { return self.get(key) } "
-          "  contains(self, key: K) -> bool { return true } "
-          "  remove(self, key: K) { } "
-          "} "
-          "f() -> i32 { "
-          "  m = Box<i32,i32> { length: 0 } "
-          "  m.set(1, 100) "
-          "  m.set(1, 999) "
-          "  v = m.get(1) "
-          "  hit: bool = m.contains(1) "
-          "  m.remove(1) "
-          "  return v + m.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+
+    V get(self, K key)
+    { return self.get(key) }
+
+    bool contains(self, K key)
+    { return true }
+
+    void remove(self, K key)
+    { }
+} i32 f()
+{   m = Box<i32,i32> { length: 0 }   m.set(1, 100)   m.set(1, 999)   v = m.get(1)   hit: bool = m.contains(1)   m.remove(1)   return v + m.length } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts add/contains/remove/.length on a Set<T>-shaped struct")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  add(self, value: T) { } "
-          "  contains(self, value: T) -> bool { return true } "
-          "  remove(self, value: T) { } "
-          "} "
-          "f() -> i32 { "
-          "  s = Box<i32> { length: 0 } "
-          "  s.add(1) "
-          "  hit: bool = s.contains(1) "
-          "  s.remove(1) "
-          "  return s.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void add(self, T value)
+    { }
+
+    bool contains(self, T value)
+    { return true }
+
+    void remove(self, T value)
+    { }
+} i32 f()
+{   s = Box<i32> { length: 0 }   s.add(1)   hit: bool = s.contains(1)   s.remove(1)   return s.length } x = f())AXEA");
 }
 
 TEST("TypeChecker's hash<T>()/keyEq<T>() accept str/bool/i32 - the new generic-code-facing entry "
@@ -858,9 +998,12 @@ TEST("TypeChecker's hash<T>()/keyEq<T>() accept str/bool/i32 - the new generic-c
      "enforce eagerly at construction time (see docs/language/0034-maps-and-sets.md's own "
      "\"2026 Update\")")
 {
-    check("f() { h = hash<str>(\"a\")  e = keyEq<str>(\"a\", \"b\") }");
-    check("f() { h = hash<i32>(1)  e = keyEq<i32>(1, 2) }");
-    check("f() { h = hash<bool>(true)  e = keyEq<bool>(true, false) }");
+    check(R"AXEA(void f()
+{ h = hash<str>("a")  e = keyEq<str>("a", "b") })AXEA");
+    check(R"AXEA(void f()
+{ h = hash<i32>(1)  e = keyEq<i32>(1, 2) })AXEA");
+    check(R"AXEA(void f()
+{ h = hash<bool>(true)  e = keyEq<bool>(true, false) })AXEA");
 }
 
 TEST("TypeChecker rejects hash<T>()/keyEq<T>() on a non-hashable struct (mirrors Rust: "
@@ -868,86 +1011,142 @@ TEST("TypeChecker rejects hash<T>()/keyEq<T>() on a non-hashable struct (mirrors
      "`buckets` field is a raw pointer, so it's structurally non-hashable exactly like the "
      "retired intrinsic's own eager rejection intended")
 {
-    EXPECT_THROWS(check("struct MapEntry<K,V> { key: K  value: V  next: *MapEntry<K,V> } "
-                        "struct Map<K,V> { length: i32  bucketCount: i32  buckets: "
-                        "**MapEntry<K,V> } "
-                        "f() { h = hash<Map<i32,i32>>(0) }"));
+    EXPECT_THROWS(check(R"AXEA(struct MapEntry<K,V>
+{
+    K key
+    V value
+    *MapEntry<K,V> next
+} struct Map<K,V>
+{
+    i32 length
+    i32 bucketCount
+    **MapEntry<K,V> buckets
+} void f()
+{ h = hash<Map<i32,i32>>(0) })AXEA"));
 }
 
 TEST("TypeChecker rejects slice<T> as a hash<T>()/keyEq<T>() type argument")
 {
-    EXPECT_THROWS(check("f() { h = hash<slice<i32>>(0) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ h = hash<slice<i32>>(0) })AXEA"));
 }
 
 TEST("TypeChecker accepts a struct key if every field is itself hashable")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "f() { h = hash<Point>(Point { x: 1, y: 2 }) }");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} void f()
+{ h = hash<Point>(Point { x: 1, y: 2 }) })AXEA");
 }
 
 TEST("TypeChecker rejects a struct key if any field is not hashable (a raw pointer field)")
 {
-    EXPECT_THROWS(check("struct Bag { items: *i32 } "
-                        "f() { h = hash<Bag>(0) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Bag
+{
+    *i32 items
+} void f()
+{ h = hash<Bag>(0) })AXEA"));
 }
 
 TEST("TypeChecker accepts a fixed array key if the element is hashable")
 {
-    check("f() { h = hash<[i32;3]>([1, 2, 3]) }");
+    check(R"AXEA(void f()
+{ h = hash<[i32;3]>([1, 2, 3]) })AXEA");
 }
 
 TEST("TypeChecker rejects 'set' with the wrong argument count or type on a Map<K,V>-shaped "
      "struct")
 {
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
-                        "f() { m = Box<i32,i32> { length: 0 }  m.set(1) }"));
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
-                        "f() { m = Box<i32,i32> { length: 0 }  m.set(true, 1) }"));
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
-                        "f() { m = Box<i32,i32> { length: 0 }  m.set(1, true) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+} void f()
+{ m = Box<i32,i32> { length: 0 }  m.set(1) })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+} void f()
+{ m = Box<i32,i32> { length: 0 }  m.set(true, 1) })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+} void f()
+{ m = Box<i32,i32> { length: 0 }  m.set(1, true) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a Map<K,V>/Set<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
-                        "f() { m = Box<i32,i32> { length: 0 }  m.size() }"));
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { add(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.push(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+} void f()
+{ m = Box<i32,i32> { length: 0 }  m.size() })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void add(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.push(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects indexing into a Map<K,V>/Set<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "f() -> i32 { m = Box<i32,i32> { length: 0 }  return m[0] }"));
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "f() -> i32 { s = Box<i32> { length: 0 }  return s[0] }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} i32 f()
+{ m = Box<i32,i32> { length: 0 }  return m[0] })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+} i32 f()
+{ s = Box<i32> { length: 0 }  return s[0] })AXEA"));
 }
 
 TEST("TypeChecker accepts a Map<K,V>/Set<T>-shaped struct as a parameter, return type, and "
      "local declared type")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "build() -> Box<i32,i32> { "
-          "  x: Box<i32,i32> = Box<i32,i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(m: Box<i32,i32>) -> i32 { return m.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} Box<i32,i32> build()
+{   x: Box<i32,i32> = Box<i32,i32> { length: 0 }   return x } i32 consume(Box<i32,i32> m)
+{ return m.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts Map<K,V>/Set<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "struct Wrapper { entries: Box<i32,i32> }");
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper2 { items: Box<i32> }");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32,i32> entries
+})AXEA");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper2
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<K,V>-shaped struct (see "
@@ -956,23 +1155,23 @@ TEST("TypeChecker accepts set/get/contains/remove/.length on a SortedMap<K,V>-sh
      "inline generic struct with the same method shape instead, mirroring Map<K,V>'s own "
      "identical test above)")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "impl<K,V> Box<K,V> { "
-          "  set(self, key: K, value: V) { } "
-          "  get(self, key: K) -> V { return self.get(key) } "
-          "  contains(self, key: K) -> bool { return true } "
-          "  remove(self, key: K) { } "
-          "} "
-          "f() -> i32 { "
-          "  m = Box<i32,i32> { length: 0 } "
-          "  m.set(1, 100) "
-          "  m.set(1, 999) "
-          "  v = m.get(1) "
-          "  hit: bool = m.contains(1) "
-          "  m.remove(1) "
-          "  return v + m.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+
+    V get(self, K key)
+    { return self.get(key) }
+
+    bool contains(self, K key)
+    { return true }
+
+    void remove(self, K key)
+    { }
+} i32 f()
+{   m = Box<i32,i32> { length: 0 }   m.set(1, 100)   m.set(1, 999)   v = m.get(1)   hit: bool = m.contains(1)   m.remove(1)   return v + m.length } x = f())AXEA");
 }
 
 // SortedMap<K,V>'s own "K must be orderable" restriction is no longer enforced eagerly at
@@ -987,49 +1186,62 @@ TEST("TypeChecker's SortedMap<K,V>.get() returns V's real resolved type, not alw
      "ordinary generic-method return-type substitution, no special casing needed for a real "
      "struct (mirrors Map<K,V>'s own identical port precedent)")
 {
-    check("struct Point { x: i32 } "
-          "struct Box<K,V> { length: i32 } "
-          "impl<K,V> Box<K,V> { get(self, key: K) -> V { return self.get(key) } } "
-          "f() -> i32 { "
-          "  m = Box<i32,Point> { length: 0 } "
-          "  p = m.get(1) "
-          "  return p.x "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Point
+{
+    i32 x
+} struct Box<K,V>
+{
+    i32 length
+
+    V get(self, K key)
+    { return self.get(key) }
+} i32 f()
+{   m = Box<i32,Point> { length: 0 }   p = m.get(1)   return p.x } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects an unknown method on a SortedMap<K,V>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "impl<K,V> Box<K,V> { set(self, key: K, value: V) { } } "
-                        "f() { m = Box<i32,i32> { length: 0 }  m.size() }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+
+    void set(self, K key, V value)
+    { }
+} void f()
+{ m = Box<i32,i32> { length: 0 }  m.size() })AXEA"));
 }
 
 TEST("TypeChecker rejects indexing into a SortedMap<K,V>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<K,V> { length: i32 } "
-                        "f() -> i32 { m = Box<i32,i32> { length: 0 }  return m[0] }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} i32 f()
+{ m = Box<i32,i32> { length: 0 }  return m[0] })AXEA"));
 }
 
 TEST("TypeChecker accepts a SortedMap<K,V>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "build() -> Box<i32,i32> { "
-          "  x: Box<i32,i32> = Box<i32,i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(m: Box<i32,i32>) -> i32 { return m.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} Box<i32,i32> build()
+{   x: Box<i32,i32> = Box<i32,i32> { length: 0 }   return x } i32 consume(Box<i32,i32> m)
+{ return m.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts SortedMap<K,V> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one "
      "(mirrors Map<K,V>'s own identical port precedent)")
 {
-    check("struct Box<K,V> { length: i32 } "
-          "struct Wrapper { entries: Box<i32,i32> }");
+    check(R"AXEA(struct Box<K,V>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32,i32> entries
+})AXEA");
 }
 
 TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<T>-shaped struct (see "
@@ -1038,24 +1250,20 @@ TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<T>-shaped s
      "inline generic struct with the same method shape instead, mirroring SortedMap<K,V>'s own "
      "identical test above)")
 {
-    check("struct Box<T> { length: i32 } "
-          "impl<T> Box<T> { "
-          "  add(self, value: T) { } "
-          "  contains(self, value: T) -> bool { return true } "
-          "  remove(self, value: T) { } "
-          "} "
-          "f() -> i32 { "
-          "  s = Box<i32> { length: 0 } "
-          "  s.add(5) "
-          "  s.add(6) "
-          "  before = s.contains(6) "
-          "  s.remove(6) "
-          "  after = s.contains(6) "
-          "  removedDelta = if before { 10 } else { 0 } "
-          "  keptDelta = if after { 1 } else { 0 } "
-          "  return s.length * 1000 + removedDelta + keptDelta "
-          "} "
-          "x = f()");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void add(self, T value)
+    { }
+
+    bool contains(self, T value)
+    { return true }
+
+    void remove(self, T value)
+    { }
+} i32 f()
+{   s = Box<i32> { length: 0 }   s.add(5)   s.add(6)   before = s.contains(6)   s.remove(6)   after = s.contains(6)   removedDelta = if before { 10 } else { 0 }   keptDelta = if after { 1 } else { 0 }   return s.length * 1000 + removedDelta + keptDelta } x = f())AXEA");
 }
 
 // SortedSet<T>'s own "T must be orderable" restriction is no longer enforced eagerly at
@@ -1071,54 +1279,59 @@ TEST("TypeChecker accepts add/contains/remove/.length on a SortedSet<T>-shaped s
 
 TEST("TypeChecker rejects an unknown method on a SortedSet<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "impl<T> Box<T> { add(self, value: T) { } } "
-                        "f() { s = Box<i32> { length: 0 }  s.push(1) }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+
+    void add(self, T value)
+    { }
+} void f()
+{ s = Box<i32> { length: 0 }  s.push(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects indexing into a SortedSet<T>-shaped struct")
 {
-    EXPECT_THROWS(check("struct Box<T> { length: i32 } "
-                        "f() -> i32 { s = Box<i32> { length: 0 }  return s[0] }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    i32 length
+} i32 f()
+{ s = Box<i32> { length: 0 }  return s[0] })AXEA"));
 }
 
 TEST("TypeChecker accepts a SortedSet<T>-shaped struct as a parameter, return type, and local "
      "declared type")
 {
-    check("struct Box<T> { length: i32 } "
-          "build() -> Box<i32> { "
-          "  x: Box<i32> = Box<i32> { length: 0 } "
-          "  return x "
-          "} "
-          "consume(s: Box<i32>) -> i32 { return s.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} Box<i32> build()
+{   x: Box<i32> = Box<i32> { length: 0 }   return x } i32 consume(Box<i32> s)
+{ return s.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker accepts SortedSet<T> as a struct field type - unlike the retired compiler "
      "intrinsic, a real struct field may be any other struct type, including a generic one "
      "(mirrors SortedMap<K,V>'s own identical port precedent)")
 {
-    check("struct Box<T> { length: i32 } "
-          "struct Wrapper { items: Box<i32> }");
+    check(R"AXEA(struct Box<T>
+{
+    i32 length
+} struct Wrapper
+{
+    Box<i32> items
+})AXEA");
 }
 
 TEST("TypeChecker accepts String(text) construction and .append/.length")
 {
-    check("f() -> i32 { "
-          "  s = String(\"Axea\") "
-          "  s.append(\" Language\") "
-          "  return s.length "
-          "} "
-          "x = f()");
+    check(R"AXEA(i32 f()
+{   s = String("Axea")   s.append(" Language")   return s.length } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts String(anotherString) - String lends itself as str-coercible too")
 {
-    check("f() { "
-          "  a = String(\"a\") "
-          "  b = String(a) "
-          "}");
+    check(R"AXEA(void f()
+{   a = String("a")   b = String(a) })AXEA");
 }
 
 TEST("TypeChecker rejects String(...) with a non-str-coercible argument")
@@ -1129,72 +1342,62 @@ TEST("TypeChecker rejects String(...) with a non-str-coercible argument")
 
 TEST("TypeChecker rejects 'append' with a non-str-coercible argument")
 {
-    EXPECT_THROWS(check("f() { s = String(\"a\")  s.append(5) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ s = String("a")  s.append(5) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method on a String")
 {
-    EXPECT_THROWS(check("f() { s = String(\"a\")  s.push(\"b\") }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ s = String("a")  s.push("b") })AXEA"));
 }
 
 TEST("TypeChecker rejects indexing into a String - slicing is deliberately out of scope this "
      "phase (see docs/language/0042-string.md)")
 {
-    EXPECT_THROWS(check("f() -> i32 { s = String(\"a\")  return s[0] }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ s = String("a")  return s[0] })AXEA"));
 }
 
 TEST("TypeChecker accepts a String argument where a str parameter is expected - 'String "
      "automatically lends a str' (see docs/std/strings/0001-str.md)")
 {
-    check("greet(name: str) -> str { return name } "
-          "s = String(\"Axea\") "
-          "x = greet(s)");
+    check(R"AXEA(str greet(str name)
+{ return name } s = String("Axea") x = greet(s))AXEA");
 }
 
 TEST("TypeChecker rejects a str argument where a String parameter is expected - lending only "
      "goes one direction")
 {
-    EXPECT_THROWS(check("useString(s: String) { called = s.append(\"x\") } "
-                        "x = useString(\"not a String\")"));
+    EXPECT_THROWS(check(R"AXEA(void useString(String s)
+{ called = s.append("x") } x = useString("not a String"))AXEA"));
 }
 
 TEST("TypeChecker accepts String as a parameter, return type, and local declared type")
 {
-    check("build() -> String { "
-          "  x: String = String(\"a\") "
-          "  return x "
-          "} "
-          "consume(s: String) -> i32 { return s.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(String build()
+{   x: String = String("a")   return x } i32 consume(String s)
+{ return s.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker rejects String as a struct field type")
 {
-    EXPECT_THROWS(check("struct Wrapper { text: String }"));
+    EXPECT_THROWS(check(R"AXEA(struct Wrapper
+{
+    String text
+})AXEA"));
 }
 
 TEST("TypeChecker accepts Buffer() construction and append/append_line/clear/reserve/finish")
 {
-    check("f() -> String { "
-          "  b = Buffer() "
-          "  b.append(\"Axea\") "
-          "  b.append_line(\" Language\") "
-          "  b.clear() "
-          "  b.reserve(8) "
-          "  return b.finish() "
-          "} "
-          "x = f() "
-          "n = x.length");
+    check(R"AXEA(String f()
+{   b = Buffer()   b.append("Axea")   b.append_line(" Language")   b.clear()   b.reserve(8)   return b.finish() } x = f() n = x.length)AXEA");
 }
 
 TEST("TypeChecker accepts Buffer .length and .capacity as i32 fields")
 {
-    check("f() -> i32 { "
-          "  b = Buffer() "
-          "  return b.length + b.capacity "
-          "} "
-          "x = f()");
+    check(R"AXEA(i32 f()
+{   b = Buffer()   return b.length + b.capacity } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects Buffer() with any argument")
@@ -1204,88 +1407,95 @@ TEST("TypeChecker rejects Buffer() with any argument")
 
 TEST("TypeChecker rejects 'append'/'append_line' on a Buffer with a non-str-coercible argument")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.append(5) }"));
-    EXPECT_THROWS(check("f() { b = Buffer()  b.append_line(true) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.append(5) })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.append_line(true) })AXEA"));
 }
 
 TEST("TypeChecker rejects 'reserve' on a Buffer with a non-i32 argument")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.reserve(\"oops\") }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.reserve("oops") })AXEA"));
 }
 
 TEST("TypeChecker rejects 'finish' on a Buffer with any argument")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.finish(1) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.finish(1) })AXEA"));
 }
 
 TEST("TypeChecker rejects an unknown method/field on a Buffer")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.push(\"x\") }"));
-    EXPECT_THROWS(check("f() -> i32 { b = Buffer()  return b.count }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.push("x") })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ b = Buffer()  return b.count })AXEA"));
 }
 
 TEST("TypeChecker rejects indexing into a Buffer")
 {
-    EXPECT_THROWS(check("f() -> i32 { b = Buffer()  return b[0] }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f()
+{ b = Buffer()  return b[0] })AXEA"));
 }
 
 TEST("TypeChecker accepts Buffer.write as a str-coercible-argument alias of append (see "
      "docs/language/0061-buffer-write.md)")
 {
-    check("f() -> String { "
-          "  b = Buffer() "
-          "  b.write(\"Axea\") "
-          "  return b.finish() "
-          "} "
-          "x = f()");
+    check(R"AXEA(String f()
+{   b = Buffer()   b.write("Axea")   return b.finish() } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects Buffer.write with a non-str-coercible argument")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.write(5) }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.write(5) })AXEA"));
 }
 
 TEST("TypeChecker rejects Buffer.write with the wrong argument count")
 {
-    EXPECT_THROWS(check("f() { b = Buffer()  b.write() }"));
-    EXPECT_THROWS(check("f() { b = Buffer()  b.write(\"a\", \"b\") }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.write() })AXEA"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ b = Buffer()  b.write("a", "b") })AXEA"));
 }
 
 TEST("TypeChecker rejects 'write' on a String - only Buffer has it")
 {
-    EXPECT_THROWS(check("f() { s = String(\"a\")  s.write(\"b\") }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ s = String("a")  s.write("b") })AXEA"));
 }
 
 TEST("TypeChecker distinguishes Buffer.append from String.append despite the shared method name")
 {
-    check("f() { "
-          "  buf = Buffer() "
-          "  buf.append(\"a\") "
-          "  s = String(\"b\") "
-          "  s.append(\"c\") "
-          "}");
+    check(R"AXEA(void f()
+{   buf = Buffer()   buf.append("a")   s = String("b")   s.append("c") })AXEA");
 }
 
 TEST("TypeChecker accepts a well-formed impl Display for a struct, typechecking format's own "
      "body with self bound to the struct type (see docs/language/0062-display-trait.md)")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "trait Display { format(self, buf: Buffer) } "
-          "impl Display for Point { "
-          "  format(self, buf: Buffer) { buf.write(\"({self.x}, {self.y})\") } "
-          "}");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} trait Display { format(self, buf: Buffer) } impl Display for Point {   format(self, buf: Buffer) { buf.write("({self.x}, {self.y})") } })AXEA");
 }
 
 TEST("TypeChecker rejects impl Display for a struct with no 'format' method at all")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "impl Display for Point { render(self, buf: Buffer) { } }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} impl Display for Point { render(self, buf: Buffer) { } })AXEA"));
 }
 
 TEST("TypeChecker rejects impl Display for a struct whose 'format' has the wrong parameter count")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "impl Display for Point { format(self) { } }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} impl Display for Point { format(self) { } })AXEA"));
 }
 
 TEST("TypeChecker rejects impl for an unknown (non-struct) type")
@@ -1295,68 +1505,83 @@ TEST("TypeChecker rejects impl for an unknown (non-struct) type")
 
 TEST("TypeChecker rejects an impl missing a method its own matching trait declares")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "trait Display { format(self, buf: Buffer)  extra(self) } "
-                        "impl Display for Point { format(self, buf: Buffer) { } }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} trait Display { format(self, buf: Buffer)  extra(self) } impl Display for Point { format(self, buf: Buffer) { } })AXEA"));
 }
 
 TEST("TypeChecker rejects an impl method whose arity disagrees with its matching trait's "
      "declared signature")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "trait Display { format(self, buf: Buffer) } "
-                        "impl Display for Point { format(self) { } }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} trait Display { format(self, buf: Buffer) } impl Display for Point { format(self) { } })AXEA"));
 }
 
 TEST("TypeChecker accepts a real field access on self inside an impl method body")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "impl Display for Point { "
-          "  format(self, buf: Buffer) -> i32 { return self.x + self.y } "
-          "}");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} impl Display for Point {   format(self, buf: Buffer) -> i32 { return self.x + self.y } })AXEA");
 }
 
 TEST("TypeChecker type-checks an ordinary obj.method(args) call dispatched to an inherent "
      "(no-trait) impl method, returning its declared return type")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "impl Point { sum(self) -> i32 { return self.x + self.y } } "
-          "p = Point{x: 1, y: 2} "
-          "n = p.sum()");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+
+    i32 sum(self)
+    { return self.x + self.y }
+} p = Point{x: 1, y: 2} n = p.sum())AXEA");
 }
 
 TEST("TypeChecker rejects a struct method call with the wrong argument count")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "impl Point { add(self, n: i32) -> i32 { return self.x + n } } "
-                        "p = Point{x: 1} "
-                        "n = p.add()"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+
+    i32 add(self, i32 n)
+    { return self.x + n }
+} p = Point{x: 1} n = p.add())AXEA"));
 }
 
 TEST("TypeChecker rejects a struct method call with the wrong argument type")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "impl Point { add(self, n: i32) -> i32 { return self.x + n } } "
-                        "p = Point{x: 1} "
-                        "n = p.add(true)"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+
+    i32 add(self, i32 n)
+    { return self.x + n }
+} p = Point{x: 1} n = p.add(true))AXEA"));
 }
 
 TEST("TypeChecker still rejects an undefined method on a struct with the existing diagnostic")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "p = Point{x: 1} "
-                        "n = p.missing()"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} p = Point{x: 1} n = p.missing())AXEA"));
 }
 
 TEST("TypeChecker type-checks a generic struct's method call for two different concrete "
      "instantiations in the same program")
 {
-    check("struct Box<T> { value: T } "
-          "impl<T> Box<T> { get(self) -> T { return self.value } } "
-          "a = Box<i32>{value: 1} "
-          "x = a.get() "
-          "b = Box<bool>{value: true} "
-          "y = b.get()");
+    check(R"AXEA(struct Box<T>
+{
+    T value
+
+    T get(self)
+    { return self.value }
+} a = Box<i32>{value: 1} x = a.get() b = Box<bool>{value: true} y = b.get())AXEA");
 }
 
 TEST("TypeChecker rejects impl for an unknown (non-struct) target when the impl is inherent")
@@ -1372,93 +1597,57 @@ TEST("TypeChecker rejects a generic impl whose own arity disagrees with its targ
 
 TEST("TypeChecker accepts Buffer as a parameter, return type, and local declared type")
 {
-    check("build() -> Buffer { "
-          "  x: Buffer = Buffer() "
-          "  return x "
-          "} "
-          "consume(b: Buffer) -> i32 { return b.length } "
-          "n = build() "
-          "y = consume(n)");
+    check(R"AXEA(Buffer build()
+{   x: Buffer = Buffer()   return x } i32 consume(Buffer b)
+{ return b.length } n = build() y = consume(n))AXEA");
 }
 
 TEST("TypeChecker rejects Buffer as a struct field type")
 {
-    EXPECT_THROWS(check("struct Wrapper { text: Buffer }"));
+    EXPECT_THROWS(check(R"AXEA(struct Wrapper
+{
+    Buffer text
+})AXEA"));
 }
 
 TEST("TypeChecker accepts char literals and equality comparison")
 {
-    check("f() -> bool { "
-          "  a = 'A' "
-          "  b = 'B' "
-          "  return a == b "
-          "} "
-          "x = f()");
+    check(R"AXEA(bool f()
+{   a = 'A'   b = 'B'   return a == b } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts char ordering comparisons")
 {
-    check("f() -> bool { "
-          "  a = 'A' "
-          "  b = 'B' "
-          "  lt = a < b "
-          "  le = a <= b "
-          "  gt = a > b "
-          "  ge = a >= b "
-          "  return lt "
-          "} "
-          "x = f()");
+    check(R"AXEA(bool f()
+{   a = 'A'   b = 'B'   lt = a < b   le = a <= b   gt = a > b   ge = a >= b   return lt } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts str ordering comparisons")
 {
-    check("f() -> bool { "
-          "  a = \"apple\" "
-          "  b = \"banana\" "
-          "  lt = a < b "
-          "  le = a <= b "
-          "  gt = a > b "
-          "  ge = a >= b "
-          "  return lt "
-          "} "
-          "x = f()");
+    check(R"AXEA(bool f()
+{   a = "apple"   b = "banana"   lt = a < b   le = a <= b   gt = a > b   ge = a >= b   return lt } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects ordering comparisons on the owned String type - orderability only "
      "ever considers the bare str value type, even though String is str-coercible everywhere "
      "else in this language (see docs/language/0042-string.md)")
 {
-    EXPECT_THROWS(check("f() { a = String(\"a\")  b = String(\"b\")  x = a < b }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ a = String("a")  b = String("b")  x = a < b })AXEA"));
 }
 
 TEST("TypeChecker accepts i64 arithmetic and comparisons, typing the result i64/bool "
      "respectively (see docs/language/0005-type-system.md)")
 {
-    check("f() -> i64 { "
-          "  a = 100i64 "
-          "  b = 25i64 "
-          "  sum = a + b "
-          "  diff = a - b "
-          "  prod = a * b "
-          "  quot = a / b "
-          "  lt = a < b "
-          "  return sum + diff + prod + quot "
-          "} "
-          "x = f()");
+    check(R"AXEA(i64 f()
+{   a = 100i64   b = 25i64   sum = a + b   diff = a - b   prod = a * b   quot = a / b   lt = a < b   return sum + diff + prod + quot } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts f64 arithmetic and comparisons, typing the result f64/bool "
      "respectively")
 {
-    check("f() -> f64 { "
-          "  a = 1.5 "
-          "  b = 2.5 "
-          "  sum = a + b "
-          "  quot = a / b "
-          "  lt = a < b "
-          "  return sum + quot "
-          "} "
-          "x = f()");
+    check(R"AXEA(f64 f()
+{   a = 1.5   b = 2.5   sum = a + b   quot = a / b   lt = a < b   return sum + quot } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects mixing i32/i64/f64 in one arithmetic or comparison expression - no "
@@ -1472,15 +1661,8 @@ TEST("TypeChecker rejects mixing i32/i64/f64 in one arithmetic or comparison exp
 TEST("TypeChecker accepts an 'as' cast between any two of i32/i64/f64, including a same-kind "
      "cast, typing the result as targetType")
 {
-    check("f() -> i64 { "
-          "  a = 5 "
-          "  b = a as i64 "
-          "  c = b as f64 "
-          "  d = c as i32 "
-          "  e = a as i32 "
-          "  return b "
-          "} "
-          "x = f()");
+    check(R"AXEA(i64 f()
+{   a = 5   b = a as i64   c = b as f64   d = c as i32   e = a as i32   return b } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects an 'as' cast to/from a non-numeric type")
@@ -1521,11 +1703,11 @@ TEST("TypeChecker rejects an empty or multi-character char literal")
 TEST("TypeChecker accepts char as a parameter, return type, local declared type, and struct "
      "field type")
 {
-    check("struct Letter { value: char } "
-          "identity(c: char) -> char { return c } "
-          "x: char = 'A' "
-          "y = identity(x) "
-          "l = Letter { value: 'Z' }");
+    check(R"AXEA(struct Letter
+{
+    char value
+} char identity(char c)
+{ return c } x: char = 'A' y = identity(x) l = Letter { value: 'Z' })AXEA");
 }
 
 TEST("TypeChecker accepts bounded, open-start, open-end, and fully-open str slice expressions")
@@ -1582,7 +1764,8 @@ TEST("TypeChecker rejects a non-i32 index into a str/String")
 TEST("TypeChecker still rejects indexed assignment into a str - single-character indexing is "
      "read-only, str stays immutable (isIndexable itself is untouched)")
 {
-    EXPECT_THROWS(check("f() { s = \"hello\"  s[0] = 'x' }"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ s = "hello"  s[0] = 'x' })AXEA"));
 }
 
 TEST("TypeChecker accepts enum variant construction (both payload and bare no-payload forms) "
@@ -1653,7 +1836,8 @@ TEST("TypeChecker rejects match arms with incompatible result types")
 
 TEST("TypeChecker rejects 'match' on a non-enum value")
 {
-    EXPECT_THROWS(check("f() { return match 5 { Circle(r) => r } } x = 1"));
+    EXPECT_THROWS(check(R"AXEA(void f()
+{ return match 5 { Circle(r) => r } } x = 1)AXEA"));
 }
 
 TEST("TypeChecker rejects a variant construction with the wrong argument count or type")
@@ -1680,35 +1864,32 @@ TEST("TypeChecker resolves a nested enum type used as another enum's own variant
 TEST("TypeChecker accepts Ok(x)/Err(e) against a declared Result<T,E> type, and typechecks "
      "'?' propagation through a Result<T,E>-returning function (see docs/language/0063-result.md)")
 {
-    check("divide(a: i32, b: i32) -> Result<i32, str> { "
-          "  if b == 0 { return Err(\"division by zero\") } "
-          "  return Ok(a / b) "
-          "} "
-          "x: Result<i32, str> = divide(10, 2)");
+    check(R"AXEA(Result<i32, str> divide(i32 a, i32 b)
+{   if b == 0 { return Err("division by zero") }   return Ok(a / b) } x: Result<i32, str> = divide(10, 2))AXEA");
 }
 
 TEST("TypeChecker propagates '?' through a Result<T,E>-returning function, unwrapping Ok and "
      "requiring the operand's own Err type to match the enclosing function's")
 {
-    check("inner(a: i32) -> Result<i32, str> { return Ok(a) } "
-          "outer(a: i32) -> Result<i32, str> { x = inner(a)?  return Ok(x) } "
-          "y = outer(1)");
+    check(R"AXEA(Result<i32, str> inner(i32 a)
+{ return Ok(a) } Result<i32, str> outer(i32 a)
+{ x = inner(a)?  return Ok(x) } y = outer(1))AXEA");
 }
 
 TEST("TypeChecker rejects '?' when the operand's Err type doesn't match the enclosing "
      "function's own Err type - no automatic error-type conversion this phase")
 {
-    EXPECT_THROWS(check("inner(a: i32) -> Result<i32, str> { return Ok(a) } "
-                        "outer(a: i32) -> Result<i32, i32> { x = inner(a)?  return Ok(x) } "
-                        "y = outer(1)"));
+    EXPECT_THROWS(check(R"AXEA(Result<i32, str> inner(i32 a)
+{ return Ok(a) } Result<i32, i32> outer(i32 a)
+{ x = inner(a)?  return Ok(x) } y = outer(1))AXEA"));
 }
 
 TEST("TypeChecker rejects '?' used inside a function whose own return type is neither "
      "Optional<T> nor Result<T,E>")
 {
-    EXPECT_THROWS(check("f(a: i32) -> Result<i32, str> { return Ok(a) } "
-                        "g(a: i32) -> i32 { return f(a)? } "
-                        "y = g(1)"));
+    EXPECT_THROWS(check(R"AXEA(Result<i32, str> f(i32 a)
+{ return Ok(a) } i32 g(i32 a)
+{ return f(a)? } y = g(1))AXEA"));
 }
 
 TEST("TypeChecker rejects a bare Ok(...)/Err(...) with no declared Result<T,E> context")
@@ -1727,25 +1908,19 @@ TEST("TypeChecker rejects Ok(...)/Err(...) whose value doesn't match the declare
 TEST("TypeChecker's unwrap_or/is_ok/is_err accept a Result<T,E>, unwrap_or's default must "
      "match the Ok type")
 {
-    check("f() -> Result<i32, str> { return Ok(5) } "
-          "r = f() "
-          "v = r.unwrap_or(0) "
-          "ok = r.is_ok() "
-          "err = r.is_err()");
-    EXPECT_THROWS(check("f() -> Result<i32, str> { return Ok(5) } "
-                        "r = f() "
-                        "v = r.unwrap_or(\"wrong\")"));
+    check(R"AXEA(Result<i32, str> f()
+{ return Ok(5) } r = f() v = r.unwrap_or(0) ok = r.is_ok() err = r.is_err())AXEA");
+    EXPECT_THROWS(check(R"AXEA(Result<i32, str> f()
+{ return Ok(5) } r = f() v = r.unwrap_or("wrong"))AXEA"));
 }
 
 TEST("TypeChecker rejects is_ok/is_err on an Optional<T>, and unwrap_or/is_some/is_none on a "
      "Result<T,E> - the two APIs stay distinct by name despite sharing unwrap_or")
 {
-    EXPECT_THROWS(check("f() -> Optional<i32> { return Some(5) } "
-                        "o = f() "
-                        "x = o.is_ok()"));
-    EXPECT_THROWS(check("f() -> Result<i32, str> { return Ok(5) } "
-                        "r = f() "
-                        "x = r.is_some()"));
+    EXPECT_THROWS(check(R"AXEA(Optional<i32> f()
+{ return Some(5) } o = f() x = o.is_ok())AXEA"));
+    EXPECT_THROWS(check(R"AXEA(Result<i32, str> f()
+{ return Ok(5) } r = f() x = r.is_some())AXEA"));
 }
 
 TEST("TypeChecker resolves a nested Result<T,E> type - E itself a Result, and T itself a "
@@ -1802,38 +1977,30 @@ TEST("TypeChecker rejects parse<T>() called with an argument")
 TEST("TypeChecker still parses/checks 'field < expr' as a comparison, not a misfired generic "
      "call, when the field itself happens to be i32")
 {
-    check("struct P { field: i32 } "
-          "f(p: P) -> bool { return p.field < 10 } "
-          "p = P { field: 5 } "
-          "x = f(p)");
+    check(R"AXEA(struct P
+{
+    i32 field
+} bool f(P p)
+{ return p.field < 10 } p = P { field: 5 } x = f(p))AXEA");
 }
 
 TEST("TypeChecker accepts .length and .bytes on a bare str - previously str had no field "
      "access at all")
 {
-    check("f() -> i32 { "
-          "  s = \"hello\" "
-          "  return s.length + s.bytes "
-          "} "
-          "x = f()");
+    check(R"AXEA(i32 f()
+{   s = "hello"   return s.length + s.bytes } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts .length and .bytes on String")
 {
-    check("f() -> i32 { "
-          "  s = String(\"hello\") "
-          "  return s.length + s.bytes "
-          "} "
-          "x = f()");
+    check(R"AXEA(i32 f()
+{   s = String("hello")   return s.length + s.bytes } x = f())AXEA");
 }
 
 TEST("TypeChecker accepts .length, .bytes, and .capacity on Buffer")
 {
-    check("f() -> i32 { "
-          "  b = Buffer() "
-          "  return b.length + b.bytes + b.capacity "
-          "} "
-          "x = f()");
+    check(R"AXEA(i32 f()
+{   b = Buffer()   return b.length + b.bytes + b.capacity } x = f())AXEA");
 }
 
 TEST("TypeChecker rejects an unknown field on str, suggesting length/bytes")
@@ -1895,9 +2062,8 @@ TEST("TypeChecker rejects an extern function that has the same name as a real Ax
     EXPECT_THROWS(check("extern c foo(x: i32) "
                         "foo(x: i32) -> i32 { return x } "
                         "y = foo(1)"));
-    EXPECT_THROWS(check("foo(x: i32) -> i32 { return x } "
-                        "extern c foo(x: i32) "
-                        "y = foo(1)"));
+    EXPECT_THROWS(check(R"AXEA(i32 foo(i32 x)
+{ return x } extern c foo(x: i32) y = foo(1))AXEA"));
 }
 
 TEST("TypeChecker rejects an unsupported extern calling convention")
@@ -1912,28 +2078,33 @@ TEST("TypeChecker rejects calling an undefined function/extern")
 
 TEST("TypeChecker accepts print/write with i32, bool, char, str, and String arguments")
 {
-    check("run() -> i32 { print(\"hello\", 1, true, 'c') return 0 } r = run()");
-    check("run() -> i32 { s = String(\"hi\") write(s) return 0 } r = run()");
-    check("run() -> i32 { print() return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ print("hello", 1, true, 'c') return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ s = String("hi") write(s) return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ print() return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker accepts an Array/List argument to print(...)/write(...) - stringified via "
      "registerCollectionToStrRuntime (see docs/language/0054-collection-printing.md); "
      "slice<T> remains the one unsupported type")
 {
-    check("run() -> i32 { arr = [1, 2, 3] print(arr) return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ arr = [1, 2, 3] print(arr) return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker accepts print/write with a slice<T> argument (see "
      "docs/language/0056-slice-printing.md)")
 {
-    check("f(s: slice<i32>) -> i32 { print(s) return 0 } "
-          "arr = [1, 2, 3] r = f(arr)");
+    check(R"AXEA(i32 f(slice<i32> s)
+{ print(s) return 0 } arr = [1, 2, 3] r = f(arr))AXEA");
 }
 
 TEST("TypeChecker rejects redefining 'print' or 'write' as a real function")
 {
-    EXPECT_THROWS(check("print(x: i32) -> i32 { return x }"));
+    EXPECT_THROWS(check(R"AXEA(i32 print(i32 x)
+{ return x })AXEA"));
     EXPECT_THROWS(check("extern c print(x: i32)"));
 }
 
@@ -1941,10 +2112,11 @@ TEST("TypeChecker accepts a struct argument to print(...)/write(...) - it prints
      "the existing per-struct-type helper, no stringification needed (see "
      "docs/language/0049-printing-formatting.md's own follow-up)")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "p = Point { x: 1, y: 2 } "
-          "print(\"point:\", p) "
-          "write(p)");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} p = Point { x: 1, y: 2 } print("point:", p) write(p))AXEA");
 }
 
 // Map<K,V>/Set<T>/SortedMap<K,V>/SortedSet<T> are all real, user-declared generic structs now
@@ -1966,23 +2138,23 @@ TEST("TypeChecker checks a bare top-level print(...)/write(...) call via the new
 TEST("TypeChecker types an interpolated string literal as String, matching the InterpolatedString"
      "Expr's own always-owned design")
 {
-    check("run() -> i32 { name = \"Ada\" s = \"hi {name}\" t = s.length return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ name = "Ada" s = "hi {name}" t = s.length return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker accepts an Array/List/slice<T> value inside an interpolation span (see "
      "docs/language/0054-collection-printing.md and docs/language/0056-slice-printing.md)")
 {
-    check("run() -> i32 { arr = [1, 2, 3] s = \"arr is {arr}\" return 0 } r = run()");
-    check("f(sl: slice<i32>) -> i32 { s = \"sl is {sl}\" return 0 } "
-          "arr = [1, 2, 3] r = f(arr)");
+    check(R"AXEA(i32 run()
+{ arr = [1, 2, 3] s = "arr is {arr}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 f(slice<i32> sl)
+{ s = "sl is {sl}" return 0 } arr = [1, 2, 3] r = f(arr))AXEA");
 }
 
 TEST("TypeChecker accepts i32/bool/char/str/String interpolation spans")
 {
-    check("run() -> i32 { "
-          "n = 1 b = true c = 'x' s = \"hi\" "
-          "out = \"{n} {b} {c} {s}\" "
-          "return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ n = 1 b = true c = 'x' s = "hi" out = "{n} {b} {c} {s}" return 0 } r = run())AXEA");
 }
 
 // Array/List slicing (arr[a..b] producing a fresh List<T>) is no longer supported - narrowed
@@ -1992,159 +2164,179 @@ TEST("TypeChecker accepts i32/bool/char/str/String interpolation spans")
 
 TEST("TypeChecker accepts .join(separator) on an Array of i32, returning a String")
 {
-    check("run() -> i32 { "
-          "numbers = [1, 2, 3] "
-          "joined = numbers.join(\",\") "
-          "len = joined.length "
-          "return len } r = run()");
+    check(R"AXEA(i32 run()
+{ numbers = [1, 2, 3] joined = numbers.join(",") len = joined.length return len } r = run())AXEA");
 }
 
 TEST("TypeChecker rejects .join on a non-Array/List type")
 {
-    EXPECT_THROWS(check("run() -> i32 { joined = (5).join(\",\") return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ joined = (5).join(",") return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker accepts .join on struct elements - each stringified via "
      "@axea.tostring.<Name> (see docs/language/0054-collection-printing.md)")
 {
-    check("struct Point { x: i32 } "
-          "run() -> i32 { pts = [Point{x:1}] j = pts.join(\",\") return 0 } "
-          "r = run()");
+    check(R"AXEA(struct Point
+{
+    i32 x
+} i32 run()
+{ pts = [Point{x:1}] j = pts.join(",") return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker rejects .join with a non-str separator")
 {
     EXPECT_THROWS(
-        check("run() -> i32 { numbers = [1, 2, 3] joined = numbers.join(5) return 0 } r = run()"));
+        check(R"AXEA(i32 run()
+{ numbers = [1, 2, 3] joined = numbers.join(5) return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects .join with the wrong argument count")
 {
     EXPECT_THROWS(
-        check("run() -> i32 { numbers = [1, 2, 3] joined = numbers.join() return 0 } r = run()"));
+        check(R"AXEA(i32 run()
+{ numbers = [1, 2, 3] joined = numbers.join() return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker accepts .join on a slice<T> receiver, same as Array/List (see "
      "docs/language/0056-slice-printing.md)")
 {
-    check("f(s: slice<i32>) -> String { return s.join(\",\") } "
-          "arr = [1, 2, 3] r = f(arr)");
+    check(R"AXEA(String f(slice<i32> s)
+{ return s.join(",") } arr = [1, 2, 3] r = f(arr))AXEA");
 }
 
 TEST("TypeChecker accepts numeric format specs on i32/i64/f64 interpolation spans (see "
      "docs/language/0055-numeric-format-specs.md)")
 {
-    check("run() -> i32 { n = 42 out = \"{n:05}\" return 0 } r = run()");
-    check("run() -> i32 { n: i64 = 42i64 out = \"{n:x}\" return 0 } r = run()");
-    check("run() -> i32 { pi = 3.14159 out = \"{pi:.2}\" return 0 } r = run()");
-    check("run() -> i32 { n = 42 out = \"{n:X} {n:b} {n:o}\" return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ n = 42 out = "{n:05}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ n: i64 = 42i64 out = "{n:x}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ pi = 3.14159 out = "{pi:.2}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ n = 42 out = "{n:X} {n:b} {n:o}" return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker rejects a radix format spec (x/X/b/o) on a non-integer interpolation span")
 {
-    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:x}\" return 0 } r = run()"));
-    EXPECT_THROWS(check("run() -> i32 { s = \"hi\" out = \"{s:b}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ pi = 3.14 out = "{pi:x}" return 0 } r = run())AXEA"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ s = "hi" out = "{s:b}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects a precision format spec ('.N') on a non-float interpolation span")
 {
-    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:.2}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ n = 42 out = "{n:.2}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects a plain width format spec (no type char) on a non-integer "
      "interpolation span")
 {
-    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:05}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ pi = 3.14 out = "{pi:05}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects combining a radix type char with a precision in one format spec")
 {
-    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:.2x}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ n = 42 out = "{n:.2x}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker accepts an alignment format spec ('<'/'>'/'^' + width) on any "
      "isTextRepresentable type, not just i32/i64 - unlike bare width, which stays "
      "numeric-only (see docs/language/0057-alignment.md)")
 {
-    check("run() -> i32 { name = \"Ada\" out = \"{name:<20}\" return 0 } r = run()");
-    check("run() -> i32 { ok = true out = \"{ok:^10}\" return 0 } r = run()");
-    check("run() -> i32 { n = 42 out = \"{n:>10}\" return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ name = "Ada" out = "{name:<20}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ ok = true out = "{ok:^10}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ n = 42 out = "{n:>10}" return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker accepts an alignment format spec combined with a precision on an f64 "
      "interpolation span, matching the source doc's own {user.score:>8.2} example")
 {
-    check("run() -> i32 { pi = 3.14159 out = \"{pi:>8.2}\" return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ pi = 3.14159 out = "{pi:>8.2}" return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker still rejects a radix conversion on a non-integer even when an alignment "
      "char is also present - alignment doesn't relax the radix/precision type restrictions")
 {
-    EXPECT_THROWS(check("run() -> i32 { pi = 3.14 out = \"{pi:>10x}\" return 0 } r = run()"));
-    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:>10.2}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ pi = 3.14 out = "{pi:>10x}" return 0 } r = run())AXEA"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ n = 42 out = "{n:>10.2}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects an alignment char with no width to align within")
 {
-    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:<}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ n = 42 out = "{n:<}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker rejects combining zero-padding with an explicit alignment char - the two "
      "are mutually exclusive fill strategies")
 {
-    EXPECT_THROWS(check("run() -> i32 { n = 42 out = \"{n:<010}\" return 0 } r = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{ n = 42 out = "{n:<010}" return 0 } r = run())AXEA"));
 }
 
 TEST("TypeChecker accepts self-doc '{expr=}' and debug '{expr:?}' on any isTextRepresentable "
      "type, including struct/collection - neither narrows the allowed type set (see "
      "docs/language/0058-debug-formatting.md)")
 {
-    check("run() -> i32 { n = 42 out = \"{n=}\" return 0 } r = run()");
-    check("run() -> i32 { name = \"Ada\" out = \"{name=}\" return 0 } r = run()");
-    check("struct Point { x: i32 } "
-          "run() -> i32 { p = Point{x:1} out = \"{p:?}\" return 0 } r = run()");
-    check("run() -> i32 { arr = [1, 2] out = \"{arr:?}\" return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ n = 42 out = "{n=}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ name = "Ada" out = "{name=}" return 0 } r = run())AXEA");
+    check(R"AXEA(struct Point
+{
+    i32 x
+} i32 run()
+{ p = Point{x:1} out = "{p:?}" return 0 } r = run())AXEA");
+    check(R"AXEA(i32 run()
+{ arr = [1, 2] out = "{arr:?}" return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker accepts a self-doc prefix combined with a numeric format spec, matching the "
      "source doc's own Python-style expression-debugging framing extended with a spec")
 {
-    check("run() -> i32 { pi = 3.14 out = \"{pi=:.2}\" return 0 } r = run()");
+    check(R"AXEA(i32 run()
+{ pi = 3.14 out = "{pi=:.2}" return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker implicitly wraps a plain value into a union-typed call argument, declared "
      "local, and return, with no wrapper syntax (see docs/language/0065-unions.md)")
 {
-    check("f(x: i32 | str) -> i32 | str { return x } "
-          "run() -> i32 { "
-          "  y = f(5) "
-          "  z = f(\"hi\") "
-          "  w: i32 | str = 5 "
-          "  return 0 "
-          "} "
-          "r = run()");
+    check(R"AXEA(i32 | str f(i32 | str x)
+{ return x } i32 run()
+{   y = f(5)   z = f("hi")   w: i32 | str = 5   return 0 } r = run())AXEA");
 }
 
 TEST("TypeChecker canonicalizes a union's alternatives - order doesn't affect its identity, so "
      "'str | i32' is assignable wherever 'i32 | str' is expected")
 {
-    check("f(x: i32 | str) -> i32 { return 0 } "
-          "g(x: str | i32) -> i32 { return f(x) } "
-          "y = g(5)");
+    check(R"AXEA(i32 f(i32 | str x)
+{ return 0 } i32 g(str | i32 x)
+{ return f(x) } y = g(5))AXEA");
 }
 
 TEST("TypeChecker resolves a union's own match arms by each alternative's own canonical type "
      "name, with full exhaustiveness checking exactly like a real enum")
 {
-    check("f(x: i32 | str) -> str { "
-          "  return match x { i32(n) => \"number\"  str(s) => \"string\" } "
-          "} "
-          "y = f(5)");
+    check(R"AXEA(str f(i32 | str x)
+{   return match x { i32(n) => "number"  str(s) => "string" } } y = f(5))AXEA");
 }
 
 TEST("TypeChecker rejects a non-exhaustive match on a union with no wildcard arm")
 {
-    EXPECT_THROWS(check("f(x: i32 | str) -> str { return match x { i32(n) => \"n\" } } y = f(5)"));
+    EXPECT_THROWS(check(R"AXEA(str f(i32 | str x)
+{ return match x { i32(n) => "n" } } y = f(5))AXEA"));
 }
 
 TEST("TypeChecker rejects a value whose type isn't any alternative of the declared union")
@@ -2155,18 +2347,18 @@ TEST("TypeChecker rejects a value whose type isn't any alternative of the declar
 TEST("TypeChecker rejects a compound type (List<T>) as a union alternative - its own canonical "
      "name can't be spelled as a single match-arm-pattern identifier")
 {
-    EXPECT_THROWS(check("f(x: List<i32> | i32) -> i32 { return 0 } y = f(5)"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(List<i32> | i32 x)
+{ return 0 } y = f(5))AXEA"));
 }
 
 TEST("TypeChecker accepts a struct as a union alternative, matched by its own type name")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "f(v: Point | i32) -> str { "
-          "  return match v { Point(p) => \"point\"  i32(n) => \"number\" } "
-          "} "
-          "p = Point{x: 1, y: 2} "
-          "a = f(p) "
-          "b = f(5)");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} str f(Point | i32 v)
+{   return match v { Point(p) => "point"  i32(n) => "number" } } p = Point{x: 1, y: 2} a = f(p) b = f(5))AXEA");
 }
 
 TEST("TypeChecker accepts a closure literal assigned to a declared 'fn(T)->R'-typed local, and "
@@ -2179,19 +2371,15 @@ TEST("TypeChecker accepts a closure literal assigned to a declared 'fn(T)->R'-ty
 TEST("TypeChecker accepts a closure that closes over an enclosing function's own param, "
      "returned as a value and called later - the defining closure use case")
 {
-    check("makeAdder(base: i32) -> fn(i32) -> i32 { "
-          "  return fn(x: i32) -> i32 { return x + base } "
-          "} "
-          "add5 = makeAdder(5) "
-          "y = add5(1)");
+    check(R"AXEA(fn(i32) -> i32 makeAdder(i32 base)
+{   return fn(x: i32) -> i32 { return x + base } } add5 = makeAdder(5) y = add5(1))AXEA");
 }
 
 TEST("TypeChecker accepts a closure-typed parameter and calling it inside the enclosing "
      "function's own body - a higher-order function")
 {
-    check("apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
-          "double: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } "
-          "y = apply(double, 5)");
+    check(R"AXEA(i32 apply(fn(i32) -> i32 f, i32 x)
+{ return f(x) } double: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 } y = apply(double, 5))AXEA");
 }
 
 TEST("TypeChecker rejects a closure call with the wrong argument count")
@@ -2216,54 +2404,49 @@ TEST("TypeChecker accepts a bare top-level function name passed as a call argume
      "matching closure type is declared (see docs/language/0067-closures.md's implicit "
      "function-reference-to-closure coercion)")
 {
-    check("double(x: i32) -> i32 { return x * 2 } "
-          "apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x) } "
-          "y = apply(double, 5)");
+    check(R"AXEA(i32 double(i32 x)
+{ return x * 2 } i32 apply(fn(i32) -> i32 f, i32 x)
+{ return f(x) } y = apply(double, 5))AXEA");
 }
 
 TEST("TypeChecker accepts a bare top-level function name assigned to a declared closure-typed "
      "local")
 {
-    check("double(x: i32) -> i32 { return x * 2 } "
-          "d: fn(i32) -> i32 = double "
-          "y = d(5)");
+    check(R"AXEA(i32 double(i32 x)
+{ return x * 2 } d: fn(i32) -> i32 = double y = d(5))AXEA");
 }
 
 TEST("TypeChecker accepts a bare top-level function name returned where the enclosing function "
      "declares a matching closure-typed return")
 {
-    check("double(x: i32) -> i32 { return x * 2 } "
-          "getDouble() -> fn(i32) -> i32 { return double } "
-          "g = getDouble() "
-          "y = g(5)");
+    check(R"AXEA(i32 double(i32 x)
+{ return x * 2 } fn(i32) -> i32 getDouble()
+{ return double } g = getDouble() y = g(5))AXEA");
 }
 
 TEST("TypeChecker rejects a bare top-level function name whose own signature doesn't match the "
      "declared closure type")
 {
-    EXPECT_THROWS(check("double(x: i32) -> i32 { return x * 2 } "
-                        "d: fn(i32) -> str = double"));
+    EXPECT_THROWS(check(R"AXEA(i32 double(i32 x)
+{ return x * 2 } d: fn(i32) -> str = double)AXEA"));
 }
 
 TEST("TypeChecker still resolves a same-named local over a top-level function for the implicit "
      "function-reference-to-closure coercion - the ordinary 'inner scope wins' rule")
 {
-    EXPECT_THROWS(check("double(x: i32) -> i32 { return x * 2 } "
-                        "run() -> i32 { "
-                        "  double = 5 "
-                        "  d: fn(i32) -> i32 = double "
-                        "  return d(1) "
-                        "} "
-                        "y = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 double(i32 x)
+{ return x * 2 } i32 run()
+{   double = 5   d: fn(i32) -> i32 = double   return d(1) } y = run())AXEA"));
 }
 
 TEST("TypeChecker accepts a struct-typed closure parameter (see "
      "docs/language/0067-closures.md's implicit function-reference-to-closure coercion "
      "corrections)")
 {
-    check("struct Point { x: i32 } "
-          "f: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } "
-          "y = f(Point { x: 5 })");
+    check(R"AXEA(struct Point
+{
+    i32 x
+} f: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } y = f(Point { x: 5 }))AXEA");
 }
 
 TEST("TypeChecker accepts a self-referential (recursive) closure - no new syntax, `f`'s own "
@@ -2302,48 +2485,61 @@ TEST("TypeChecker accepts capturing a struct-typed local into exactly one closur
      "not borrow - see docs/language/0067-closures.md's own Design section); double-capture "
      "rejection is CapabilityChecker's own concern, see CapabilityCheckerTests.cpp")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "run() -> i32 { "
-          "  p = Point { x: 3, y: 4 } "
-          "  sum: fn() -> i32 = fn() -> i32 { return p.x + p.y } "
-          "  return sum() "
-          "} "
-          "y = run()");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} i32 run()
+{   p = Point { x: 3, y: 4 }   sum: fn() -> i32 = fn() -> i32 { return p.x + p.y }   return sum() } y = run())AXEA");
 }
 
 TEST("TypeChecker accepts a generic struct instantiated with an explicit primitive type "
      "argument")
 {
-    check("struct Box<T> { value: T } "
-          "b = Box<i32> { value: 5 } "
-          "n = b.value");
+    check(R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32> { value: 5 } n = b.value)AXEA");
 }
 
 TEST("TypeChecker accepts a generic struct instantiated with another struct as its type "
      "argument")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "struct Box<T> { value: T } "
-          "b = Box<Point> { value: Point { x: 1, y: 2 } } "
-          "n = b.value.x");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} struct Box<T>
+{
+    T value
+} b = Box<Point> { value: Point { x: 1, y: 2 } } n = b.value.x)AXEA");
 }
 
 TEST("TypeChecker rejects a generic struct literal missing its explicit type arguments")
 {
-    EXPECT_THROWS(check("struct Box<T> { value: T }  b = Box { value: 5 }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    T value
+} b = Box { value: 5 })AXEA"));
 }
 
 TEST("TypeChecker rejects a generic struct instantiation with the wrong type-argument count")
 {
     EXPECT_THROWS(
-        check("struct Pair<A, B> { first: A  second: B }  p = Pair<i32> { first: 1 }"));
+        check(R"AXEA(struct Pair<A,B>
+{
+    A first
+    B second
+} p = Pair<i32> { first: 1 })AXEA"));
 }
 
 TEST("TypeChecker treats two different instantiations of the same generic struct as distinct, "
      "incompatible types")
 {
-    EXPECT_THROWS(check("struct Box<T> { value: T } "
-                        "b: Box<i32> = Box<str> { value: \"hi\" }"));
+    EXPECT_THROWS(check(R"AXEA(struct Box<T>
+{
+    T value
+} b: Box<i32> = Box<str> { value: "hi" })AXEA"));
 }
 
 TEST("TypeChecker accepts a pointer dereference inside an 'unsafe' block")
@@ -2356,37 +2552,40 @@ TEST("TypeChecker accepts a pointer dereference inside an 'unsafe' block")
 
 TEST("TypeChecker rejects a pointer dereference outside an 'unsafe' block")
 {
-    EXPECT_THROWS(check("f(ptr: *i32) -> i32 { return *ptr }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(*i32 ptr)
+{ return *ptr })AXEA"));
 }
 
 TEST("TypeChecker rejects a pointer dereference assignment outside an 'unsafe' block")
 {
-    EXPECT_THROWS(check("f(ptr: *i32) { *ptr = 5 }"));
+    EXPECT_THROWS(check(R"AXEA(void f(*i32 ptr)
+{ *ptr = 5 })AXEA"));
 }
 
 TEST("TypeChecker rejects pointer arithmetic outside an 'unsafe' block")
 {
-    EXPECT_THROWS(check("f(ptr: *i32) -> *i32 { return ptr + 1 }"));
+    EXPECT_THROWS(check(R"AXEA(*i32 f(*i32 ptr)
+{ return ptr + 1 })AXEA"));
 }
 
 TEST("TypeChecker accepts pointer arithmetic inside an 'unsafe' block, result type still a "
      "pointer")
 {
-    check("f(ptr: *i32) -> i32 { "
-          "  x: *i32 = unsafe { ptr + 1 } "
-          "  return unsafe { *x } "
-          "}");
+    check(R"AXEA(i32 f(*i32 ptr)
+{   x: *i32 = unsafe { ptr + 1 }   return unsafe { *x } })AXEA");
 }
 
 TEST("TypeChecker rejects dereferencing a non-pointer value")
 {
-    EXPECT_THROWS(check("f(x: i32) -> i32 { unsafe { return *x } }"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(i32 x)
+{ unsafe { return *x } })AXEA"));
 }
 
 TEST("TypeChecker rejects a pointer dereference assignment whose value type doesn't match the "
      "pointee type")
 {
-    EXPECT_THROWS(check("f(ptr: *i32) { unsafe { *ptr = \"wrong type\" } }"));
+    EXPECT_THROWS(check(R"AXEA(void f(*i32 ptr)
+{ unsafe { *ptr = "wrong type" } })AXEA"));
 }
 
 TEST("TypeChecker accepts 'extern c malloc(size: i64) -> *i32' - i64 and *T are FFI-safe")
@@ -2396,10 +2595,8 @@ TEST("TypeChecker accepts 'extern c malloc(size: i64) -> *i32' - i64 and *T are 
 
 TEST("TypeChecker's insideUnsafe resets to false after an 'unsafe' block ends")
 {
-    EXPECT_THROWS(check("f(ptr: *i32) -> i32 { "
-                        "  unsafe { total = *ptr } "
-                        "  return *ptr "
-                        "}"));
+    EXPECT_THROWS(check(R"AXEA(i32 f(*i32 ptr)
+{   unsafe { total = *ptr }   return *ptr })AXEA"));
 }
 
 TEST("TypeChecker accepts '&x' outside 'unsafe' - taking an address is always safe")
@@ -2417,18 +2614,23 @@ TEST("TypeChecker accepts dereferencing an address-of result inside 'unsafe'")
 
 TEST("TypeChecker rejects '&x.field' - only a bare local variable is supported this phase")
 {
-    EXPECT_THROWS(check("struct Point { x: i32 } "
-                        "f(p: Point) -> *i32 { return &p.x }"));
+    EXPECT_THROWS(check(R"AXEA(struct Point
+{
+    i32 x
+} *i32 f(Point p)
+{ return &p.x })AXEA"));
 }
 
 TEST("TypeChecker rejects '&arr[i]' - only a bare local variable is supported this phase")
 {
-    EXPECT_THROWS(check("f(arr: [i32; 3]) -> *i32 { return &arr[0] }"));
+    EXPECT_THROWS(check(R"AXEA(*i32 f([i32; 3] arr)
+{ return &arr[0] })AXEA"));
 }
 
 TEST("TypeChecker rejects '&(*p)' - only a bare local variable is supported this phase")
 {
-    EXPECT_THROWS(check("f(p: *i32) -> *i32 { unsafe { return &(*p) } }"));
+    EXPECT_THROWS(check(R"AXEA(*i32 f(*i32 p)
+{ unsafe { return &(*p) } })AXEA"));
 }
 
 TEST("TypeChecker rejects '&undefinedName'")
@@ -2438,15 +2640,8 @@ TEST("TypeChecker rejects '&undefinedName'")
 
 TEST("TypeChecker rejects '&' inside a closure body")
 {
-    EXPECT_THROWS(check("run() -> i32 { "
-                        "  f: fn() -> i32 = fn() -> i32 { "
-                        "    x = 5 "
-                        "    p = &x "
-                        "    return unsafe { *p } "
-                        "  } "
-                        "  return f() "
-                        "} "
-                        "y = run()"));
+    EXPECT_THROWS(check(R"AXEA(i32 run()
+{   f: fn() -> i32 = fn() -> i32 {     x = 5     p = &x     return unsafe { *p }   }   return f() } y = run())AXEA"));
 }
 
 TEST("TypeChecker types '&x' as '*T' where T is x's own declared type")
@@ -2459,9 +2654,11 @@ TEST("TypeChecker types '&x' as '*T' where T is x's own declared type")
 
 TEST("TypeChecker types sizeof<T>() as i64 for a primitive and a struct")
 {
-    check("struct Point { x: i32  y: i32 } "
-          "a: i64 = sizeof<i32>() "
-          "b: i64 = sizeof<Point>()");
+    check(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} a: i64 = sizeof<i32>() b: i64 = sizeof<Point>())AXEA");
 }
 
 TEST("TypeChecker rejects sizeof<T>() for an unknown type")
@@ -2484,13 +2681,12 @@ TEST("TypeChecker accepts a pointer-to-pointer cast only inside 'unsafe'")
 TEST("TypeChecker type-checks a generic top-level function call for two different concrete "
      "instantiations in the same program")
 {
-    check("identity<T>(x: T) -> T { return x } "
-          "a = identity<i32>(1) "
-          "b = identity<bool>(true)");
+    check(R"AXEA(T identity<T>(T x)
+{ return x } a = identity<i32>(1) b = identity<bool>(true))AXEA");
 }
 
 TEST("TypeChecker rejects a generic top-level function call with the wrong argument type")
 {
-    EXPECT_THROWS(check("identity<T>(x: T) -> T { return x } "
-                        "a = identity<i32>(true)"));
+    EXPECT_THROWS(check(R"AXEA(T identity<T>(T x)
+{ return x } a = identity<i32>(true))AXEA"));
 }

@@ -323,19 +323,19 @@ just checked against the interpreter alone.
 `examples/string.ax`:
 
 ```ax
-build() -> String
+String build()
 {
     name = String("Axea")
     name.append(" Language")
     return name
 }
 
-appendOne(name: String)
+void appendOne(String name)
 {
     name.append("!")
 }
 
-useStr(s: str) -> i32
+i32 useStr(str s)
 {
     return 1
 }

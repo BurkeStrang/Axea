@@ -139,7 +139,7 @@ value ^= bit
 Basic function:
 
 ```ax
-square(x: i32) -> i32
+i32 square(i32 x)
 {
     return x * x
 }
@@ -148,7 +148,7 @@ square(x: i32) -> i32
 No explicit return type for `unit`:
 
 ```ax
-print_user(user: User)
+void print_user(User user)
 {
     print(user.name)
 }
@@ -172,17 +172,17 @@ pub get_user(id: UserId) -> User?
 Capabilities:
 
 ```ax
-pub display(read user: User)
+pub void display(read User user)
 {
     print(user.name)
 }
 
-pub update(write user: User)
+pub void update(write User user)
 {
     user.age++
 }
 
-pub send(take packet: Packet)
+pub void send(take Packet packet)
 {
     ...
 }
@@ -198,7 +198,7 @@ fallback (see `0027-explicit-return.md`). A unit-returning function may still
 fall off the end of the block with no `return` at all.
 
 ```ax
-square(x: i32) -> i32
+i32 square(i32 x)
 {
     return x * x
 }
@@ -225,9 +225,9 @@ find(x: i32) -> i32?
 ```ax
 struct User
 {
-    id: i64
-    name: str
-    active: bool
+    i64 id
+    str name
+    bool active
 }
 ```
 
@@ -649,7 +649,7 @@ impl Drawable for Sprite
 # Generics
 
 ```ax
-identity<T>(value: T) -> T
+T identity<T>(T value)
 {
     value
 }
@@ -660,7 +660,7 @@ Generic struct:
 ```ax
 struct Box<T>
 {
-    value: T
+    T value
 }
 ```
 

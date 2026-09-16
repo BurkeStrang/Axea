@@ -1,6 +1,6 @@
 use collections
 
-build() -> Queue<i32>
+Queue<i32> build()
 {
     jobs: Queue<i32> = collections.newQueue<i32>()
     p1 = jobs.enqueue(10)
@@ -9,12 +9,12 @@ build() -> Queue<i32>
     return jobs
 }
 
-enqueueOne(jobs: Queue<i32>)
+void enqueueOne(Queue<i32> jobs)
 {
     p = jobs.enqueue(99)
 }
 
-drain(jobs: Queue<i32>) -> i32
+i32 drain(Queue<i32> jobs)
 {
     total = 0
     while jobs.length() > 0

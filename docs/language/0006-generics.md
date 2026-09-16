@@ -221,24 +221,21 @@ after, but nothing in this phase depends on that.
 ```ax
 struct Box<T>
 {
-    value: T
-}
+    T value
 
-impl<T> Box<T>
-{
-    get(self) -> T
+    T get(self)
     {
         return self.value
     }
 }
 
-struct Pair<A, B>
+struct Pair<A,B>
 {
-    first: A
-    second: B
+    A first
+    B second
 }
 
-identity<T>(x: T) -> T
+T identity<T>(T x)
 {
     return x
 }

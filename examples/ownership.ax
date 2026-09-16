@@ -6,19 +6,19 @@
 
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
 struct Line
 {
-    start: Point
-    end: Point
+    Point start
+    Point end
 }
 
 // Returning a struct just moves it out to the caller - nothing is retained on
 // the way out.
-make_point(x: i32, y: i32) -> Point
+Point make_point(i32 x, i32 y)
 {
     return Point { x: x, y: y }
 }
@@ -27,14 +27,14 @@ make_point(x: i32, y: i32) -> Point
 // into `start`/`end` is a real, zero-cost ownership transfer: once `line` exists,
 // it alone can reach these two points, so dropping `line` later needs no aliasing
 // check - it can just walk its fields and free them.
-make_line(take a: Point, take b: Point) -> Line
+Line make_line(take Point a, take Point b)
 {
     return Line { start: a, end: b }
 }
 
 // A plain (borrowed) parameter costs nothing to read: no retain on the way in,
 // no release on the way out. `p` is never owned by this function.
-length_squared(p: Point) -> i32
+i32 length_squared(Point p)
 {
     return p.x * p.x + p.y * p.y
 }
@@ -42,12 +42,12 @@ length_squared(p: Point) -> i32
 // `take` consumes `line` - the caller can no longer use its own `line` after
 // this call. That is enforced at compile time (see the commented-out example at
 // the bottom of this file), not by a runtime check.
-describe(take line: Line) -> i32
+i32 describe(take Line line)
 {
     return length_squared(line.start) + length_squared(line.end)
 }
 
-run() -> i32
+i32 run()
 {
     a = make_point(3, 4)
     b = make_point(1, 2)

@@ -5,7 +5,7 @@ enum Shape
     Point
 }
 
-area(s: Shape) -> f64
+f64 area(Shape s)
 {
     return match s
     {
@@ -15,7 +15,7 @@ area(s: Shape) -> f64
     }
 }
 
-describe(s: Shape) -> str
+str describe(Shape s)
 {
     return match s
     {
@@ -24,7 +24,7 @@ describe(s: Shape) -> str
     }
 }
 
-run() -> i32
+i32 run()
 {
     c = Shape.Circle(5.0)
     r = Shape.Rectangle(3.0, 4.0)

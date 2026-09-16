@@ -64,7 +64,8 @@ Nothing is ever `free`d this phase. That's a deliberate, documented simplificati
 `Branch`'s existing `thenBlock`/`elseBlock`/`thenValue`/`elseValue` (computed by Phase 5) already say everything needed — no new "which value merges" analysis, just correct LLVM block/label bookkeeping:
 
 ```ax
-pick(flag: bool) -> i32 { return if flag { 1 } else { 2 } }
+i32 pick(bool flag)
+{ return if flag { 1 } else { 2 } }
 ```
 
 ```llvm
@@ -122,7 +123,12 @@ The initial version of this backend had no callable entry point — `IrProgram::
 Printing needs `declare i32 @printf(i8*, ...)` and a format string per value shape (`"%s = %d\n"` for `i32`; `"%s = %s\n"` for `bool`/`str`/`unit`, since a bool is first `select`ed into a `"true"`/`"false"` pointer and unit is always the literal string `"()"`, matching `toString`'s own convention exactly). Struct-typed bindings are the interesting case: `IrProgram::structs` gains one generated helper per struct type, `void @axea.print.<TypeName>(%TypeName*)`, that `printf`s `"TypeName { "`, then each field's name and value (recursing into `@axea.print.<Nested>` for a struct-typed field), then `" }"` — named with an `axea.print.` prefix specifically so it can never collide with a user-defined Axea function, since Axea function names are emitted unmangled as `@name`. `IrProgram` also gained `topLevelBindings: vector<(name, register)>`, populated by `IrGenerator::generate` right next to the existing top-level lowering loop, so `emitMain` knows which register holds each binding's final value and in what order to print them.
 
 ```ax
-struct User { name: str  age: i32 }
+struct User
+{
+    str name
+    i32 age
+}
+
 u = User { name: "Burke"  age: 35 }
 ```
 

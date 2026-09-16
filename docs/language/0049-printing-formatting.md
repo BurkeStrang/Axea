@@ -288,7 +288,7 @@ it was never *required* to be inside a function, just the only style
 that happened to parse before the fix):
 
 ```ax
-greet(name: str, age: i32) -> i32
+i32 greet(str name, i32 age)
 {
     print("Hello", name)
     write("Loading...")

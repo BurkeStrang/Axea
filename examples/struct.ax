@@ -1,7 +1,7 @@
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
 p = Point

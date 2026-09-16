@@ -1,4 +1,4 @@
-factorial(n: i32) -> i32
+i32 factorial(i32 n)
 {
     if n <= 1
     {

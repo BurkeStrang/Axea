@@ -1,6 +1,6 @@
 use collections
 
-build() -> Map<i32,i32>
+Map<i32,i32> build()
 {
     m = collections.newMap<i32,i32>()
     m.set(1, 10)
@@ -9,7 +9,7 @@ build() -> Map<i32,i32>
     return m
 }
 
-fillMore(m: Map<i32,i32>)
+void fillMore(Map<i32,i32> m)
 {
     m.set(4, 40)
     m.set(5, 50)
@@ -17,7 +17,7 @@ fillMore(m: Map<i32,i32>)
     m.set(7, 70)
 }
 
-buildSet() -> Set<i32>
+Set<i32> buildSet()
 {
     s = collections.newSet<i32>()
     s.add(1)
@@ -26,7 +26,7 @@ buildSet() -> Set<i32>
     return s
 }
 
-fillMoreSet(s: Set<i32>)
+void fillMoreSet(Set<i32> s)
 {
     s.add(4)
     s.add(5)
@@ -54,11 +54,11 @@ hasFourAfter = s.contains(4)
 
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
-wordCounts() -> Map<str,i32>
+Map<str,i32> wordCounts()
 {
     counts = collections.newMap<str,i32>()
     counts.set("apple", 3)
@@ -67,7 +67,7 @@ wordCounts() -> Map<str,i32>
     return counts
 }
 
-uniquePoints() -> Set<Point>
+Set<Point> uniquePoints()
 {
     seen = collections.newSet<Point>()
     seen.add(Point { x: 1  y: 1 })
@@ -76,7 +76,7 @@ uniquePoints() -> Set<Point>
     return seen
 }
 
-locations() -> Map<str,Point>
+Map<str,Point> locations()
 {
     places = collections.newMap<str,Point>()
     places.set("origin", Point { x: 0  y: 0 })

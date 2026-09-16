@@ -1,4 +1,4 @@
-greet(name: str, age: i32) -> i32
+i32 greet(str name, i32 age)
 {
     print("Hello", name)
     write("Loading...")

@@ -35,9 +35,15 @@ No named or parameterized lifetimes (`'a`-style) — that's `0013-lifetimes.md`'
 # The Rule
 
 ```ax
-struct User { name: str }
+struct User
+{
+    str name
+}
 
-display(user: User) -> str { user.name }   # fine - see "Primitives Don't Alias" below
+str display(User user)
+{ user.name }
+
+# fine - see "Primitives Don't Alias" below
 get_ref(user: User) -> User { user }        # rejected
 ```
 
@@ -51,9 +57,12 @@ and does not outlive the call - declare 'take' if ownership should transfer
 Borrowed-ness propagates through struct construction, not just direct return:
 
 ```ax
-struct Wrapper { inner: User }
+struct Wrapper
+{
+    User inner
+}
 
-wrap(user: User) -> Wrapper
+Wrapper wrap(User user)
 {
     Wrapper { inner: user }   # rejected: Wrapper now holds a borrowed User
 }
@@ -68,9 +77,16 @@ A struct literal is `Owned` unless *some* field initializer is itself `Borrowed`
 This is the refinement that keeps the check from being useless-ly conservative. `Value` (`compiler/interpreter/Interpreter.hpp`) stores `i32`/`bool`/`str` **by value** — `std::variant<std::int64_t, bool, std::string, ...>` — so reading a primitive field is always a fresh copy, never an alias. A field access only inherits the object's region when the *field's own declared type* is itself a struct name:
 
 ```ax
-struct User { name: str  age: i32 }
+struct User
+{
+    str name
+    i32 age
+}
 
-display(user: User) -> str { user.name }   # str field -> Owned, regardless of `user`'s own region
+str display(User user)
+{ user.name }
+
+# str field -> Owned, regardless of `user`'s own region
 ```
 
 `display` is accepted even though `user` is borrowed, because `user.name` is a primitive extraction, not an alias of anything. This is the exact function from `examples/capabilities.ax` (Phase 3) — this phase had to not regress it, and the primitive/struct distinction is precisely what makes both `display` (accepted) and `get_ref` (rejected) come out correctly from the same rule.

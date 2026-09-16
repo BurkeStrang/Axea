@@ -1,7 +1,7 @@
 use math
 use io
 
-run() -> i32
+i32 run()
 {
     d = math.distance(5, 3)
     m = math.max(d, math.min(10, 20))

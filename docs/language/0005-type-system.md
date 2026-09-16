@@ -378,7 +378,7 @@ The exact owned versus borrowed string representation will be specified with the
 Functions that conceptually return no value return `unit`.
 
 ```ax
-print_user(user: User)
+void print_user(User user)
 {
     print(user.name)
 }
@@ -387,7 +387,7 @@ print_user(user: User)
 The compiler treats this as:
 
 ```ax
-print_user(user: User) -> unit
+unit print_user(User user)
 {
     print(user.name)
 }
@@ -410,7 +410,7 @@ Axea should include a bottom type named `never`.
 Functions that never return:
 
 ```ax
-panic(message: str) -> never
+never panic(str message)
 {
     ...
 }
@@ -455,7 +455,7 @@ values: List<i32>
 Function parameters should generally require types at API boundaries:
 
 ```ax
-square(x: i32) -> i32
+i32 square(i32 x)
 {
     x * x
 }
@@ -924,9 +924,9 @@ Structs define product types.
 ```ax
 struct User
 {
-    id: i64
-    name: str
-    active: bool
+    i64 id
+    str name
+    bool active
 }
 ```
 
@@ -974,7 +974,7 @@ If:
 ```ax
 struct User
 {
-    name: str
+    str name
 }
 ```
 
@@ -1095,7 +1095,7 @@ Type:
 Functions are typed values.
 
 ```ax
-add(a: i32, b: i32) -> i32
+i32 add(i32 a, i32 b)
 {
     a + b
 }
@@ -1130,7 +1130,7 @@ Generic syntax:
 ```ax
 struct Box<T>
 {
-    value: T
+    T value
 }
 ```
 
@@ -1159,7 +1159,7 @@ Generics should initially be monomorphized for native performance.
 # 30. Generic Functions
 
 ```ax
-identity<T>(value: T) -> T
+T identity<T>(T value)
 {
     value
 }
@@ -1491,7 +1491,7 @@ The compiler may infer types internally, but exported declarations should usuall
 Preferred:
 
 ```ax
-pub square(x: i32) -> i32
+pub i32 square(i32 x)
 {
     x * x
 }
@@ -1500,7 +1500,7 @@ pub square(x: i32) -> i32
 Avoid public API inference like:
 
 ```ax
-pub square(x)
+square(x)
 {
     x * x
 }
@@ -1919,12 +1919,12 @@ must fail unless explicitly checked or converted.
 # 55. Example: Type + Capability Inference
 
 ```ax
-display(user: User)
+void display(User user)
 {
     print(user.name)
 }
 
-birthday(user: User)
+void birthday(User user)
 {
     user.age++
 }

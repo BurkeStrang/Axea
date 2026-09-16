@@ -1,4 +1,4 @@
-sum(read values: slice<i32>) -> i32
+i32 sum(read slice<i32> values)
 {
     total = 0
     for v in values
@@ -8,7 +8,7 @@ sum(read values: slice<i32>) -> i32
     return total
 }
 
-zeroFirst(write values: slice<i32>)
+void zeroFirst(write slice<i32> values)
 {
     values[0] = 0
 }

@@ -167,7 +167,10 @@ call - declare 'take' if ownership should transfer
 But `regionOfExpr`'s `MethodCallExpr` case needed **zero changes** for `LinkedList<T>` — the first collection this session where that's true. `Map<K,V>.get()` and `Stack<T>.peek()` both needed a dedicated exception because they read a stored element *without* removing it, so a struct-typed result can alias the container. `LinkedList<T>` has no such operation this phase: `push_front`/`push_back` return nothing, and `pop_front`/`pop_back` always remove, so their result is always safely `Owned` under the *default* rule every method already gets, with no exception required. This is exactly why `peek_front`/`peek_back` were left out of scope — keeping them out means this whole phase needed no aliasing-exception work at all.
 
 ```ax
-take_front(s: LinkedList<Point>) -> Point { return s.pop_front() }   # type-checks without `take`
+Point take_front(LinkedList<Point> s)
+{ return s.pop_front() }
+
+# type-checks without `take`
 ```
 
 ---
@@ -252,7 +255,7 @@ merge:
 `examples/linked_list.ax`:
 
 ```ax
-build() -> LinkedList<i32>
+LinkedList<i32> build()
 {
     numbers = LinkedList<i32>()
     numbers.push_back(10)
@@ -261,13 +264,13 @@ build() -> LinkedList<i32>
     return numbers
 }
 
-pushBoth(numbers: LinkedList<i32>)
+void pushBoth(LinkedList<i32> numbers)
 {
     numbers.push_front(1)
     numbers.push_back(99)
 }
 
-drain(numbers: LinkedList<i32>) -> i32
+i32 drain(LinkedList<i32> numbers)
 {
     total = 0
     while numbers.length > 0

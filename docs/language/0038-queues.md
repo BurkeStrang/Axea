@@ -18,7 +18,7 @@ and the port itself follows that pattern to the letter: `Stack<T>` composed over
 ```ax
 struct Queue<T>
 {
-    items: Deque<T>
+    Deque<T> items
 }
 ```
 
@@ -154,7 +154,10 @@ error: function 'leak' cannot return 'q': parameter 'q' is borrowed and does not
 Unlike `Deque<T>`, `Queue<T>` needs **no `elementStructType` extraction at all** — there's no `[i]`/peek whose result could alias the container, so `dequeue()`'s struct-typed result is always safely `Owned` under the default rule:
 
 ```ax
-take_first(q: Queue<Point>) -> Point { return q.dequeue() }   # type-checks without `take`
+Point take_first(Queue<Point> q)
+{ return q.dequeue() }
+
+# type-checks without `take`
 ```
 
 ---
@@ -204,7 +207,7 @@ No `IndexGet`/`IndexSet`/print-loop changes were needed anywhere: `Queue<T>` nev
 `examples/queue.ax`:
 
 ```ax
-build() -> Queue<i32>
+Queue<i32> build()
 {
     jobs = Queue<i32>()
     jobs.enqueue(10)
@@ -213,12 +216,12 @@ build() -> Queue<i32>
     return jobs
 }
 
-enqueueOne(jobs: Queue<i32>)
+void enqueueOne(Queue<i32> jobs)
 {
     jobs.enqueue(99)
 }
 
-drain(jobs: Queue<i32>) -> i32
+i32 drain(Queue<i32> jobs)
 {
     total = 0
     while jobs.length > 0

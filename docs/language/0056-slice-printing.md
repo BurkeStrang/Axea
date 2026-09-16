@@ -68,16 +68,21 @@ is a `slice<T>`-typed parameter used directly inside the function it was passed 
 # Worked Example
 
 ```ax
-struct Point { x: i32 }
+struct Point
+{
+    i32 x
+}
 
-describe(s: slice<i32>) -> i32 {
+i32 describe(slice<i32> s)
+{
     print(s)
     print("interp: {s}")
     print(s.join(","))
     return s.length
 }
 
-describePoints(pts: slice<Point>) -> i32 {
+i32 describePoints(slice<Point> pts)
+{
     print(pts)
     print(pts.join(", "))
     return pts.length

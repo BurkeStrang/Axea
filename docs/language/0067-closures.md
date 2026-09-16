@@ -12,7 +12,7 @@ write an anonymous function value, no way for a function to "close over" a varia
 enclosing scope, and no way to pass behavior around as data. This phase adds real closures:
 
 ```ax
-makeAdder(base: i32) -> fn(i32) -> i32
+fn(i32) -> i32 makeAdder(i32 base)
 {
     return fn(x: i32) -> i32 { return x + base }
 }
@@ -137,22 +137,22 @@ type from `capturesObject`'s own already-inferred type at `IrClosureNew` emissio
 # Worked Example
 
 ```ax
-apply(f: fn(i32) -> i32, x: i32) -> i32
+i32 apply(fn(i32) -> i32 f, i32 x)
 {
     return f(x)
 }
 
-makeAdder(base: i32) -> fn(i32) -> i32
+fn(i32) -> i32 makeAdder(i32 base)
 {
     return fn(x: i32) -> i32 { return x + base }
 }
 
-double(x: i32) -> i32
+i32 double(i32 x)
 {
     return x * 2
 }
 
-run() -> i32
+i32 run()
 {
     add5 = makeAdder(5)
     doubler: fn(i32) -> i32 = fn(x: i32) -> i32 { return x * 2 }

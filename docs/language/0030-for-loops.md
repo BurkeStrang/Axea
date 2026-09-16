@@ -36,7 +36,7 @@ $ ax tokens for.ax          # source: for i in 0..3 { }
 The actual desugared shape, verified via `ax ast` against `examples/loops.ax`'s `sumRange`:
 
 ```ax
-sumRange(start: i32, end: i32) -> i32
+i32 sumRange(i32 start, i32 end)
 {
     total = 0
     for n in start..end
@@ -159,7 +159,7 @@ lowers the outer loop's internals as `__for0_i`/`__for0_end` and the inner's as 
 `ax capabilities`, `ax regions`, `ax ir`, `ax llvm-ir`, and `ax run` all already handled every node type in the desugared shape, having been fully exercised by `0028-loops.md`'s own `while`/`break`/`continue` work — nothing new needed to be taught to any of them. `ax ir` on the worked example below shows the desugared `while` lowering exactly like any other, `break`/`continue` targeting it exactly like any other, with the pre-decrement/increment-first structure visible directly in the carried-variable diff:
 
 ```ax
-sumOddsUnder(limit: i32) -> i32
+i32 sumOddsUnder(i32 limit)
 {
     total = 0
     for n in 0..limit
@@ -228,7 +228,7 @@ Matches `ax run`'s own `x = 9` exactly (`0 + 6` summed as odds under `6` is `1 +
 `examples/loops.ax`'s `sumRange`:
 
 ```ax
-sumRange(start: i32, end: i32) -> i32
+i32 sumRange(i32 start, i32 end)
 {
     total = 0
     for n in start..end

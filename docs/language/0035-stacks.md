@@ -15,7 +15,7 @@ directly on top of the real `List<T>`** rather than reimplementing its own `mall
 ```ax
 struct Stack<T>
 {
-    items: List<T>
+    List<T> items
 }
 ```
 
@@ -161,7 +161,10 @@ call - declare 'take' if ownership should transfer
 `pop`, by contrast, needs no exception at all — it removes, so nothing else still references the popped value, exactly like `List<T>.pop()` already established:
 
 ```ax
-take_top(s: Stack<Point>) -> Point { return s.pop() }   # type-checks without `take`
+Point take_top(Stack<Point> s)
+{ return s.pop() }
+
+# type-checks without `take`
 ```
 
 ---
@@ -227,7 +230,7 @@ Byte-identical to `ListInstance` — the distinction is purely at the Axea type-
 `examples/stack.ax`:
 
 ```ax
-build() -> Stack<i32>
+Stack<i32> build()
 {
     numbers = Stack<i32>()
     numbers.push(10)
@@ -236,12 +239,12 @@ build() -> Stack<i32>
     return numbers
 }
 
-pushOne(numbers: Stack<i32>)
+void pushOne(Stack<i32> numbers)
 {
     numbers.push(99)
 }
 
-drain(numbers: Stack<i32>) -> i32
+i32 drain(Stack<i32> numbers)
 {
     total = 0
     while numbers.length > 0

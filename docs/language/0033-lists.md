@@ -116,7 +116,7 @@ $ ax tokens x.ax          # source: numbers = List<i32>()
 `examples/list.ax`'s `build`, verified via `ax ast`:
 
 ```ax
-build() -> List<i32>
+List<i32> build()
 {
     numbers = List<i32>()
     numbers.push(10)
@@ -152,8 +152,11 @@ Function(build)
 The **only** scope restriction: `List<T>` is rejected as a struct field type (one small guard, mirroring the pattern `slice<T>`'s parameter-only restriction already established) — purely to keep this phase's surface area bounded, not for any deeper reason. Everywhere else — parameter, return type, local declared type — it's unrestricted:
 
 ```ax
-build() -> List<i32> { x: List<i32> = List<i32>()  return x }
-use(numbers: List<i32>) -> i32 { return numbers.length }
+List<i32> build()
+{ x: List<i32> = List<i32>()  return x }
+
+i32 use(List<i32> numbers)
+{ return numbers.length }
 ```
 type-checks cleanly; `struct Wrapper { items: List<i32> }` is rejected.
 
@@ -276,7 +279,7 @@ struct ListInstance { std::vector<Value> elements; };
 `examples/list.ax`:
 
 ```ax
-build() -> List<i32>
+List<i32> build()
 {
     numbers = List<i32>()
     numbers.push(10)
@@ -285,14 +288,14 @@ build() -> List<i32>
     return numbers
 }
 
-sum(numbers: List<i32>) -> i32
+i32 sum(List<i32> numbers)
 {
     total = 0
     for v in numbers { total = total + v }
     return total
 }
 
-appendOne(numbers: List<i32>)
+void appendOne(List<i32> numbers)
 {
     numbers.push(99)
 }

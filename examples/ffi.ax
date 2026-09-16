@@ -1,7 +1,7 @@
 extern c puts(text: cstr)
 extern c abs(x: i32) -> i32
 
-greet(name: str) -> i32
+i32 greet(str name)
 {
     puts(name.to_cstr())
     return 1

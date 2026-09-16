@@ -10,7 +10,7 @@
 Fixed-size arrays (`[T; N]`, `0031-arrays.md`) shipped with one real usability gap: a function taking `values: [i32; 4]` can only ever be called with an exactly-4-element array. `docs/language/0005-type-system.md` (§45) and `0002-grammar.md` (`slice_type = "slice" "<" type ">"`) already sketched the fix — `slice<T>`, "conceptually: pointer + length, but safely typed", callable with an array of *any* size. This document implements exactly that primary use case: an array implicitly converts to a `slice<T>` at a call boundary.
 
 ```ax
-sum(read values: slice<i32>) -> i32
+i32 sum(read slice<i32> values)
 {
     total = 0
     for v in values { total = total + v }
@@ -153,14 +153,14 @@ Because a slice literally aliases the same `ArrayInstance` its backing array doe
 `examples/slices.ax`:
 
 ```ax
-sum(read values: slice<i32>) -> i32
+i32 sum(read slice<i32> values)
 {
     total = 0
     for v in values { total = total + v }
     return total
 }
 
-zeroFirst(write values: slice<i32>)
+void zeroFirst(write slice<i32> values)
 {
     values[0] = 0
 }

@@ -1,7 +1,7 @@
 extern c malloc(size: i64) -> *i32
 extern c free(ptr: *i32)
 
-sumFirstFour(ptr: *i32) -> i32
+i32 sumFirstFour(*i32 ptr)
 {
     total = 0
     unsafe

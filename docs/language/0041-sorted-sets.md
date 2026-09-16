@@ -304,7 +304,7 @@ development (including the same 17-add/4-remove stress test
 `examples/sorted_set.ax`:
 
 ```ax
-build() -> SortedSet<i32>
+SortedSet<i32> build()
 {
     ids = SortedSet<i32>()
     ids.add(93)
@@ -313,12 +313,12 @@ build() -> SortedSet<i32>
     return ids
 }
 
-addOne(ids: SortedSet<i32>)
+void addOne(SortedSet<i32> ids)
 {
     ids.add(87)
 }
 
-drain(ids: SortedSet<i32>) -> i32
+i32 drain(SortedSet<i32> ids)
 {
     total = 0
     total = total + 87

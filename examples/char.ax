@@ -2,8 +2,8 @@ use collections
 
 struct Letter
 {
-    value: char
-    ordinal: i32
+    char value
+    i32 ordinal
 }
 
 first = Letter { value: 'A'  ordinal: 1 }

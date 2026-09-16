@@ -18,11 +18,15 @@ Both halves are implemented in the same pass, `compiler/sema/CapabilityChecker`,
 Passing a parameter, by bare name, into another function's `take`-capability argument position **consumes** it. Using that same name again afterward, within the same block, is a compile-time error:
 
 ```ax
-struct Packet { id: i32 }
+struct Packet
+{
+    i32 id
+}
 
-send(take packet: Packet) -> i32 { return packet.id }
+i32 send(take Packet packet)
+{ return packet.id }
 
-relay(packet: Packet) -> i32
+i32 relay(Packet packet)
 {
     a = send(packet)
     b = send(packet)   # error: use of moved value 'packet'

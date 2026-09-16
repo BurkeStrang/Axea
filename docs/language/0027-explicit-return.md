@@ -37,7 +37,7 @@ Every individual `return`'s value type is still checked by the existing, unchang
 This surfaced (and fixed) a latent TypeChecker gap noticed during Phase 6 (LLVM Backend): `if cond { return a } else { return b }` as a function's *entire* body used to fail to type-check. Neither branch produces a block-result *value* — both just `return` — so the `if`-expression's own inferred type was `unit`, which mismatched any non-unit declared return type. Under implicit-return semantics this pattern was simply unreachable; there was no valid way to write it.
 
 ```ax
-sign(x: i32) -> i32
+i32 sign(i32 x)
 {
     if x < 0 { return 0 - 1 } else { return 1 }
 }
@@ -76,7 +76,7 @@ A near-identical bug existed one layer further down: `LlvmIrEmitter::emitFunctio
 # Worked Example
 
 ```ax
-sign(x: i32) -> i32
+i32 sign(i32 x)
 {
     if x < 0 { return 0 - 1 } else { return 1 }
 }

@@ -1319,7 +1319,7 @@ Examples:
 ## Function
 
 ```ax
-square(x: i32) -> i32
+i32 square(i32 x)
 {
     x * x
 }
@@ -1371,7 +1371,7 @@ LocalDecl
 ## Capability Parameter
 
 ```ax
-pub update(write user: User)
+pub void update(write User user)
 {
     user.age++
 }

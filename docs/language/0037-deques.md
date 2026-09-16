@@ -169,7 +169,10 @@ error: function 'leak' cannot return 'd': parameter 'd' is borrowed and does not
 `pop_front`/`pop_back`, by contrast, need no exception either — they remove, so nothing else still references the popped value, exactly like `List<T>.pop()`/`LinkedList<T>.pop_front()` already established:
 
 ```ax
-take_front(d: Deque<Point>) -> Point { return d.pop_front() }   # type-checks without `take`
+Point take_front(Deque<Point> d)
+{ return d.pop_front() }
+
+# type-checks without `take`
 ```
 
 ---
@@ -252,7 +255,7 @@ Because `emitDequePushFront`/`emitDequePushBack` are genuinely new codegen shape
 `examples/deque.ax`:
 
 ```ax
-build() -> Deque<i32>
+Deque<i32> build()
 {
     numbers = Deque<i32>()
     numbers.push_back(10)
@@ -261,12 +264,12 @@ build() -> Deque<i32>
     return numbers
 }
 
-setFirst(numbers: Deque<i32>)
+void setFirst(Deque<i32> numbers)
 {
     numbers[0] = 99
 }
 
-sumWithForIn(numbers: Deque<i32>) -> i32
+i32 sumWithForIn(Deque<i32> numbers)
 {
     total = 0
     for value in numbers
@@ -276,7 +279,7 @@ sumWithForIn(numbers: Deque<i32>) -> i32
     return total
 }
 
-drain(numbers: Deque<i32>) -> i32
+i32 drain(Deque<i32> numbers)
 {
     total = 0
     while numbers.length > 0

@@ -5,17 +5,17 @@
 
 struct Counter
 {
-    count: i32
+    i32 count
 }
 
 // A borrowed Shared<Counter> costs nothing extra to read through - only
 // `.clone()` touches the refcount.
-read_count(sc: Shared<Counter>) -> i32
+i32 read_count(Shared<Counter> sc)
 {
     return sc.count
 }
 
-run() -> i32
+i32 run()
 {
     // Allocates { refcount: 1, value: Counter { count: 42 } } on the heap.
     original = Shared(Counter { count: 42 })

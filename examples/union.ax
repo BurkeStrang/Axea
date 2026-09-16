@@ -1,10 +1,10 @@
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
-describe(v: Point | i32 | str) -> str
+str describe(Point | i32 | str v)
 {
     return match v
     {
@@ -14,12 +14,12 @@ describe(v: Point | i32 | str) -> str
     }
 }
 
-f(x: i32 | str) -> i32 | str
+i32 | str f(i32 | str x)
 {
     return x
 }
 
-run() -> i32
+i32 run()
 {
     p = Point { x: 1, y: 2 }
     print(describe(p))

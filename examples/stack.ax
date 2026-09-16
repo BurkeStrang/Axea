@@ -1,6 +1,6 @@
 use collections
 
-build() -> Stack<i32>
+Stack<i32> build()
 {
     s: Stack<i32> = collections.newStack<i32>()
     p1 = s.push(10)
@@ -9,7 +9,7 @@ build() -> Stack<i32>
     return s
 }
 
-pushOne(s: Stack<i32>)
+void pushOne(Stack<i32> s)
 {
     p = s.push(99)
 }

@@ -1,4 +1,4 @@
-extractYear(date: str) -> str
+str extractYear(str date)
 {
     return date[..4]
 }

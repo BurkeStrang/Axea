@@ -241,7 +241,7 @@ $ ax ir examples/generic_methods.ax
 - `extractYear` now returns `Optional<i32>`, unwrapped at the call site):
 
 ```ax
-extractYear(date: str) -> Optional<i32>
+Optional<i32> extractYear(str date)
 {
     return date[..4].parse<i32>()
 }

@@ -296,7 +296,7 @@ algorithm sized the storage behind it, so `+=`/`.clear()` still ride
 `examples/buffer.ax`:
 
 ```ax
-build() -> String
+String build()
 {
     b = Buffer()
     b.append("Axea")
@@ -305,7 +305,7 @@ build() -> String
     return b.finish()
 }
 
-appendBang(b: Buffer)
+void appendBang(Buffer b)
 {
     b.append("!")
 }

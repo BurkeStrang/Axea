@@ -1,6 +1,6 @@
 use collections
 
-describe(numbers: [i32; 4]) -> String
+String describe([i32; 4] numbers)
 {
     comma = ", "
     return "{numbers.join(comma)}"

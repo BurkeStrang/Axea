@@ -1,15 +1,15 @@
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
-make(x: i32, y: i32) -> Point
+Point make(i32 x, i32 y)
 {
     return Point { x: x  y: y }
 }
 
-copy_point(p: Point) -> Point
+Point copy_point(Point p)
 {
     return Point { x: p.x  y: p.y }
 }

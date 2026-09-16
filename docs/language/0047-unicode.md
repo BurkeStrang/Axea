@@ -140,7 +140,7 @@ compiled:     "héllo".length = 5   "héllo".bytes = 6
 `examples/unicode.ax`:
 
 ```ax
-describe(text: str) -> i32
+i32 describe(str text)
 {
     return text.length
 }

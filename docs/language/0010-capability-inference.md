@@ -42,11 +42,11 @@ The only source of `write` is a field mutation whose target is rooted, possibly 
 ```ax
 struct User
 {
-    name: str
-    age: i32
+    str name
+    i32 age
 }
 
-birthday(user: User) -> i32
+i32 birthday(User user)
 {
     user.age++
     return user.age
@@ -125,11 +125,14 @@ The **effective** capability — what `ax capabilities` prints, and what other f
 ```ax
 struct User
 {
-    name: str
-    age: i32
+    str name
+    i32 age
 }
 
-display(user: User) -> str  { return user.name }        # read
+str display(User user)
+{ return user.name }
+
+# read
 birthday(user: User) -> i32 { user.age++  return user.age }  # write
 celebrate(user: User) -> i32 { return birthday(user) }  # write, propagated
 archive(take user: User) -> str { return user.name }    # take, declared

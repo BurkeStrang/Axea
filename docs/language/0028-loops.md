@@ -43,7 +43,7 @@ Structured like `IrBranch` (a nested `conditionBlock`/`body`, not labeled basic 
 **`break`/`continue` mid-body.** A `break`/`continue` can fire *before* the body's natural end, at which point `IrLoop::carried`'s `bodyEndReg` doesn't exist yet — the register that would hold it might not even be defined at that point in control flow. So `IrBreak`/`IrContinue` each carry their *own* `carried` snapshot (`IrGenerator::currentLoopCarriedDiff`, diffing against a stack of pre-loop snapshots — top of stack is the innermost loop, pushed/popped by `lowerLoop`), capturing exactly which carried variables changed, and to what, by that specific point.
 
 ```ax
-sumOdds(limit: i32) -> i32
+i32 sumOdds(i32 limit)
 {
     n = 0
     total = 0
@@ -98,7 +98,7 @@ Compiling `n = 0  return loop { n = n + 1  break n }` through `clang -x ir -` (d
 # Worked Example
 
 ```ax
-findFirstOver(limit: i32) -> i32
+i32 findFirstOver(i32 limit)
 {
     n = 0
     return loop

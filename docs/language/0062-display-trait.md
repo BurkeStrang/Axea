@@ -20,8 +20,8 @@ trait Display
 ```ax
 struct Point
 {
-    x: f64
-    y: f64
+    f64 x
+    f64 y
 }
 
 impl Display for Point
@@ -213,7 +213,11 @@ ones nothing currently calls).
 # Worked Example
 
 ```ax
-struct Point { x: i32  y: i32 }
+struct Point
+{
+    i32 x
+    i32 y
+}
 
 trait Display
 {

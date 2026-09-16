@@ -92,11 +92,11 @@ TEST("ModuleLoader merges a discovered module's own FunctionDecl with its name q
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "pub square(x: i32) -> i32 { return x * x }\n");
+              R"AXEA(module math_utils pub i32 square(i32 x)
+{ return x * x })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = math_utils.square(5)\n");
+                                           R"AXEA(use math_utils y = math_utils.square(5)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     EXPECT_TRUE(findFunction(merged, "math_utils.square") != nullptr);
@@ -108,12 +108,12 @@ TEST("ModuleLoader leaves an ExternDecl's own name bare (the real, externally-li
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "extern c abs(x: i32) -> i32\n"
-              "pub magnitude(x: i32) -> i32 { return math_utils.abs(x) }\n");
+              R"AXEA(module math_utils extern c abs(x: i32) -> i32
+pub magnitude(x: i32) -> i32 { return math_utils.abs(x) }
+)AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = math_utils.magnitude(0 - 3)\n");
+                                           R"AXEA(use math_utils y = math_utils.magnitude(0 - 3)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     const ExternDecl* externDecl = findExtern(merged, "abs");
@@ -128,8 +128,8 @@ TEST("ModuleLoader rewrites an aliased 'use math_utils as mu' call site to the r
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "pub square(x: i32) -> i32 { return x * x }\n");
+              R"AXEA(module math_utils pub i32 square(i32 x)
+{ return x * x })AXEA");
     const std::string mainPath = dir.write("main.ax",
                                            "use math_utils as mu\n"
                                            "y = mu.square(5)\n");
@@ -147,15 +147,14 @@ TEST("ModuleLoader follows a module's own transitive 'use' - a chain of two modu
 {
     TempDir dir;
     dir.write("base.ax",
-              "module base\n"
-              "pub double(x: i32) -> i32 { return x * 2 }\n");
+              R"AXEA(module base pub i32 double(i32 x)
+{ return x * 2 })AXEA");
     dir.write("derived.ax",
-              "module derived\n"
-              "use base\n"
-              "pub quadruple(x: i32) -> i32 { return base.double(base.double(x)) }\n");
+              R"AXEA(module derived use base pub i32 quadruple(i32 x)
+{ return base.double(base.double(x)) })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use derived\n"
-                                           "y = derived.quadruple(3)\n");
+                                           R"AXEA(use derived y = derived.quadruple(3)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -169,8 +168,8 @@ TEST("ModuleLoader throws a clear error when a 'use'd module can't be found")
 {
     TempDir dir;
     const std::string mainPath = dir.write("main.ax",
-                                           "use nonexistent\n"
-                                           "x = 1\n");
+                                           R"AXEA(use nonexistent x = 1
+)AXEA");
     EXPECT_THROWS(loadProgram(mainPath));
 }
 
@@ -179,12 +178,12 @@ TEST("ModuleLoader rejects a module file with top-level executable code - only t
 {
     TempDir dir;
     dir.write("bad.ax",
-              "module bad\n"
-              "pub f() -> i32 { return 1 }\n"
-              "y = 5\n");
+              R"AXEA(module bad pub i32 f()
+{ return 1 } y = 5
+)AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use bad\n"
-                                           "x = 1\n");
+                                           R"AXEA(use bad x = 1
+)AXEA");
     EXPECT_THROWS(loadProgram(mainPath));
 }
 
@@ -193,14 +192,12 @@ TEST("ModuleLoader's merged program end to end: TypeChecker rejects a qualified 
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "square(x: i32) -> i32 { return x * x }\n"
-              "pub distance(x: i32, y: i32) -> i32 { "
-              "  return math_utils.square(x) - math_utils.square(y) "
-              "}\n");
+              R"AXEA(module math_utils i32 square(i32 x)
+{ return x * x } pub i32 distance(i32 x, i32 y)
+{   return math_utils.square(x) - math_utils.square(y) })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = math_utils.square(5)\n");
+                                           R"AXEA(use math_utils y = math_utils.square(5)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     TypeChecker typeChecker;
@@ -213,14 +210,12 @@ TEST("ModuleLoader's merged program end to end: a module's own function calling 
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "square(x: i32) -> i32 { return x * x }\n"
-              "pub distance(x: i32, y: i32) -> i32 { "
-              "  return math_utils.square(x) - math_utils.square(y) "
-              "}\n");
+              R"AXEA(module math_utils i32 square(i32 x)
+{ return x * x } pub i32 distance(i32 x, i32 y)
+{   return math_utils.square(x) - math_utils.square(y) })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = math_utils.distance(5, 3)\n");
+                                           R"AXEA(use math_utils y = math_utils.distance(5, 3)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -300,11 +295,11 @@ TEST("ModuleLoader resolves a bare unqualified call to a used module's own publi
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "pub square(x: i32) -> i32 { return x * x }\n");
+              R"AXEA(module math_utils pub i32 square(i32 x)
+{ return x * x })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = square(5)\n");
+                                           R"AXEA(use math_utils y = square(5)
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -320,14 +315,16 @@ TEST("ModuleLoader resolves a bare unqualified call to a used module's own publi
 {
     TempDir dir;
     dir.write("boxing.ax",
-              "module boxing\n"
-              "struct Box<T> { value: T }\n"
-              "pub makeBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+              R"AXEA(module boxing struct Box<T>
+{
+    T value
+} pub Box<T> makeBox<T>(T v)
+{ return Box<T> { value: v } })AXEA");
     const std::string mainPath =
         dir.write("main.ax",
-                  "use boxing\n"
-                  "b: Box<i32> = makeBox<i32>(7)\n"
-                  "y = b.value\n");
+                  R"AXEA(use boxing b: Box<i32> = makeBox<i32>(7)
+y = b.value
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -342,12 +339,12 @@ TEST("ModuleLoader lets a local, entry-file-declared function silently shadow a 
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "pub square(x: i32) -> i32 { return x * x }\n");
+              R"AXEA(module math_utils pub i32 square(i32 x)
+{ return x * x })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "square() -> i32 { return 999 }\n"
-                                           "y = square()\n");
+                                           R"AXEA(use math_utils i32 square()
+{ return 999 } y = square()
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -361,12 +358,13 @@ TEST("ModuleLoader allows two used modules to both export the same bare public f
      "with no error, as long as that bare name is never actually called unqualified")
 {
     TempDir dir;
-    dir.write("mod_a.ax", "module mod_a\npub frobnicate() -> i32 { return 1 }\n");
-    dir.write("mod_b.ax", "module mod_b\npub frobnicate() -> i32 { return 2 }\n");
+    dir.write("mod_a.ax", R"AXEA(module mod_a pub i32 frobnicate()
+{ return 1 })AXEA");
+    dir.write("mod_b.ax", R"AXEA(module mod_b pub i32 frobnicate()
+{ return 2 })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use mod_a\n"
-                                           "use mod_b\n"
-                                           "y = mod_a.frobnicate()\n");
+                                           R"AXEA(use mod_a use mod_b y = mod_a.frobnicate()
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -380,12 +378,13 @@ TEST("ModuleLoader throws a clear, both-modules-named error when a bare name col
      "two used modules IS actually called unqualified")
 {
     TempDir dir;
-    dir.write("mod_a.ax", "module mod_a\npub frobnicate() -> i32 { return 1 }\n");
-    dir.write("mod_b.ax", "module mod_b\npub frobnicate() -> i32 { return 2 }\n");
+    dir.write("mod_a.ax", R"AXEA(module mod_a pub i32 frobnicate()
+{ return 1 })AXEA");
+    dir.write("mod_b.ax", R"AXEA(module mod_b pub i32 frobnicate()
+{ return 2 })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use mod_a\n"
-                                           "use mod_b\n"
-                                           "y = frobnicate()\n");
+                                           R"AXEA(use mod_a use mod_b y = frobnicate()
+)AXEA");
 
     EXPECT_THROWS(loadProgram(mainPath));
 }
@@ -395,11 +394,11 @@ TEST("ModuleLoader leaves a qualified call and a genuinely unknown bare call bot
 {
     TempDir dir;
     dir.write("math_utils.ax",
-              "module math_utils\n"
-              "pub square(x: i32) -> i32 { return x * x }\n");
+              R"AXEA(module math_utils pub i32 square(i32 x)
+{ return x * x })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use math_utils\n"
-                                           "y = totallyUnknownFunction()\n");
+                                           R"AXEA(use math_utils y = totallyUnknownFunction()
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     TypeChecker typeChecker;
@@ -411,13 +410,15 @@ TEST("ModuleLoader resolves TypeName<T>(args) construction sugar to a used modul
 {
     TempDir dir;
     dir.write("boxing.ax",
-              "module boxing\n"
-              "struct Box<T> { value: T }\n"
-              "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+              R"AXEA(module boxing struct Box<T>
+{
+    T value
+} pub Box<T> newBox<T>(T v)
+{ return Box<T> { value: v } })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use boxing\n"
-                                           "b = Box<i32>(7)\n"
-                                           "y = b.value\n");
+                                           R"AXEA(use boxing b = Box<i32>(7)
+y = b.value
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -431,13 +432,16 @@ TEST("ModuleLoader resolves non-generic TypeName(args) construction sugar the sa
 {
     TempDir dir;
     dir.write("points.ax",
-              "module points\n"
-              "struct Point { x: i32  y: i32 }\n"
-              "pub newPoint(x: i32, y: i32) -> Point { return Point { x: x, y: y } }\n");
+              R"AXEA(module points struct Point
+{
+    i32 x
+    i32 y
+} pub Point newPoint(i32 x, i32 y)
+{ return Point { x: x, y: y } })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use points\n"
-                                           "p = Point(3, 4)\n"
-                                           "y = p.x + p.y\n");
+                                           R"AXEA(use points p = Point(3, 4)
+y = p.x + p.y
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -453,10 +457,13 @@ TEST("ModuleLoader resolves TypeName<T>() construction sugar for a purely local 
     TempDir dir;
     const std::string mainPath =
         dir.write("main.ax",
-                  "struct Box<T> { value: T }\n"
-                  "newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
-                  "b = Box<i32>(7)\n"
-                  "y = b.value\n");
+                  R"AXEA(struct Box<T>
+{
+    T value
+} Box<T> newBox<T>(T v)
+{ return Box<T> { value: v } } b = Box<i32>(7)
+y = b.value
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);
@@ -472,8 +479,11 @@ TEST("ModuleLoader leaves TypeName<T>() construction sugar untouched when no mat
 {
     TempDir dir;
     const std::string mainPath =
-        dir.write("main.ax", "struct Box<T> { value: T }\n"
-                             "b = Box<i32>(7)\n");
+        dir.write("main.ax", R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32>(7)
+)AXEA");
 
     EXPECT_THROWS(loadProgram(mainPath));
 }
@@ -482,15 +492,16 @@ TEST("ModuleLoader throws an ambiguous-constructor error when two used modules b
      "matching 'new' + TypeName constructor for the same struct-shaped bare call")
 {
     TempDir dir;
-    dir.write("mod_a.ax", "module mod_a\n"
-                          "struct Box<T> { value: T }\n"
-                          "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
-    dir.write("mod_b.ax", "module mod_b\n"
-                          "pub newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n");
+    dir.write("mod_a.ax", R"AXEA(module mod_a struct Box<T>
+{
+    T value
+} pub Box<T> newBox<T>(T v)
+{ return Box<T> { value: v } })AXEA");
+    dir.write("mod_b.ax", R"AXEA(module mod_b pub Box<T> newBox<T>(T v)
+{ return Box<T> { value: v } })AXEA");
     const std::string mainPath = dir.write("main.ax",
-                                           "use mod_a\n"
-                                           "use mod_b\n"
-                                           "b = Box<i32>(7)\n");
+                                           R"AXEA(use mod_a use mod_b b = Box<i32>(7)
+)AXEA");
 
     EXPECT_THROWS(loadProgram(mainPath));
 }
@@ -501,11 +512,14 @@ TEST("ModuleLoader lets a real function literally sharing a struct's own bare na
     TempDir dir;
     const std::string mainPath =
         dir.write("main.ax",
-                  "struct Box<T> { value: T }\n"
-                  "newBox<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
-                  "Box<T>(v: T) -> Box<T> { return Box<T> { value: v } }\n"
-                  "b = Box<i32>(7)\n"
-                  "y = b.value\n");
+                  R"AXEA(struct Box<T>
+{
+    T value
+} Box<T> newBox<T>(T v)
+{ return Box<T> { value: v } } Box<T> Box<T>(T v)
+{ return Box<T> { value: v } } b = Box<i32>(7)
+y = b.value
+)AXEA");
 
     Program merged = loadProgram(mainPath);
     checkAll(merged);

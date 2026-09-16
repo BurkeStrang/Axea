@@ -213,7 +213,7 @@ interpreter bug fix (`docs/language/0042-string.md`) first established.
 `examples/str_slicing.ax`:
 
 ```ax
-extractYear(date: str) -> str
+str extractYear(str date)
 {
     return date[..4]
 }

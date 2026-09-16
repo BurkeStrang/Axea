@@ -51,7 +51,7 @@ $ ax tokens x.ax          # source: x: [i32; 4] = [1, 2, 3, 4]
 `examples/arrays.ax`'s `bumpFirst`, verified via `ax ast`:
 
 ```ax
-bumpFirst(values: [i32; 4]) -> i32
+i32 bumpFirst([i32; 4] values)
 {
     values[0] = values[0] + 1
     return values[0]
@@ -99,7 +99,7 @@ Function(bumpFirst)
 Same increment-first/bound-check/`forceDefine` shape as the range form, for the identical `continue`-safety reason `0030-for-loops.md` already worked out — the only two differences are what the bound check compares against (`__for<N>_arr.length` instead of a plain end variable) and how the loop variable is bound (`__for<N>_arr[__for<N>_i]`, an `IndexExpr`, instead of the counter directly). `examples/arrays.ax`'s `sum`, verified via `ax ast`:
 
 ```ax
-sum(values: [i32; 4]) -> i32
+i32 sum([i32; 4] values)
 {
     total = 0
     for v in values

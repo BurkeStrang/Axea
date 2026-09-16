@@ -94,9 +94,14 @@ own "Real, Pre-Existing Bug Found Along the Way" section already drew.
 # Worked Example
 
 ```ax
-struct User { name: str  age: i32  score: f64 }
+struct User
+{
+    str name
+    i32 age
+    f64 score
+}
 
-run() -> i32
+i32 run()
 {
     user = User { name: "Ada", age: 30, score: 92.5 }
     buf = Buffer()

@@ -1,20 +1,20 @@
-apply(f: fn(i32) -> i32, x: i32) -> i32
+i32 apply(fn(i32) -> i32 f, i32 x)
 {
     return f(x)
 }
 
-makeAdder(base: i32) -> fn(i32) -> i32
+fn(i32) -> i32 makeAdder(i32 base)
 {
     return fn(x: i32) -> i32 { return x + base }
 }
 
 struct Point
 {
-    x: i32
-    y: i32
+    i32 x
+    i32 y
 }
 
-run() -> i32
+i32 run()
 {
     add5 = makeAdder(5)
     add10 = makeAdder(10)

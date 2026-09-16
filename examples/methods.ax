@@ -1,11 +1,8 @@
 struct Counter
 {
-    value: i32
-}
+    i32 value
 
-impl Counter
-{
-    increment(self)
+    void increment(self)
     {
         self.value = self.value + 1
     }
@@ -13,12 +10,9 @@ impl Counter
 
 struct Box<T>
 {
-    value: T
-}
+    T value
 
-impl<T> Box<T>
-{
-    get(self) -> T
+    T get(self)
     {
         return self.value
     }

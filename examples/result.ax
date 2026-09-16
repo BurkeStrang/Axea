@@ -1,4 +1,4 @@
-divide(a: i32, b: i32) -> Result<i32, i32>
+Result<i32, i32> divide(i32 a, i32 b)
 {
     if b == 0
     {
@@ -7,7 +7,7 @@ divide(a: i32, b: i32) -> Result<i32, i32>
     return Ok(a / b)
 }
 
-sumTwo(a: i32, b: i32, c: i32, d: i32) -> Result<i32, i32>
+Result<i32, i32> sumTwo(i32 a, i32 b, i32 c, i32 d)
 {
     x = divide(a, b)?
     y = divide(c, d)?
@@ -24,7 +24,7 @@ badIsErr = bad.is_err()
 
 results = [good, bad]
 
-struct Wrapper { r: Result<i32, i32> }
+struct Wrapper { Result<i32, i32> r }
 w = Wrapper { r: good }
 
 print("good = {good}")

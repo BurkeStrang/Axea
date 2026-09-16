@@ -5,36 +5,11 @@ extern c free(ptr: *i32)
 
 struct List<T>
 {
-    length: i32
-    data: *T
-    capacity: i32
-}
+    i32 length
+    *T data
+    i32 capacity
 
-pub newList<T>() -> List<T>
-{
-    capacity = 1
-    raw = malloc(capacity as i64 * sizeof<T>())
-    data = unsafe { raw as *T }
-    return List<T> { length: 0, data: data, capacity: capacity }
-}
-
-// A compact way to build a List<T> already populated with an array literal's own contents
-// (e.g. `newListFrom<i32>([1, 2, 3])`) - an ordinary array-literal-to-slice<T> coercion at the
-// call site (already supported everywhere else a slice<T> parameter is used), copied one
-// element at a time into a fresh, independent List<T>.
-pub newListFrom<T>(elements: slice<T>) -> List<T>
-{
-    list = newList<T>()
-    for value in elements
-    {
-        list.push(value)
-    }
-    return list
-}
-
-impl<T> List<T>
-{
-    push(self, value: T)
+    void push(self, T value)
     {
         needed = self.length + 1
         if needed > self.capacity
@@ -60,18 +35,18 @@ impl<T> List<T>
         self.length = self.length + 1
     }
 
-    pop(self) -> T
+    T pop(self)
     {
         self.length = self.length - 1
         return unsafe { *(self.data + self.length) }
     }
 
-    get(self, index: i32) -> T
+    T get(self, i32 index)
     {
         return unsafe { *(self.data + index) }
     }
 
-    set(self, index: i32, value: T)
+    void set(self, i32 index, T value)
     {
         unsafe { *(self.data + index) = value }
     }
@@ -80,7 +55,7 @@ impl<T> List<T>
     // copied across, `self` left completely untouched. Never aliases self's own buffer: pushing
     // to the clone (or the original) can never be observed through the other, even before
     // either one's own next capacity-growing push.
-    clone(self) -> List<T>
+    List<T> clone(self)
     {
         raw = malloc(self.capacity as i64 * sizeof<T>())
         newData = unsafe { raw as *T }
@@ -95,56 +70,65 @@ impl<T> List<T>
     }
 }
 
+pub List<T> newList<T>()
+{
+    capacity = 1
+    raw = malloc(capacity as i64 * sizeof<T>())
+    data = unsafe { raw as *T }
+    return List<T> { length: 0, data: data, capacity: capacity }
+}
+
+// A compact way to build a List<T> already populated with an array literal's own contents
+// (e.g. `newListFrom<i32>([1, 2, 3])`) - an ordinary array-literal-to-slice<T> coercion at the
+// call site (already supported everywhere else a slice<T> parameter is used), copied one
+// element at a time into a fresh, independent List<T>.
+pub List<T> newListFrom<T>(slice<T> elements)
+{
+    list = newList<T>()
+    for value in elements
+    {
+        list.push(value)
+    }
+    return list
+}
+
 struct Stack<T>
 {
-    items: List<T>
-}
+    List<T> items
 
-pub newStack<T>() -> Stack<T>
-{
-    return Stack<T> { items: collections.newList<T>() }
-}
-
-impl<T> Stack<T>
-{
-    push(self, value: T)
+    void push(self, T value)
     {
         self.items.push(value)
     }
 
-    pop(self) -> T
+    T pop(self)
     {
         return self.items.pop()
     }
 
-    peek(self) -> T
+    T peek(self)
     {
         return self.items.get(self.items.length - 1)
     }
 
-    length(self) -> i32
+    i32 length(self)
     {
         return self.items.length
     }
 }
 
+pub Stack<T> newStack<T>()
+{
+    return Stack<T> { items: collections.newList<T>() }
+}
+
 struct Deque<T>
 {
-    length: i32
-    start: i32
-    data: *T
-}
+    i32 length
+    i32 start
+    *T data
 
-pub newDeque<T>() -> Deque<T>
-{
-    raw = malloc(0 as i64 * sizeof<T>())
-    data = unsafe { raw as *T }
-    return Deque<T> { length: 0, start: 0, data: data }
-}
-
-impl<T> Deque<T>
-{
-    push_back(self, value: T)
+    void push_back(self, T value)
     {
         newLength = self.length + 1
         raw = malloc(newLength as i64 * sizeof<T>())
@@ -164,7 +148,7 @@ impl<T> Deque<T>
         self.length = newLength
     }
 
-    push_front(self, value: T)
+    void push_front(self, T value)
     {
         newLength = self.length + 1
         raw = malloc(newLength as i64 * sizeof<T>())
@@ -184,7 +168,7 @@ impl<T> Deque<T>
         self.length = newLength
     }
 
-    pop_front(self) -> T
+    T pop_front(self)
     {
         value = unsafe { *(self.data + self.start) }
         self.start = self.start + 1
@@ -192,7 +176,7 @@ impl<T> Deque<T>
         return value
     }
 
-    pop_back(self) -> T
+    T pop_back(self)
     {
         lastIndex = self.start + self.length - 1
         value = unsafe { *(self.data + lastIndex) }
@@ -200,58 +184,54 @@ impl<T> Deque<T>
         return value
     }
 
-    get(self, index: i32) -> T
+    T get(self, i32 index)
     {
         return unsafe { *(self.data + (self.start + index)) }
     }
 
-    set(self, index: i32, value: T)
+    void set(self, i32 index, T value)
     {
         unsafe { *(self.data + (self.start + index)) = value }
     }
 }
 
+pub Deque<T> newDeque<T>()
+{
+    raw = malloc(0 as i64 * sizeof<T>())
+    data = unsafe { raw as *T }
+    return Deque<T> { length: 0, start: 0, data: data }
+}
+
 struct Queue<T>
 {
-    items: Deque<T>
-}
+    Deque<T> items
 
-pub newQueue<T>() -> Queue<T>
-{
-    return Queue<T> { items: collections.newDeque<T>() }
-}
-
-impl<T> Queue<T>
-{
-    enqueue(self, value: T)
+    void enqueue(self, T value)
     {
         self.items.push_back(value)
     }
 
-    dequeue(self) -> T
+    T dequeue(self)
     {
         return self.items.pop_front()
     }
 
-    length(self) -> i32
+    i32 length(self)
     {
         return self.items.length
     }
 }
 
+pub Queue<T> newQueue<T>()
+{
+    return Queue<T> { items: collections.newDeque<T>() }
+}
+
 struct PriorityQueue<T>
 {
-    items: List<T>
-}
+    List<T> items
 
-pub newPriorityQueue<T>() -> PriorityQueue<T>
-{
-    return PriorityQueue<T> { items: collections.newList<T>() }
-}
-
-impl<T> PriorityQueue<T>
-{
-    push(self, value: T)
+    void push(self, T value)
     {
         self.items.push(value)
         i = self.items.length - 1
@@ -273,7 +253,7 @@ impl<T> PriorityQueue<T>
         }
     }
 
-    pop(self) -> T
+    T pop(self)
     {
         top = self.items.get(0)
         lastValue = self.items.pop()
@@ -304,39 +284,36 @@ impl<T> PriorityQueue<T>
         return top
     }
 
-    peek(self) -> T
+    T peek(self)
     {
         return self.items.get(0)
     }
 
-    length(self) -> i32
+    i32 length(self)
     {
         return self.items.length
     }
 }
 
+pub PriorityQueue<T> newPriorityQueue<T>()
+{
+    return PriorityQueue<T> { items: collections.newList<T>() }
+}
+
 struct Node<T>
 {
-    value: T
-    prev: *Node<T>
-    next: *Node<T>
+    T value
+    *Node<T> prev
+    *Node<T> next
 }
 
 struct LinkedList<T>
 {
-    length: i32
-    head: *Node<T>
-    tail: *Node<T>
-}
+    i32 length
+    *Node<T> head
+    *Node<T> tail
 
-pub newLinkedList<T>() -> LinkedList<T>
-{
-    return LinkedList<T> { length: 0, head: null, tail: null }
-}
-
-impl<T> LinkedList<T>
-{
-    push_front(self, value: T)
+    void push_front(self, T value)
     {
         raw = malloc(sizeof<Node<T>>())
         newNode = unsafe { raw as *Node<T> }
@@ -354,7 +331,7 @@ impl<T> LinkedList<T>
         self.length = self.length + 1
     }
 
-    push_back(self, value: T)
+    void push_back(self, T value)
     {
         raw = malloc(sizeof<Node<T>>())
         newNode = unsafe { raw as *Node<T> }
@@ -376,7 +353,7 @@ impl<T> LinkedList<T>
     // collection's own longstanding documented UB-on-empty behavior in compiled mode
     // (see docs/language/0036-linked-lists.md). The interpreter throws a clear "dereferenced a
     // null pointer" error instead, an improvement over the retired intrinsic's own identical UB.
-    pop_front(self) -> T
+    T pop_front(self)
     {
         oldHead = unsafe { *self.head }
         value = oldHead.value
@@ -395,7 +372,7 @@ impl<T> LinkedList<T>
         return value
     }
 
-    pop_back(self) -> T
+    T pop_back(self)
     {
         oldTail = unsafe { *self.tail }
         value = oldTail.value
@@ -415,42 +392,29 @@ impl<T> LinkedList<T>
     }
 }
 
+pub LinkedList<T> newLinkedList<T>()
+{
+    return LinkedList<T> { length: 0, head: null, tail: null }
+}
+
 struct MapEntry<K,V>
 {
-    key: K
-    value: V
-    next: *MapEntry<K,V>
+    K key
+    V value
+    *MapEntry<K,V> next
 }
 
 struct Map<K,V>
 {
-    length: i32
-    bucketCount: i32
-    buckets: **MapEntry<K,V>
-}
+    i32 length
+    i32 bucketCount
+    **MapEntry<K,V> buckets
 
-pub newMap<K,V>() -> Map<K,V>
-{
-    bucketCount = 8
-    raw = malloc(bucketCount as i64 * sizeof<*MapEntry<K,V>>())
-    buckets = unsafe { raw as **MapEntry<K,V> }
-    i = 0
-    loop
-    {
-        if i >= bucketCount { break }
-        unsafe { *(buckets + i) = null }
-        i = i + 1
-    }
-    return Map<K,V> { length: 0, bucketCount: bucketCount, buckets: buckets }
-}
-
-impl<K,V> Map<K,V>
-{
     // Doubles bucketCount and relinks every existing entry into the fresh array - no entry is
     // reallocated, only relinked, and the old bucket array itself is left unfreed (matches this
     // collection's own "leak, don't free" convention, see List<T>.push's own identical choice for
     // the old data buffer it replaces).
-    resize(self)
+    void resize(self)
     {
         newBucketCount = self.bucketCount * 2
         raw = malloc(newBucketCount as i64 * sizeof<*MapEntry<K,V>>())
@@ -484,7 +448,7 @@ impl<K,V> Map<K,V>
         self.buckets = newBuckets
     }
 
-    set(self, key: K, value: V)
+    void set(self, K key, V value)
     {
         idx = hash<K>(key) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -516,7 +480,7 @@ impl<K,V> Map<K,V>
     // mode (see docs/language/0034-maps-and-sets.md). The interpreter throws a clear "dereferenced
     // a null pointer" error instead, an improvement over the retired intrinsic's own "returns an
     // unspecified zero value" compiled behavior.
-    get(self, key: K) -> V
+    V get(self, K key)
     {
         idx = hash<K>(key) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -528,7 +492,7 @@ impl<K,V> Map<K,V>
         }
     }
 
-    contains(self, key: K) -> bool
+    bool contains(self, K key)
     {
         idx = hash<K>(key) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -543,7 +507,7 @@ impl<K,V> Map<K,V>
 
     // No `free` of the unlinked entry (matches every other collection's "leak, don't free"
     // convention, and the retired intrinsic's own identical choice).
-    remove(self, key: K)
+    void remove(self, K key)
     {
         idx = hash<K>(key) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -572,24 +536,11 @@ impl<K,V> Map<K,V>
     }
 }
 
-struct SetEntry<T>
-{
-    value: T
-    next: *SetEntry<T>
-}
-
-struct Set<T>
-{
-    length: i32
-    bucketCount: i32
-    buckets: **SetEntry<T>
-}
-
-pub newSet<T>() -> Set<T>
+pub Map<K,V> newMap<K,V>()
 {
     bucketCount = 8
-    raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>())
-    buckets = unsafe { raw as **SetEntry<T> }
+    raw = malloc(bucketCount as i64 * sizeof<*MapEntry<K,V>>())
+    buckets = unsafe { raw as **MapEntry<K,V> }
     i = 0
     loop
     {
@@ -597,12 +548,22 @@ pub newSet<T>() -> Set<T>
         unsafe { *(buckets + i) = null }
         i = i + 1
     }
-    return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets }
+    return Map<K,V> { length: 0, bucketCount: bucketCount, buckets: buckets }
 }
 
-impl<T> Set<T>
+struct SetEntry<T>
 {
-    resize(self)
+    T value
+    *SetEntry<T> next
+}
+
+struct Set<T>
+{
+    i32 length
+    i32 bucketCount
+    **SetEntry<T> buckets
+
+    void resize(self)
     {
         newBucketCount = self.bucketCount * 2
         raw = malloc(newBucketCount as i64 * sizeof<*SetEntry<T>>())
@@ -636,7 +597,7 @@ impl<T> Set<T>
         self.buckets = newBuckets
     }
 
-    add(self, value: T)
+    void add(self, T value)
     {
         idx = hash<T>(value) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -659,7 +620,7 @@ impl<T> Set<T>
         }
     }
 
-    contains(self, value: T) -> bool
+    bool contains(self, T value)
     {
         idx = hash<T>(value) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -672,7 +633,7 @@ impl<T> Set<T>
         }
     }
 
-    remove(self, value: T)
+    void remove(self, T value)
     {
         idx = hash<T>(value) & (self.bucketCount - 1)
         cur = unsafe { *(self.buckets + idx) }
@@ -701,7 +662,22 @@ impl<T> Set<T>
     }
 }
 
-maxI32(a: i32, b: i32) -> i32
+pub Set<T> newSet<T>()
+{
+    bucketCount = 8
+    raw = malloc(bucketCount as i64 * sizeof<*SetEntry<T>>())
+    buckets = unsafe { raw as **SetEntry<T> }
+    i = 0
+    loop
+    {
+        if i >= bucketCount { break }
+        unsafe { *(buckets + i) = null }
+        i = i + 1
+    }
+    return Set<T> { length: 0, bucketCount: bucketCount, buckets: buckets }
+}
+
+i32 maxI32(i32 a, i32 b)
 {
     if a > b { return a }
     return b
@@ -709,25 +685,70 @@ maxI32(a: i32, b: i32) -> i32
 
 struct SortedMapNode<K,V>
 {
-    key: K
-    value: V
-    height: i32
-    left: *SortedMapNode<K,V>
-    right: *SortedMapNode<K,V>
+    K key
+    V value
+    i32 height
+    *SortedMapNode<K,V> left
+    *SortedMapNode<K,V> right
 }
 
 struct SortedMap<K,V>
 {
-    length: i32
-    root: *SortedMapNode<K,V>
+    i32 length
+    *SortedMapNode<K,V> root
+
+    void set(self, K key, V value)
+    {
+        result = sortedMapInsertNode<K,V>(self.root, key, value)
+        self.root = result.node
+        if result.wasNew { self.length = self.length + 1 }
+    }
+
+    // No bounds check on a missing key (dereferences a null node pointer once the search runs off
+    // a leaf) - matches Map<K,V>.get's own identical "2026 Update" precedent: interpreter throws a
+    // clear "dereferenced a null pointer" error, compiled mode is genuine UB (was an unspecified
+    // sentinel before).
+    V get(self, K key)
+    {
+        cur = self.root
+        loop
+        {
+            curNode = unsafe { *cur }
+            if key < curNode.key { cur = curNode.left }
+            else if curNode.key < key { cur = curNode.right }
+            else { return curNode.value }
+        }
+    }
+
+    bool contains(self, K key)
+    {
+        cur = self.root
+        loop
+        {
+            if cur == null { return false }
+            curNode = unsafe { *cur }
+            if key < curNode.key { cur = curNode.left }
+            else if curNode.key < key { cur = curNode.right }
+            else { return true }
+        }
+    }
+
+    // No `free` of the unlinked node (matches every other collection's "leak, don't free"
+    // convention, and the retired intrinsic's own identical choice).
+    void remove(self, K key)
+    {
+        result = sortedMapRemoveNode<K,V>(self.root, key)
+        self.root = result.node
+        if result.wasRemoved { self.length = self.length - 1 }
+    }
 }
 
-pub newSortedMap<K,V>() -> SortedMap<K,V>
+pub SortedMap<K,V> newSortedMap<K,V>()
 {
     return SortedMap<K,V> { length: 0, root: null }
 }
 
-sortedMapNodeHeight<K,V>(node: *SortedMapNode<K,V>) -> i32
+i32 sortedMapNodeHeight<K,V>(*SortedMapNode<K,V> node)
 {
     if node == null { return 0 }
     return unsafe { *node }.height
@@ -735,7 +756,7 @@ sortedMapNodeHeight<K,V>(node: *SortedMapNode<K,V>) -> i32
 
 // Classic single right rotation: y is the unbalanced node, x = y.left becomes the new subtree
 // root.
-sortedMapRotateRight<K,V>(y: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+*SortedMapNode<K,V> sortedMapRotateRight<K,V>(*SortedMapNode<K,V> y)
 {
     yNode = unsafe { *y }
     x = yNode.left
@@ -750,7 +771,7 @@ sortedMapRotateRight<K,V>(y: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
 
 // Mirror image of sortedMapRotateRight above: x is the unbalanced node, y = x.right becomes the
 // new subtree root.
-sortedMapRotateLeft<K,V>(x: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+*SortedMapNode<K,V> sortedMapRotateLeft<K,V>(*SortedMapNode<K,V> x)
 {
     xNode = unsafe { *x }
     y = xNode.right
@@ -765,11 +786,11 @@ sortedMapRotateLeft<K,V>(x: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
 
 struct SortedMapInsertResult<K,V>
 {
-    node: *SortedMapNode<K,V>
-    wasNew: bool
+    *SortedMapNode<K,V> node
+    bool wasNew
 }
 
-sortedMapInsertNode<K,V>(node: *SortedMapNode<K,V>, key: K, value: V) -> SortedMapInsertResult<K,V>
+SortedMapInsertResult<K,V> sortedMapInsertNode<K,V>(*SortedMapNode<K,V> node, K key, V value)
 {
     if node == null
     {
@@ -834,7 +855,7 @@ sortedMapInsertNode<K,V>(node: *SortedMapNode<K,V>, key: K, value: V) -> SortedM
 // Iterative descent to the leftmost (smallest-key) node of a subtree - only ever called with a
 // non-null argument (sortedMapRemoveNode's own two-children case, on a subtree it already knows
 // is non-empty).
-sortedMapMinValueNode<K,V>(node: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
+*SortedMapNode<K,V> sortedMapMinValueNode<K,V>(*SortedMapNode<K,V> node)
 {
     cur = node
     loop
@@ -848,8 +869,8 @@ sortedMapMinValueNode<K,V>(node: *SortedMapNode<K,V>) -> *SortedMapNode<K,V>
 
 struct SortedMapRemoveResult<K,V>
 {
-    node: *SortedMapNode<K,V>
-    wasRemoved: bool
+    *SortedMapNode<K,V> node
+    bool wasRemoved
 }
 
 // Recursive AVL delete: descends by key; on the found node, splices it out (0 or 1 child) or
@@ -857,7 +878,7 @@ struct SortedMapRemoveResult<K,V>
 // the right subtree instead (2 children) - then rebalances on the way back up, the same shape
 // sortedMapInsertNode's own rebalance uses but checking the *child's own* balance rather than
 // comparing against a just-inserted key, since deletion has no such key to compare against.
-sortedMapRemoveNode<K,V>(node: *SortedMapNode<K,V>, key: K) -> SortedMapRemoveResult<K,V>
+SortedMapRemoveResult<K,V> sortedMapRemoveNode<K,V>(*SortedMapNode<K,V> node, K key)
 {
     if node == null
     {
@@ -929,32 +950,27 @@ sortedMapRemoveNode<K,V>(node: *SortedMapNode<K,V>, key: K) -> SortedMapRemoveRe
     return SortedMapRemoveResult<K,V> { node: node, wasRemoved: wasRemoved }
 }
 
-impl<K,V> SortedMap<K,V>
+struct SortedSetNode<T>
 {
-    set(self, key: K, value: V)
+    T key
+    i32 height
+    *SortedSetNode<T> left
+    *SortedSetNode<T> right
+}
+
+struct SortedSet<T>
+{
+    i32 length
+    *SortedSetNode<T> root
+
+    void add(self, T key)
     {
-        result = sortedMapInsertNode<K,V>(self.root, key, value)
+        result = sortedSetInsertNode<T>(self.root, key)
         self.root = result.node
         if result.wasNew { self.length = self.length + 1 }
     }
 
-    // No bounds check on a missing key (dereferences a null node pointer once the search runs off
-    // a leaf) - matches Map<K,V>.get's own identical "2026 Update" precedent: interpreter throws a
-    // clear "dereferenced a null pointer" error, compiled mode is genuine UB (was an unspecified
-    // sentinel before).
-    get(self, key: K) -> V
-    {
-        cur = self.root
-        loop
-        {
-            curNode = unsafe { *cur }
-            if key < curNode.key { cur = curNode.left }
-            else if curNode.key < key { cur = curNode.right }
-            else { return curNode.value }
-        }
-    }
-
-    contains(self, key: K) -> bool
+    bool contains(self, T key)
     {
         cur = self.root
         loop
@@ -969,34 +985,20 @@ impl<K,V> SortedMap<K,V>
 
     // No `free` of the unlinked node (matches every other collection's "leak, don't free"
     // convention, and the retired intrinsic's own identical choice).
-    remove(self, key: K)
+    void remove(self, T key)
     {
-        result = sortedMapRemoveNode<K,V>(self.root, key)
+        result = sortedSetRemoveNode<T>(self.root, key)
         self.root = result.node
         if result.wasRemoved { self.length = self.length - 1 }
     }
 }
 
-struct SortedSetNode<T>
-{
-    key: T
-    height: i32
-    left: *SortedSetNode<T>
-    right: *SortedSetNode<T>
-}
-
-struct SortedSet<T>
-{
-    length: i32
-    root: *SortedSetNode<T>
-}
-
-pub newSortedSet<T>() -> SortedSet<T>
+pub SortedSet<T> newSortedSet<T>()
 {
     return SortedSet<T> { length: 0, root: null }
 }
 
-sortedSetNodeHeight<T>(node: *SortedSetNode<T>) -> i32
+i32 sortedSetNodeHeight<T>(*SortedSetNode<T> node)
 {
     if node == null { return 0 }
     return unsafe { *node }.height
@@ -1004,7 +1006,7 @@ sortedSetNodeHeight<T>(node: *SortedSetNode<T>) -> i32
 
 // Classic single right rotation: y is the unbalanced node, x = y.left becomes the new subtree
 // root.
-sortedSetRotateRight<T>(y: *SortedSetNode<T>) -> *SortedSetNode<T>
+*SortedSetNode<T> sortedSetRotateRight<T>(*SortedSetNode<T> y)
 {
     yNode = unsafe { *y }
     x = yNode.left
@@ -1019,7 +1021,7 @@ sortedSetRotateRight<T>(y: *SortedSetNode<T>) -> *SortedSetNode<T>
 
 // Mirror image of sortedSetRotateRight above: x is the unbalanced node, y = x.right becomes the
 // new subtree root.
-sortedSetRotateLeft<T>(x: *SortedSetNode<T>) -> *SortedSetNode<T>
+*SortedSetNode<T> sortedSetRotateLeft<T>(*SortedSetNode<T> x)
 {
     xNode = unsafe { *x }
     y = xNode.right
@@ -1034,13 +1036,13 @@ sortedSetRotateLeft<T>(x: *SortedSetNode<T>) -> *SortedSetNode<T>
 
 struct SortedSetInsertResult<T>
 {
-    node: *SortedSetNode<T>
-    wasNew: bool
+    *SortedSetNode<T> node
+    bool wasNew
 }
 
 // `insertNode`'s "already present" base case needs no update step (a set has no value to update)
 // - it just reports "not new" and returns the node unchanged.
-sortedSetInsertNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetInsertResult<T>
+SortedSetInsertResult<T> sortedSetInsertNode<T>(*SortedSetNode<T> node, T key)
 {
     if node == null
     {
@@ -1104,7 +1106,7 @@ sortedSetInsertNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetInsertResult
 // Iterative descent to the leftmost (smallest-key) node of a subtree - only ever called with a
 // non-null argument (sortedSetRemoveNode's own two-children case, on a subtree it already knows
 // is non-empty).
-sortedSetMinValueNode<T>(node: *SortedSetNode<T>) -> *SortedSetNode<T>
+*SortedSetNode<T> sortedSetMinValueNode<T>(*SortedSetNode<T> node)
 {
     cur = node
     loop
@@ -1118,8 +1120,8 @@ sortedSetMinValueNode<T>(node: *SortedSetNode<T>) -> *SortedSetNode<T>
 
 struct SortedSetRemoveResult<T>
 {
-    node: *SortedSetNode<T>
-    wasRemoved: bool
+    *SortedSetNode<T> node
+    bool wasRemoved
 }
 
 // Recursive AVL delete: descends by key; on the found node, splices it out (0 or 1 child) or
@@ -1127,7 +1129,7 @@ struct SortedSetRemoveResult<T>
 // from the right subtree instead (2 children) - then rebalances on the way back up, the same
 // shape sortedSetInsertNode's own rebalance uses but checking the *child's own* balance rather
 // than comparing against a just-inserted key, since deletion has no such key to compare against.
-sortedSetRemoveNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetRemoveResult<T>
+SortedSetRemoveResult<T> sortedSetRemoveNode<T>(*SortedSetNode<T> node, T key)
 {
     if node == null
     {
@@ -1196,36 +1198,4 @@ sortedSetRemoveNode<T>(node: *SortedSetNode<T>, key: T) -> SortedSetRemoveResult
     }
 
     return SortedSetRemoveResult<T> { node: node, wasRemoved: wasRemoved }
-}
-
-impl<T> SortedSet<T>
-{
-    add(self, key: T)
-    {
-        result = sortedSetInsertNode<T>(self.root, key)
-        self.root = result.node
-        if result.wasNew { self.length = self.length + 1 }
-    }
-
-    contains(self, key: T) -> bool
-    {
-        cur = self.root
-        loop
-        {
-            if cur == null { return false }
-            curNode = unsafe { *cur }
-            if key < curNode.key { cur = curNode.left }
-            else if curNode.key < key { cur = curNode.right }
-            else { return true }
-        }
-    }
-
-    // No `free` of the unlinked node (matches every other collection's "leak, don't free"
-    // convention, and the retired intrinsic's own identical choice).
-    remove(self, key: T)
-    {
-        result = sortedSetRemoveNode<T>(self.root, key)
-        self.root = result.node
-        if result.wasRemoved { self.length = self.length - 1 }
-    }
 }

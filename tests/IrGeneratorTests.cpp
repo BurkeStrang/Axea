@@ -129,8 +129,9 @@ namespace
 
 TEST("IrGenerator lowers arithmetic and a call with correctly wired registers")
 {
-    auto program = generateIr("square(x: i32) -> i32 { return x * x } "
-                              "add(a: i32, b: i32) -> i32 { return square(a) + b }");
+    auto program = generateIr(R"AXEA(i32 square(i32 x)
+{ return x * x } i32 add(i32 a, i32 b)
+{ return square(a) + b })AXEA");
     const auto& add = functionNamed(program, "add");
 
     const IrCall* call = nullptr;
@@ -169,7 +170,8 @@ TEST("IrGenerator lowers if/else into one Branch with two populated instruction 
     // return wraps the whole if-expression (not pushed into each branch) so
     // this still exercises Branch producing populated then/else values,
     // exactly as before explicit return was required.
-    auto program = generateIr("pick(flag: bool) -> i32 { return if flag { 1 } else { 2 } }");
+    auto program = generateIr(R"AXEA(i32 pick(bool flag)
+{ return if flag { 1 } else { 2 } })AXEA");
     const auto& pick = functionNamed(program, "pick");
 
     const IrBranch* branch = nullptr;
@@ -200,7 +202,8 @@ TEST("IrGenerator lowers if/else into one Branch with two populated instruction 
 
 TEST("IrGenerator desugars ++ on a name into const+binop and rebinds the name")
 {
-    auto program = generateIr("bump(n: i32) -> i32 { n++  return n }");
+    auto program = generateIr(R"AXEA(i32 bump(i32 n)
+{ n++  return n })AXEA");
     const auto& bump = functionNamed(program, "bump");
 
     const IrConstInt* deltaConst = nullptr;
@@ -233,8 +236,11 @@ TEST("IrGenerator desugars ++ on a name into const+binop and rebinds the name")
 
 TEST("IrGenerator desugars ++ on a field target into get/const/binop/set")
 {
-    auto program = generateIr("struct Point { x: i32 } "
-                              "bump(p: Point) -> i32 { p.x++  return p.x }");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+} i32 bump(Point p)
+{ p.x++  return p.x })AXEA");
     const auto& bump = functionNamed(program, "bump");
 
     std::vector<const IrFieldGet*> gets;
@@ -261,9 +267,12 @@ TEST("IrGenerator desugars ++ on a field target into get/const/binop/set")
 
 TEST("IrGenerator emits BorrowRead for a read parameter and Move for a take parameter")
 {
-    auto program = generateIr("struct User { name: str } "
-                              "peek(user: User) -> str { return user.name } "
-                              "absorb(take user: User) -> str { return user.name }");
+    auto program = generateIr(R"AXEA(struct User
+{
+    str name
+} str peek(User user)
+{ return user.name } str absorb(take User user)
+{ return user.name })AXEA");
     const auto& peek = functionNamed(program, "peek");
     const auto& absorb = functionNamed(program, "absorb");
 
@@ -291,8 +300,11 @@ TEST("IrGenerator emits BorrowRead for a read parameter and Move for a take para
 
 TEST("IrGenerator emits BorrowWrite for a write parameter")
 {
-    auto program = generateIr("struct Point { x: i32 } "
-                              "bump(p: Point) -> i32 { p.x++  return p.x }");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+} i32 bump(Point p)
+{ p.x++  return p.x })AXEA");
     const auto& bump = functionNamed(program, "bump");
 
     bool sawBorrowWrite = false;
@@ -309,11 +321,12 @@ TEST("IrGenerator emits BorrowWrite for a write parameter")
 
 TEST("IrGenerator drops a struct-typed local at its block's end")
 {
-    auto program = generateIr("struct Point { x: i32  y: i32 } "
-                              "sum_point(x: i32, y: i32) -> i32 { "
-                              "  p = Point { x: x  y: y } "
-                              "  return p.x + p.y "
-                              "}");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} i32 sum_point(i32 x, i32 y)
+{   p = Point { x: x  y: y }   return p.x + p.y })AXEA");
     const auto& fn = functionNamed(program, "sum_point");
 
     const IrStructNew* structNew = nullptr;
@@ -337,8 +350,11 @@ TEST("IrGenerator drops a struct-typed local at its block's end")
 
 TEST("IrGenerator drops an owned (take) struct parameter at function exit")
 {
-    auto program = generateIr("struct Packet { id: i32 } "
-                              "absorb(take packet: Packet) -> i32 { return packet.id }");
+    auto program = generateIr(R"AXEA(struct Packet
+{
+    i32 id
+} i32 absorb(take Packet packet)
+{ return packet.id })AXEA");
     const auto& fn = functionNamed(program, "absorb");
 
     bool sawDrop = false;
@@ -365,10 +381,8 @@ TEST("IrGenerator merges a name mutated inside an if-branch into a real phi-back
     // original parameter register 0) and reassign `n`'s own IrScope binding
     // to that entry's destReg, so `return n` reads the merged register, not
     // register 0 directly.
-    auto program = generateIr("f(n: i32, flag: bool) -> i32 { "
-                              "  if flag { n++ } "
-                              "  return n "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f(i32 n, bool flag)
+{   if flag { n++ }   return n })AXEA");
     const auto& fn = functionNamed(program, "f");
 
     const IrBranch* branch = nullptr;
@@ -405,9 +419,8 @@ TEST("IrGenerator lets a name mutated inside an if-branch persist for the rest o
 {
     // return wraps the whole if-expression (this test is specifically about
     // Branch's thenValue/elseValue, not branch-level early return).
-    auto program = generateIr("f(n: i32, flag: bool) -> i32 { "
-                              "  return if flag { n++  n } else { n } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f(i32 n, bool flag)
+{   return if flag { n++  n } else { n } })AXEA");
     const auto& fn = functionNamed(program, "f");
 
     const IrBranch* branch = nullptr;
@@ -443,7 +456,8 @@ TEST("IrGenerator lowers a function whose entire body is an if/else where both b
     // must not append its synthetic final Return after a Branch that's
     // already fully covered by explicit returns on both sides.
     auto program =
-        generateIr("sign(x: i32) -> i32 { if x < 0 { return 0 - 1 } else { return 1 } }");
+        generateIr(R"AXEA(i32 sign(i32 x)
+{ if x < 0 { return 0 - 1 } else { return 1 } })AXEA");
     const auto& sign = functionNamed(program, "sign");
 
     int returnCount = 0;
@@ -480,11 +494,8 @@ TEST("IrGenerator lowers a function whose entire body is an if/else where both b
 
 TEST("IrGenerator lowers a while loop with a conditionBlock and detects carried variables")
 {
-    auto program = generateIr("sumTo(limit: i32) -> i32 { "
-                              "  n = 0  total = 0 "
-                              "  while n < limit { n = n + 1  total = total + n } "
-                              "  return total "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 sumTo(i32 limit)
+{   n = 0  total = 0   while n < limit { n = n + 1  total = total + n }   return total })AXEA");
     const auto& sumTo = functionNamed(program, "sumTo");
 
     const IrLoop* loop = nullptr;
@@ -503,7 +514,8 @@ TEST("IrGenerator lowers a while loop with a conditionBlock and detects carried 
 
 TEST("IrGenerator lowers an infinite loop with no conditionBlock")
 {
-    auto program = generateIr("f() -> i32 { return loop { break 1 } }");
+    auto program = generateIr(R"AXEA(i32 f()
+{ return loop { break 1 } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     const IrLoop* loop = nullptr;
@@ -522,14 +534,8 @@ TEST("IrGenerator lowers an infinite loop with no conditionBlock")
 
 TEST("IrGenerator records a continue's own carried snapshot, distinct from the loop's own")
 {
-    auto program = generateIr("f() { "
-                              "  n = 0 "
-                              "  while n < 10 { "
-                              "    n = n + 1 "
-                              "    if n == 3 { continue } "
-                              "    n = n + 100 "
-                              "  } "
-                              "}");
+    auto program = generateIr(R"AXEA(void f()
+{   n = 0   while n < 10 {     n = n + 1     if n == 3 { continue }     n = n + 100   } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     const IrLoop* loop = nullptr;
@@ -565,13 +571,8 @@ TEST("IrGenerator records a continue's own carried snapshot, distinct from the l
 
 TEST("IrGenerator records a break's own carried snapshot")
 {
-    auto program = generateIr("f() -> i32 { "
-                              "  n = 0 "
-                              "  return loop { "
-                              "    n = n + 1 "
-                              "    if n > 3 { break n } "
-                              "  } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f()
+{   n = 0   return loop {     n = n + 1     if n > 3 { break n }   } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     const IrLoop* loop = nullptr;
@@ -606,7 +607,8 @@ TEST("IrGenerator records a break's own carried snapshot")
 TEST("IrGenerator lowers .join(separator) into an IrJoin with object/separator wired to the "
      "right registers - see docs/language/0050-collection-join-and-slicing.md")
 {
-    auto program = generateIr("f() -> String { numbers = [1, 2, 3] return numbers.join(\",\") }");
+    auto program = generateIr(R"AXEA(String f()
+{ numbers = [1, 2, 3] return numbers.join(",") })AXEA");
     const auto& f = functionNamed(program, "f");
 
     const IrJoin* join = nullptr;
@@ -632,13 +634,11 @@ TEST("IrGenerator's closure trampoline emits a real IrBorrowRead (not the pre-ex
      "checkFunction's own early-return check), so a closure nested inside an i32-returning "
      "function would never actually get analyzed either.")
 {
-    auto program = generateIr("struct Point { x: i32 } "
-                              "run() -> Point { "
-                              "  get: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x } "
-                              "  n = get(Point { x: 5 }) "
-                              "  return Point { x: n } "
-                              "} "
-                              "y = run()");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+} Point run()
+{   get: fn(Point) -> i32 = fn(p: Point) -> i32 { return p.x }   n = get(Point { x: 5 })   return Point { x: n } } y = run())AXEA");
     const auto& trampoline = functionNamed(program, "closure$0");
 
     // Two params in the trampoline's own IR: __captures (always IrBorrowRead - see
@@ -670,15 +670,11 @@ TEST("IrGenerator's closure trampoline still falls back to its own original unco
      "whose own return type is itself struct-like, for the same reason the read-only test just "
      "above needs it (RegionChecker skips walking a function's body at all otherwise).")
 {
-    auto program = generateIr("struct Point { x: i32 } "
-                              "run() -> Point { "
-                              "  consume: fn(Point) -> i32 = fn(take p: Point) -> i32 { "
-                              "    return p.x "
-                              "  } "
-                              "  n = consume(Point { x: 5 }) "
-                              "  return Point { x: n } "
-                              "} "
-                              "y = run()");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+} Point run()
+{   consume: fn(Point) -> i32 = fn(take p: Point) -> i32 {     return p.x   }   n = consume(Point { x: 5 })   return Point { x: n } } y = run())AXEA");
     const auto& trampoline = functionNamed(program, "closure$0");
 
     int moveCount = 0;
@@ -700,14 +696,8 @@ TEST("IrGenerator lowers a self-referential (recursive) closure's own self-call 
      "exists yet at the point the literal's own body is still being compiled (see "
      "docs/language/0067-closures.md's self-referential closures)")
 {
-    auto program = generateIr("run() -> i32 { "
-                              "  fact: fn(i32) -> i32 = fn(n: i32) -> i32 { "
-                              "    if n <= 1 { return 1 } "
-                              "    return n * fact(n - 1) "
-                              "  } "
-                              "  return fact(5) "
-                              "} "
-                              "y = run()");
+    auto program = generateIr(R"AXEA(i32 run()
+{   fact: fn(i32) -> i32 = fn(n: i32) -> i32 {     if n <= 1 { return 1 }     return n * fact(n - 1)   }   return fact(5) } y = run())AXEA");
     const auto& trampoline = functionNamed(program, "closure$0");
 
     // `if n <= 1 { return 1 }` has no explicit `else`, so the branch's own elseBlock is empty -
@@ -736,8 +726,10 @@ TEST("IrGenerator lowers a self-referential (recursive) closure's own self-call 
 TEST("IrGenerator registers a monomorphized generic struct instantiation under its mangled name, "
      "with correctly substituted field types")
 {
-    auto program = generateIr("struct Box<T> { value: T } "
-                              "b = Box<i32> { value: 5 }");
+    auto program = generateIr(R"AXEA(struct Box<T>
+{
+    T value
+} b = Box<i32> { value: 5 })AXEA");
 
     const auto it = program.structs.find("Box$i32");
     EXPECT_TRUE(it != program.structs.end());
@@ -748,7 +740,8 @@ TEST("IrGenerator registers a monomorphized generic struct instantiation under i
 
 TEST("IrGenerator lowers '*ptr' to an IrDeref instruction")
 {
-    auto program = generateIr("f(ptr: *i32) -> i32 { unsafe { return *ptr } }");
+    auto program = generateIr(R"AXEA(i32 f(*i32 ptr)
+{ unsafe { return *ptr } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     bool foundDeref = false;
@@ -764,7 +757,8 @@ TEST("IrGenerator lowers '*ptr' to an IrDeref instruction")
 
 TEST("IrGenerator lowers '*ptr = v' to an IrDerefAssign instruction")
 {
-    auto program = generateIr("f(ptr: *i32) { unsafe { *ptr = 5 } }");
+    auto program = generateIr(R"AXEA(void f(*i32 ptr)
+{ unsafe { *ptr = 5 } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     bool foundDerefAssign = false;
@@ -781,7 +775,8 @@ TEST("IrGenerator lowers '*ptr = v' to an IrDerefAssign instruction")
 TEST("IrGenerator lowers 'ptr + 1' to a plain IrBinOp - the pointer-vs-arithmetic decision is "
      "made entirely at the LlvmIrEmitter layer, not here")
 {
-    auto program = generateIr("f(ptr: *i32) -> *i32 { unsafe { return ptr + 1 } }");
+    auto program = generateIr(R"AXEA(*i32 f(*i32 ptr)
+{ unsafe { return ptr + 1 } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     bool foundBinOp = false;
@@ -814,11 +809,8 @@ namespace
 
 TEST("IrGenerator lowers '&x' at a local's own definition to an IrAlloca")
 {
-    auto program = generateIr("f() -> i32 { "
-                              "  x = 5 "
-                              "  p = &x "
-                              "  return unsafe { *p } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f()
+{   x = 5   p = &x   return unsafe { *p } })AXEA");
     const auto& f = functionNamed(program, "f");
     EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(1));
 }
@@ -826,10 +818,8 @@ TEST("IrGenerator lowers '&x' at a local's own definition to an IrAlloca")
 TEST("IrGenerator produces no IrAlloca anywhere for a local whose address is never taken - "
      "regression guard against the escape analysis over-firing")
 {
-    auto program = generateIr("f() -> i32 { "
-                              "  x = 5 "
-                              "  return x "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f()
+{   x = 5   return x })AXEA");
     const auto& f = functionNamed(program, "f");
     EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(0));
 }
@@ -837,12 +827,8 @@ TEST("IrGenerator produces no IrAlloca anywhere for a local whose address is nev
 TEST("IrGenerator lowers '*(&x)' and '(*&x)=v' to IrDeref/IrDerefAssign off the alloca's own dest "
      "register, not a dedicated load/store instruction")
 {
-    auto program = generateIr("f() -> i32 { "
-                              "  x = 5 "
-                              "  p = &x "
-                              "  unsafe { *p = 9 } "
-                              "  return unsafe { *p } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f()
+{   x = 5   p = &x   unsafe { *p = 9 }   return unsafe { *p } })AXEA");
     const auto& f = functionNamed(program, "f");
 
     int allocaDest = -1;
@@ -876,10 +862,8 @@ TEST("IrGenerator lowers '*(&x)' and '(*&x)=v' to IrDeref/IrDerefAssign off the 
 
 TEST("IrGenerator emits an IrAlloca for a parameter whose address is taken, right after entry")
 {
-    auto program = generateIr("f(x: i32) -> i32 { "
-                              "  p = &x "
-                              "  return unsafe { *p } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f(i32 x)
+{   p = &x   return unsafe { *p } })AXEA");
     const auto& f = functionNamed(program, "f");
     EXPECT_EQ(countAllocas(f.body), static_cast<std::size_t>(1));
 }
@@ -887,16 +871,8 @@ TEST("IrGenerator emits an IrAlloca for a parameter whose address is taken, righ
 TEST("IrGenerator emits exactly one IrAlloca (not one per iteration) for a name reassigned "
      "inside a loop after its address was taken outside it")
 {
-    auto program = generateIr("f() -> i32 { "
-                              "  n = 0 "
-                              "  p = &n "
-                              "  i = 0 "
-                              "  while i < 3 { "
-                              "    n = n + 1 "
-                              "    i = i + 1 "
-                              "  } "
-                              "  return unsafe { *p } "
-                              "}");
+    auto program = generateIr(R"AXEA(i32 f()
+{   n = 0   p = &n   i = 0   while i < 3 {     n = n + 1     i = i + 1   }   return unsafe { *p } })AXEA");
     const auto& f = functionNamed(program, "f");
     // Only `n` is ever address-taken (via `p = &n`) - `i` never is - so exactly one alloca is
     // expected. This is a static, compile-time count regardless of how many times the loop
@@ -931,9 +907,15 @@ TEST("IrGenerator emits an IrAlloca for a top-level 'p = &x' - the top-level top
 TEST("IrGenerator lowers an inherent (no-trait) struct method call to an ordinary IrCall to "
      "the mangled 'TypeName.method' name, with the receiver prepended as the first argument")
 {
-    auto program = generateIr("struct Point { x: i32  y: i32 } "
-                              "impl Point { sum(self) -> i32 { return self.x + self.y } } "
-                              "run() -> i32 { p = Point { x: 1, y: 2 } return p.sum() }");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+
+    i32 sum(self)
+    { return self.x + self.y }
+} i32 run()
+{ p = Point { x: 1, y: 2 } return p.sum() })AXEA");
     const auto& run = functionNamed(program, "run");
 
     const IrCall* methodCall = nullptr;
@@ -950,8 +932,12 @@ TEST("IrGenerator lowers an inherent (no-trait) struct method call to an ordinar
 
 TEST("IrGenerator lowers sizeof<T>() to an IrSizeOf instruction")
 {
-    auto program = generateIr("struct Point { x: i32  y: i32 } "
-                              "run() -> i64 { return sizeof<Point>() }");
+    auto program = generateIr(R"AXEA(struct Point
+{
+    i32 x
+    i32 y
+} i64 run()
+{ return sizeof<Point>() })AXEA");
     const auto& run = functionNamed(program, "run");
 
     const IrSizeOf* sizeOf = nullptr;
@@ -969,8 +955,9 @@ TEST("IrGenerator lowers sizeof<T>() to an IrSizeOf instruction")
 TEST("IrGenerator lowers a generic top-level function call to an ordinary IrCall to the "
      "mangled name")
 {
-    auto program = generateIr("identity<T>(x: T) -> T { return x } "
-                              "run() -> i32 { return identity<i32>(42) }");
+    auto program = generateIr(R"AXEA(T identity<T>(T x)
+{ return x } i32 run()
+{ return identity<i32>(42) })AXEA");
     const auto& run = functionNamed(program, "run");
 
     const IrCall* call = nullptr;

@@ -15,7 +15,7 @@ two-variant sum type, `Ok(value)` or `Err(error)`, with a real payload on *both*
 failed.
 
 ```ax
-divide(a: i32, b: i32) -> Result<i32, str>
+Result<i32, str> divide(i32 a, i32 b)
 {
     if b == 0
     {
@@ -139,7 +139,7 @@ for free rather than needing to rediscover the same bug.
 # Worked Example
 
 ```ax
-divide(a: i32, b: i32) -> Result<i32, i32>
+Result<i32, i32> divide(i32 a, i32 b)
 {
     if b == 0
     {
@@ -148,7 +148,7 @@ divide(a: i32, b: i32) -> Result<i32, i32>
     return Ok(a / b)
 }
 
-sumTwo(a: i32, b: i32, c: i32, d: i32) -> Result<i32, i32>
+Result<i32, i32> sumTwo(i32 a, i32 b, i32 c, i32 d)
 {
     x = divide(a, b)?
     y = divide(c, d)?

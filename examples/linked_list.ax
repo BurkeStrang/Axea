@@ -1,6 +1,6 @@
 use collections
 
-build() -> LinkedList<i32>
+LinkedList<i32> build()
 {
     numbers: LinkedList<i32> = collections.newLinkedList<i32>()
     p1 = numbers.push_back(10)
@@ -9,13 +9,13 @@ build() -> LinkedList<i32>
     return numbers
 }
 
-pushBoth(numbers: LinkedList<i32>)
+void pushBoth(LinkedList<i32> numbers)
 {
     numbers.push_front(1)
     numbers.push_back(99)
 }
 
-drain(numbers: LinkedList<i32>) -> i32
+i32 drain(LinkedList<i32> numbers)
 {
     total = 0
     while numbers.length > 0

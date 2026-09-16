@@ -1,6 +1,6 @@
 use collections
 
-build() -> List<i32>
+List<i32> build()
 {
     // Unqualified TypeName<T>() construction sugar - resolves to
     // collections.newList<i32>() since exactly one used module (collections)
@@ -12,7 +12,7 @@ build() -> List<i32>
     return numbers
 }
 
-sum(numbers: List<i32>) -> i32
+i32 sum(List<i32> numbers)
 {
     total = 0
     i = 0
@@ -25,7 +25,7 @@ sum(numbers: List<i32>) -> i32
     return total
 }
 
-appendOne(numbers: List<i32>)
+void appendOne(List<i32> numbers)
 {
     p = numbers.push(99)
 }

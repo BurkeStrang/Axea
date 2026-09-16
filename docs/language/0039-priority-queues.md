@@ -18,7 +18,7 @@ remaining user of them once `Stack<T>` itself became real.
 ```ax
 struct PriorityQueue<T>
 {
-    items: List<T>
+    List<T> items
 }
 ```
 
@@ -445,7 +445,7 @@ backend's own identical choice (see Design above).
 `examples/priority_queue.ax`:
 
 ```ax
-build() -> PriorityQueue<i32>
+PriorityQueue<i32> build()
 {
     jobs = PriorityQueue<i32>()
     jobs.push(30)
@@ -454,12 +454,12 @@ build() -> PriorityQueue<i32>
     return jobs
 }
 
-pushOne(jobs: PriorityQueue<i32>)
+void pushOne(PriorityQueue<i32> jobs)
 {
     jobs.push(5)
 }
 
-drain(jobs: PriorityQueue<i32>) -> i32
+i32 drain(PriorityQueue<i32> jobs)
 {
     total = 0
     while jobs.length > 0

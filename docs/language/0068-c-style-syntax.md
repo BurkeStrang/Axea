@@ -1,6 +1,6 @@
 # C-Style Declaration Syntax: Prefix Return Types, Struct-Embedded Methods, `void`
 
-**Status:** Implemented (Phase 1 of a planned full replacement - see "Phasing" below)
+**Status:** Implemented (Phase 1 complete; Phase 2 mostly complete - see "Phasing" below)
 **Document:** `0068-c-style-syntax.md`
 
 ---
@@ -35,11 +35,38 @@ pub struct Counter
 
 **Phasing.** The intended end state is a full replacement of the old `name: Type` field syntax,
 trailing `-> Type` function syntax, and separate `impl<T> Type<T> { }` blocks - but that requires the
-new grammar to exist *before* anything can be migrated to it, and the old syntax is currently
-load-bearing in over a thousand existing unit tests, all of `std/collections.ax`, and every file
-under `examples/`. So this is explicitly **Phase 1**: the new syntax is fully supported *additively*
-- both spellings parse to the same AST and work side by side, everywhere, in the same file. Phase 2
-(migrating existing code to the new syntax) and Phase 3 (removing the old grammar for real) are
+new grammar to exist *before* anything can be migrated to it, and the old syntax was, at the time
+Phase 1 landed, load-bearing in over a thousand existing unit tests, all of `std/collections.ax`,
+every file under `examples/`, and every doc code sample. So Phase 1 added the new syntax
+*additively* - both spellings parse to the same AST and work side by side, everywhere, in the same
+file - with nothing yet migrated.
+
+**Phase 2** (migrating existing code to the new syntax) is now mostly done:
+
+- `std/collections.ax` and every file under `examples/` are written entirely in the new syntax
+  (struct fields, function headers, and impl methods folded into their struct bodies) - hand-migrated
+  and verified example-by-example (interpreted output byte-identical to `-O0`/`-O1` compiled output
+  across all 40 examples).
+- Every `docs/language/*.md` code sample that was a complete, well-formed program got migrated too -
+  via a small purpose-built converter (`migrate_axea.py`/`migrate_docs.py`, not checked into the
+  repo) that parses old-style source structurally and re-emits new-style headers/fields, copying
+  every function/method *body* byte-for-byte verbatim rather than re-printing it - for-loops
+  desugar into `while`/`break` during real parsing, so reprinting from the AST would have silently
+  replaced a doc's own `for x in arr { }` with mangled, unreadable `while true { __for0_i++ ... }`
+  code. Illustrative fragments that were never complete, parseable programs to begin with (bare
+  signatures, vision-doc pseudocode using types/sugar that were never implemented) are left
+  untouched, as intended - there's nothing real to convert there.
+- The same converter was also run across the ~1080 embedded Axea source strings in the "behavior"
+  test suites (TypeChecker/Interpreter/CapabilityChecker/RegionChecker/IrGenerator/LlvmIrEmitter/
+  ModuleLoader/GenericMonomorphizer tests), verified by the full test suite still passing
+  afterward (it did, unchanged). `ParserTests.cpp` and `LexerTests.cpp` were deliberately left
+  alone - they specifically test old-style grammar itself (e.g. a test literally titled "old-style
+  struct plus separate impl block still parses exactly as before"), so their embedded source is the
+  thing under test, not incidental.
+- `std/math.ax` and `std/io.ax` are still old-style (out of scope for this pass; nothing depends on
+  migrating them).
+
+**Phase 3** (removing the old grammar for real, once/if migration is ever judged complete enough) is
 separate, not-yet-scheduled future work.
 
 ---
@@ -193,8 +220,9 @@ already was (structs have no enforced per-declaration visibility gate at all, `p
   only ever inherit the enclosing struct's own type params, exactly like old-style `impl` methods
   already do; no new capability beyond what old-style syntax already supports.
 - **No new visibility enforcement** - see `pub` above.
-- Phase 2 (migrating `std/collections.ax`, `examples/`, and the test suite to the new syntax) and
-  Phase 3 (removing the old grammar) are both separate, not-yet-scheduled future work.
+- Phase 2 is mostly, not entirely, done (see "Phasing" above) - `std/math.ax`, `std/io.ax`, and any
+  doc code sample that was never a complete parseable program to begin with are still old-style.
+  Phase 3 (removing the old grammar) remains separate, not-yet-scheduled future work.
 
 ---
 

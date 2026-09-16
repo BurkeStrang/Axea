@@ -229,8 +229,8 @@ each of those same six sites - not a bare `"%d"`, which would misread an
 ```ax
 struct Point
 {
-    x: i64
-    y: f64
+    i64 x
+    f64 y
 }
 
 p = Point { x: 500i64, y: 2.25 }

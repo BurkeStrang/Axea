@@ -316,12 +316,12 @@ names - no double registration, no duplicated type-declaration text.
 # Worked Example
 
 ```ax
-firstDigit(s: str) -> Optional<i32>
+Optional<i32> firstDigit(str s)
 {
     return s.parse<i32>()
 }
 
-sumTwo(a: str, b: str) -> Optional<i32>
+Optional<i32> sumTwo(str a, str b)
 {
     x = a.parse<i32>()?
     y = b.parse<i32>()?

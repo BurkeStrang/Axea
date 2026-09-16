@@ -23,7 +23,7 @@ The original spec for this document was two lines:
 Axea IR is a per-function list of instructions using virtual registers (`%0`, `%1`, ...), where `if`/`else` stays a single `Branch` instruction holding two *nested* instruction lists rather than being flattened into separate labeled basic blocks joined by phi nodes:
 
 ```ax
-pick(flag: bool) -> i32
+i32 pick(bool flag)
 {
     return if flag { 1 } else { 2 }
 }
@@ -80,7 +80,8 @@ This is what makes it *Axea* IR rather than generic three-address code — every
 - **`Drop`**: a struct-typed local at the end of its own block, and an owned struct parameter at function exit. See "Known Imprecision" below for what this deliberately doesn't attempt.
 
 ```ax
-archive(take user: User) -> str { return user.name }
+str archive(take User user)
+{ return user.name }
 ```
 
 ```text
