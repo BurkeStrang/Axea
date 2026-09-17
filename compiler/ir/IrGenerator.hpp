@@ -431,6 +431,13 @@ private:
     // (dot instead of the angle brackets/generics syntax, mirroring mangleUnionTypeName's own
     // "must be a legal LLVM identifier" reasoning).
     const StructDecl& registerSharedType(const std::string& elementTypeName);
+    // `HeapArray<T>` (see docs/language/0069-heap-array.md) - same lazy/idempotent
+    // registerSharedType shape, registering a real 2-field {i32 length, T* data} StructDecl into
+    // structs_. `elementTypeName` is T's own canonical type text (unlike Shared<T>'s
+    // struct/enum-only T, unrestricted here - a primitive element is exactly as valid as a struct
+    // one). The mangled name is "HeapArray." + elementTypeName, same "must be a legal LLVM
+    // identifier" dot convention as Shared<T>'s own "Shared." + elementTypeName.
+    const StructDecl& registerHeapArrayType(const std::string& elementTypeName);
     // Best-effort resolution of an expression's own "simple" Axea type name (a primitive, or a
     // struct/enum's own name) - nullopt if it can't be determined. Used only to decide, at an
     // implicit-union-wrap boundary (assignment/return/call argument - see wrapForUnion), *which*
@@ -489,6 +496,9 @@ private:
     // Owns every synthetic Shared<T> StructDecl registerSharedType builds - same reasoning as
     // unionDecls_ above, just for structs_ instead of enums_.
     std::vector<std::unique_ptr<StructDecl>> sharedTypeDecls_;
+    // Owns every synthetic HeapArray<T> StructDecl registerHeapArrayType builds - same reasoning
+    // as sharedTypeDecls_ above.
+    std::vector<std::unique_ptr<StructDecl>> heapArrayTypeDecls_;
     std::unordered_map<std::string, const FunctionDecl*> functions_;
     // Modules (see docs/language/0066-modules.md) - bare/real extern name -> the module that
     // declared it ("" for a root-file extern). An extern's own `name` is never module-qualified

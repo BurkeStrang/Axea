@@ -2568,6 +2568,21 @@ Value Interpreter::evaluate(const Expr& expr, Environment& env)
         return instance;
     }
 
+    if (const auto* heapArrayNew = dynamic_cast<const HeapArrayNewExpr*>(&expr))
+    {
+        // `HeapArray<T>(n)` (see docs/language/0069-heap-array.md) - the exact same runtime shape
+        // a fixed `[T;N]` array literal already uses (ArrayInstance is just a std::vector<Value>,
+        // reference-counted via shared_ptr) - no new Value variant needed, and every consumer
+        // that already works for a fixed array (asIndexable's own bounds-checked get/set, .length)
+        // already works for this unchanged. The one real difference is purely at the type-checked
+        // surface: `n` is a runtime value here, not a compile-time-known constant.
+        const std::int64_t count = asInt(evaluate(*heapArrayNew->size, env));
+        auto instance = std::make_shared<ArrayInstance>();
+        instance->elements.assign(static_cast<std::size_t>(count),
+                                  defaultValueForType(heapArrayNew->elementTypeName));
+        return instance;
+    }
+
     if (const auto* stringNew = dynamic_cast<const StringNewExpr*>(&expr))
     {
         return std::make_shared<StringInstance>(

@@ -25,6 +25,7 @@ namespace
             "slice",
             "Optional",   "Shared",
             "Result",
+            "HeapArray", // see docs/language/0069-heap-array.md
         };
         return builtins.contains(name);
     }
@@ -232,6 +233,13 @@ namespace
             refs.push_back(&e->typeName);
             collectTypeRefsInExpr(*e->left, refs, callSites, moduleGenericCalls);
             collectTypeRefsInExpr(*e->right, refs, callSites, moduleGenericCalls);
+        }
+        else if (auto* e = dynamic_cast<HeapArrayNewExpr*>(&expr))
+        {
+            // `HeapArray<T>(n)` (see docs/language/0069-heap-array.md) - same shape as
+            // HashOfExpr/KeyEqExpr just above.
+            refs.push_back(&e->elementTypeName);
+            collectTypeRefsInExpr(*e->size, refs, callSites, moduleGenericCalls);
         }
         else if (auto* e = dynamic_cast<SomeExpr*>(&expr))
         {
@@ -559,6 +567,13 @@ namespace
             return std::make_unique<KeyEqExpr>(substituteTypeParams(e->typeName, subst),
                                                cloneExpr(*e->left, subst),
                                                cloneExpr(*e->right, subst));
+        }
+        if (const auto* e = dynamic_cast<const HeapArrayNewExpr*>(&expr))
+        {
+            // `HeapArray<T>(n)` (see docs/language/0069-heap-array.md) - same shape as
+            // HashOfExpr just above.
+            return std::make_unique<HeapArrayNewExpr>(
+                substituteTypeParams(e->elementTypeName, subst), cloneExpr(*e->size, subst));
         }
         if (const auto* e = dynamic_cast<const DerefExpr*>(&expr))
         {

@@ -2449,6 +2449,20 @@ std::unique_ptr<Expr> Parser::parsePrimary(bool allowStructLiteral)
             return std::make_unique<KeyEqExpr>(typeName, std::move(left), std::move(right));
         }
 
+        // `HeapArray<TypeName>(n)` (see docs/language/0069-heap-array.md) - a builtin, not a real
+        // callable function, same shape as hash<TypeName>(value)/keyEq<TypeName>(a, b) just above.
+        if (current().text == "HeapArray" && peek().kind == TokenKind::Less)
+        {
+            advance();
+            expect(TokenKind::Less, "expected '<' after 'HeapArray'");
+            const std::string elementTypeName = parseTypeName();
+            expect(TokenKind::Greater, "expected '>' after HeapArray's type argument");
+            expect(TokenKind::LeftParen, "expected '(' after 'HeapArray<Type>'");
+            auto size = parseExpression();
+            expect(TokenKind::RightParen, "expected ')' after HeapArray<Type>(...)'s argument");
+            return std::make_unique<HeapArrayNewExpr>(elementTypeName, std::move(size));
+        }
+
         // `Map<key,value>()` construction is deliberately NOT handled here anymore (see
         // docs/language/0034-maps-and-sets.md's own "2026 Update") - Map<K,V> is a real,
         // user-declared generic struct now (std/collections.ax), constructed via its own

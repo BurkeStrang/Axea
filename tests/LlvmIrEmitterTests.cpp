@@ -1949,6 +1949,62 @@ TEST("LlvmIrEmitter emits sizeof<T>() via the null-pointer-GEP + ptrtoint idiom,
     EXPECT_TRUE(ir.find("ptrtoint") != std::string::npos);
 }
 
+TEST("LlvmIrEmitter emits HeapArray<T>(n) as two mallocs (the wrapper struct, and its own "
+     "n-element data buffer) into a real %HeapArray.<T> struct type (see "
+     "docs/language/0069-heap-array.md)")
+{
+    auto ir = emitLlvmIr("a = HeapArray<i32>(5)");
+    EXPECT_TRUE(ir.find("%HeapArray.i32 = type { i32, i32* }") != std::string::npos);
+    EXPECT_TRUE(ir.find("call i8* @malloc(") != std::string::npos);
+    // The data buffer's own element-count malloc: sizeof(i32) * n, not a fixed size.
+    EXPECT_TRUE(ir.find("mul i64") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter emits a genuine runtime bounds check (compare + branch to a panic path) "
+     "before every HeapArray<T> index - the one indexable shape in this whole backend that's "
+     "actually checked at runtime, since it's the one whose size isn't statically known")
+{
+    auto ir = emitLlvmIr("i32 run() { a = HeapArray<i32>(5)  a[0] = 1  return a[0] }  x = run()");
+    EXPECT_TRUE(ir.find("icmp ult i32") != std::string::npos);
+    EXPECT_TRUE(ir.find("call void @axea.panic()") != std::string::npos);
+    EXPECT_TRUE(ir.find("unreachable") != std::string::npos);
+    EXPECT_TRUE(ir.find("declare void @exit(i32)") != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's @axea.drop.HeapArray.<T> frees both the data buffer and the wrapper "
+     "struct itself - the one field-drop case a raw *T field is never otherwise recursed into "
+     "(see emitStructRefcountHelpers's own HeapArray<T> special case)")
+{
+    auto ir = emitLlvmIr("i32 run() { a = HeapArray<i32>(5) return 0 } x = run()");
+    const auto dropPos = ir.find("define void @axea.drop.HeapArray.i32(%HeapArray.i32* %v) {");
+    EXPECT_TRUE(dropPos != std::string::npos);
+    const auto callPos = ir.find("call void @axea.drop.HeapArray.i32(", 0);
+    EXPECT_TRUE(callPos != std::string::npos && callPos != dropPos);
+    // Two frees inside the drop function's own body: the data buffer, then the wrapper itself.
+    const auto firstFree = ir.find("call void @free(", dropPos);
+    EXPECT_TRUE(firstFree != std::string::npos);
+    const auto secondFree = ir.find("call void @free(", firstFree + 1);
+    EXPECT_TRUE(secondFree != std::string::npos);
+}
+
+TEST("LlvmIrEmitter's HeapArray<T> field inside a generic struct is correctly monomorphized, "
+     "indexed, and dropped - the real end-to-end shape std/collections.ax's own List<T> uses")
+{
+    auto ir = emitLlvmIr("struct Buf<T> { "
+                         "  i32 length  HeapArray<T> data "
+                         "  void push(self, T value) { self.data[self.length] = value } "
+                         "} "
+                         "i32 run() { "
+                         "  b = Buf<i32> { length: 0, data: HeapArray<i32>(4) } "
+                         "  b.push(9) "
+                         "  return b.data[0] "
+                         "} "
+                         "x = run()");
+    EXPECT_TRUE(ir.find("%Buf$i32 = type { i32, %HeapArray.i32* }") != std::string::npos);
+    EXPECT_TRUE(ir.find("define void @Buf$i32.push(") != std::string::npos);
+    EXPECT_TRUE(ir.find("icmp ult i32") != std::string::npos);
+}
+
 TEST("LlvmIrEmitter emits a pointer-to-pointer cast as a plain bitcast")
 {
     auto ir = emitLlvmIr("extern c malloc(size: i64) -> *i32 "

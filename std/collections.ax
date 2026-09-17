@@ -3,10 +3,16 @@ module collections
 extern c malloc(size: i64) -> *i32
 extern c free(ptr: *i32)
 
+// Fully memory-safe (see docs/language/0069-heap-array.md) - `data`'s own growable buffer is a
+// `HeapArray<T>`, a single-owned, bounds-checked heap allocation the compiler allocates, indexes,
+// and automatically frees on its own; no `unsafe`, no raw `*T`, no manual `malloc`/`free` anywhere
+// in this struct at all (contrast Map<K,V>/SortedMap<K,V>/etc. further down, whose own
+// pointer-linked node graphs genuinely can't be expressed this way yet - see that document's own
+// "Known Limitations").
 struct List<T>
 {
     i32 length
-    *T data
+    HeapArray<T> data
     i32 capacity
 
     void push(self, T value)
@@ -17,53 +23,49 @@ struct List<T>
             doubled = self.capacity * 2
             newCapacity = doubled
             if needed > doubled { newCapacity = needed }
-            raw = malloc(newCapacity as i64 * sizeof<T>())
-            newData = unsafe { raw as *T }
+            newData = HeapArray<T>(newCapacity)
             i = 0
             loop
             {
                 if i >= self.length { break }
-                unsafe { *(newData + i) = *(self.data + i) }
+                newData[i] = self.data[i]
                 i = i + 1
             }
-            oldData = unsafe { self.data as *i32 }
-            free(oldData)
             self.data = newData
             self.capacity = newCapacity
         }
-        unsafe { *(self.data + self.length) = value }
+        self.data[self.length] = value
         self.length = self.length + 1
     }
 
     T pop(self)
     {
         self.length = self.length - 1
-        return unsafe { *(self.data + self.length) }
+        return self.data[self.length]
     }
 
     T get(self, i32 index)
     {
-        return unsafe { *(self.data + index) }
+        return self.data[index]
     }
 
     void set(self, i32 index, T value)
     {
-        unsafe { *(self.data + index) = value }
+        self.data[index] = value
     }
 
-    // An honest, explicit deep copy - a fresh malloc of the same capacity, every live element
-    // copied across, `self` left completely untouched. Never aliases self's own buffer: pushing
-    // to the clone (or the original) can never be observed through the other, even before
+    // An honest, explicit deep copy - a fresh HeapArray<T> of the same capacity, every live
+    // element copied across, `self` left completely untouched. Never aliases self's own buffer:
+    // pushing to the clone (or the original) can never be observed through the other, even before
     // either one's own next capacity-growing push.
     List<T> clone(self)
     {
-        raw = malloc(self.capacity as i64 * sizeof<T>())
-        newData = unsafe { raw as *T }
+        newData = HeapArray<T>(self.capacity)
         i = 0
         loop
         {
             if i >= self.length { break }
-            unsafe { *(newData + i) = *(self.data + i) }
+            newData[i] = self.data[i]
             i = i + 1
         }
         return List<T> { length: self.length, data: newData, capacity: self.capacity }
@@ -73,9 +75,7 @@ struct List<T>
 pub List<T> newList<T>()
 {
     capacity = 1
-    raw = malloc(capacity as i64 * sizeof<T>())
-    data = unsafe { raw as *T }
-    return List<T> { length: 0, data: data, capacity: capacity }
+    return List<T> { length: 0, data: HeapArray<T>(capacity), capacity: capacity }
 }
 
 // A compact way to build a List<T> already populated with an array literal's own contents
@@ -122,27 +122,28 @@ pub Stack<T> newStack<T>()
     return Stack<T> { items: collections.newList<T>() }
 }
 
+// Fully memory-safe (see docs/language/0069-heap-array.md) - same "HeapArray<T>, no unsafe/raw
+// pointers/manual malloc" story as List<T> above. Reallocates the whole buffer on every single
+// push (no amortized capacity - see push_back/push_front) rather than growing it, unchanged from
+// before this port; only the allocation itself changed, not this struct's own algorithmic shape.
 struct Deque<T>
 {
     i32 length
     i32 start
-    *T data
+    HeapArray<T> data
 
     void push_back(self, T value)
     {
         newLength = self.length + 1
-        raw = malloc(newLength as i64 * sizeof<T>())
-        newData = unsafe { raw as *T }
+        newData = HeapArray<T>(newLength)
         i = 0
         loop
         {
             if i >= self.length { break }
-            unsafe { *(newData + i) = *(self.data + (self.start + i)) }
+            newData[i] = self.data[self.start + i]
             i = i + 1
         }
-        unsafe { *(newData + self.length) = value }
-        oldData = unsafe { self.data as *i32 }
-        free(oldData)
+        newData[self.length] = value
         self.data = newData
         self.start = 0
         self.length = newLength
@@ -151,18 +152,15 @@ struct Deque<T>
     void push_front(self, T value)
     {
         newLength = self.length + 1
-        raw = malloc(newLength as i64 * sizeof<T>())
-        newData = unsafe { raw as *T }
+        newData = HeapArray<T>(newLength)
         i = 0
         loop
         {
             if i >= self.length { break }
-            unsafe { *(newData + (i + 1)) = *(self.data + (self.start + i)) }
+            newData[i + 1] = self.data[self.start + i]
             i = i + 1
         }
-        unsafe { *newData = value }
-        oldData = unsafe { self.data as *i32 }
-        free(oldData)
+        newData[0] = value
         self.data = newData
         self.start = 0
         self.length = newLength
@@ -170,7 +168,7 @@ struct Deque<T>
 
     T pop_front(self)
     {
-        value = unsafe { *(self.data + self.start) }
+        value = self.data[self.start]
         self.start = self.start + 1
         self.length = self.length - 1
         return value
@@ -179,27 +177,25 @@ struct Deque<T>
     T pop_back(self)
     {
         lastIndex = self.start + self.length - 1
-        value = unsafe { *(self.data + lastIndex) }
+        value = self.data[lastIndex]
         self.length = self.length - 1
         return value
     }
 
     T get(self, i32 index)
     {
-        return unsafe { *(self.data + (self.start + index)) }
+        return self.data[self.start + index]
     }
 
     void set(self, i32 index, T value)
     {
-        unsafe { *(self.data + (self.start + index)) = value }
+        self.data[self.start + index] = value
     }
 }
 
 pub Deque<T> newDeque<T>()
 {
-    raw = malloc(0 as i64 * sizeof<T>())
-    data = unsafe { raw as *T }
-    return Deque<T> { length: 0, start: 0, data: data }
+    return Deque<T> { length: 0, start: 0, data: HeapArray<T>(0) }
 }
 
 struct Queue<T>

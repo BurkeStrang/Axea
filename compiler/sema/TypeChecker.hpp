@@ -60,6 +60,12 @@ enum class TypeKind
     // rejected, since primitives/collections have no move-semantics story to opt out of in the
     // first place.
     Shared,
+    // `HeapArray<T>` (see docs/language/0069-heap-array.md) - a single-owned, dynamically-sized
+    // (runtime-determined element count, unlike `[T;N]`'s compile-time-known N) heap buffer.
+    // Reuses `Type::elementTypeName` for T, same single-type-parameter shape as Optional/Shared
+    // above. Unlike Shared<T>, T is unrestricted (any type, not just struct/enum) - an array of
+    // i32 is exactly as sensible as an array of structs.
+    HeapArray,
     // `Result<T,E>` (see docs/language/0063-result.md) - shares `Type`'s
     // existing `elementTypeName`/`valueTypeName` fields with Map<K,V>
     // rather than getting its own: elementTypeName is T (the Ok payload,

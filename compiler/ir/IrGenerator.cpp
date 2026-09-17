@@ -23,6 +23,20 @@ namespace
         return rawTypeString;
     }
 
+    // `HeapArray<T>` (see docs/language/0069-heap-array.md) - same reasoning/shape as
+    // mangleSharedTypeName above, mirrored for registerHeapArrayType's own "HeapArray." + T key.
+    // A no-op for anything that isn't a "HeapArray<...>" string, so the two manglers chain safely
+    // (mangleHeapArrayTypeName(mangleSharedTypeName(x)) is always exactly one real mangling, or
+    // none, never both).
+    std::string mangleHeapArrayTypeName(const std::string& rawTypeString)
+    {
+        if (rawTypeString.starts_with("HeapArray<") && rawTypeString.back() == '>')
+        {
+            return "HeapArray." + rawTypeString.substr(10, rawTypeString.size() - 11);
+        }
+        return rawTypeString;
+    }
+
     // True if every path through this straight-line instruction list is
     // guaranteed to hit a Return - either directly, or via a Branch whose
     // thenBlock and elseBlock both alwaysTerminate. Mirrors
@@ -365,6 +379,16 @@ void IrGenerator::registerStructs(const Program& program)
             registerSharedType(typeString.substr(7, typeString.size() - 8));
         }
     };
+    // `HeapArray<T>` (see docs/language/0069-heap-array.md) - same eager signature-scanning
+    // reasoning as registerSharedIfPresent above: structs_.contains("HeapArray." + T) needs to
+    // see it from a function's very first reference, before its body is ever lowered.
+    auto registerHeapArrayIfPresent = [this](const std::string& typeString)
+    {
+        if (typeString.starts_with("HeapArray<") && typeString.back() == '>')
+        {
+            registerHeapArrayType(typeString.substr(10, typeString.size() - 11));
+        }
+    };
     for (const auto& [name, function] : functions_)
     {
         for (const auto& param : function->params)
@@ -374,6 +398,7 @@ void IrGenerator::registerStructs(const Program& program)
                 registerUnionType(param.type);
             }
             registerSharedIfPresent(param.type);
+            registerHeapArrayIfPresent(param.type);
         }
         if (function->returnType && function->returnType->find('|') != std::string::npos)
         {
@@ -382,6 +407,7 @@ void IrGenerator::registerStructs(const Program& program)
         if (function->returnType)
         {
             registerSharedIfPresent(*function->returnType);
+            registerHeapArrayIfPresent(*function->returnType);
         }
     }
 }
@@ -398,7 +424,7 @@ bool IrGenerator::isObviouslyStructTyped(const Expr& expr, const FunctionDecl& f
         {
             if (param.name == name->name)
             {
-                return structs_.contains(mangleSharedTypeName(param.type));
+                return structs_.contains(mangleHeapArrayTypeName(mangleSharedTypeName(param.type)));
             }
         }
     }
@@ -605,6 +631,24 @@ const StructDecl& IrGenerator::registerSharedType(const std::string& elementType
     return *raw;
 }
 
+const StructDecl& IrGenerator::registerHeapArrayType(const std::string& elementTypeName)
+{
+    const std::string mangledName = "HeapArray." + elementTypeName;
+    if (const auto it = structs_.find(mangledName); it != structs_.end())
+    {
+        return *it->second;
+    }
+
+    std::vector<Field> fields;
+    fields.push_back(Field{"length", "i32"});
+    fields.push_back(Field{"data", "*" + elementTypeName});
+    auto decl = std::make_unique<StructDecl>(mangledName, std::move(fields));
+    const StructDecl* raw = decl.get();
+    structs_[mangledName] = raw;
+    heapArrayTypeDecls_.push_back(std::move(decl));
+    return *raw;
+}
+
 const EnumDecl& IrGenerator::registerUnionType(const std::string& canonicalName)
 {
     if (const auto it = enums_.find(canonicalName); it != enums_.end())
@@ -685,6 +729,15 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             return "Shared." + *elementType;
         }
     }
+    if (const auto* heapArrayNew = dynamic_cast<const HeapArrayNewExpr*>(&expr))
+    {
+        // HeapArray<T>(n) (see docs/language/0069-heap-array.md) - same "return the already-
+        // mangled form directly" reasoning as ShareExpr just above; elementTypeName is already a
+        // canonical type-text string straight off the AST, no further resolution needed (unlike
+        // Shared<T>'s own value-expression-derived T, which might arrive via an enum-variant
+        // shape).
+        return "HeapArray." + heapArrayNew->elementTypeName;
+    }
     if (const auto* name = dynamic_cast<const NameExpr*>(&expr))
     {
         if (function)
@@ -693,7 +746,7 @@ std::optional<std::string> IrGenerator::simpleTypeOfExpr(const Expr& expr,
             {
                 if (param.name == name->name)
                 {
-                    return mangleSharedTypeName(param.type);
+                    return mangleHeapArrayTypeName(mangleSharedTypeName(param.type));
                 }
             }
         }
@@ -905,8 +958,18 @@ void IrGenerator::retainFieldValueIfNeeded(int valueReg,
                                            Context& ctx)
 {
     (void)sourceExpr; // no longer consulted - see this function's own updated doc comment
-    if (structs_.contains(fieldAxeaType) || enums_.contains(fieldAxeaType) ||
-        fieldAxeaType.starts_with("fn("))
+    // `fieldAxeaType` is always a field/variant's own *raw* declared type text (e.g.
+    // "HeapArray<i32>"/"Shared<Counter>") - never pre-mangled the way simpleTypeOfExpr's own
+    // NameExpr case mangles a param's type - so it needs the same translation
+    // structs_.contains(...) needs everywhere else a raw declared type string is checked (see
+    // mangleHeapArrayTypeName/mangleSharedTypeName's own call sites). Without this, a HeapArray<T>
+    // or Shared<T> value moved into a struct-literal field would never get untracked from its own
+    // local scope, so it would be dropped twice - once by its own scope's exit, and once more by
+    // the new struct's own recursive field-drop (see emitStructRefcountHelpers) once that struct
+    // is later dropped.
+    const std::string mangledFieldAxeaType = mangleHeapArrayTypeName(mangleSharedTypeName(fieldAxeaType));
+    if (structs_.contains(mangledFieldAxeaType) || enums_.contains(mangledFieldAxeaType) ||
+        mangledFieldAxeaType.starts_with("fn("))
     {
         consumeTrackedRegister(ctx, valueReg);
     }
@@ -1826,6 +1889,20 @@ int IrGenerator::lowerExpr(const Expr& expr, IrScope& scope, Context& ctx)
         inst->typeName = sharedDecl.name;
         inst->fields.emplace_back("refcount", refcountReg);
         inst->fields.emplace_back("value", value);
+        return emit(ctx, std::move(inst));
+    }
+
+    if (const auto* heapArrayNew = dynamic_cast<const HeapArrayNewExpr*>(&expr))
+    {
+        // HeapArray<T>(n) (see docs/language/0069-heap-array.md) - registers the wrapper struct
+        // type (idempotent - a no-op if some earlier reference already registered it), lowers the
+        // runtime element count, and emits a single IrHeapArrayNew - LlvmIrEmitter does the actual
+        // two mallocs (the wrapper struct itself, and its own `n`-element data buffer).
+        const int sizeReg = lowerExpr(*heapArrayNew->size, scope, ctx);
+        const StructDecl& heapArrayDecl = registerHeapArrayType(heapArrayNew->elementTypeName);
+        auto inst = std::make_unique<IrHeapArrayNew>();
+        inst->typeName = heapArrayDecl.name;
+        inst->size = sizeReg;
         return emit(ctx, std::move(inst));
     }
 
@@ -2871,7 +2948,12 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
             if (assignment->declaredType &&
                 assignment->declaredType->find('|') == std::string::npos)
             {
-                resolvedType = *assignment->declaredType;
+                // A declared type is always raw, canonical text ("HeapArray<i32>"/"Shared<T>") -
+                // never pre-mangled (see mangleHeapArrayTypeName/mangleSharedTypeName's own
+                // comments) - needs the same translation every other structs_.contains(...) check
+                // on a raw declared-type string needs, or `data: HeapArray<i32> = HeapArray<i32>(n)`
+                // would silently never get drop-tracked at all.
+                resolvedType = mangleHeapArrayTypeName(mangleSharedTypeName(*assignment->declaredType));
             }
             else if (const auto resolved =
                          resolveStructOrEnumType(*assignment->value, ctx.function, scope))
@@ -3075,8 +3157,9 @@ void IrGenerator::lowerStmt(const Stmt& stmt, IrScope& scope, Context& ctx)
                               ? lowerNullExpr(declaredField->type, ctx)
                               : lowerExpr(*fieldAssign->value, scope, ctx);
         int oldValue = -1;
-        if (declaredField &&
-            (structs_.contains(declaredField->type) || enums_.contains(declaredField->type)))
+        if (declaredField && (structs_.contains(mangleHeapArrayTypeName(
+                                  mangleSharedTypeName(declaredField->type))) ||
+                              enums_.contains(declaredField->type)))
         {
             retainFieldValueIfNeeded(value, *fieldAssign->value, declaredField->type, ctx);
             auto oldFieldGet = std::make_unique<IrFieldGet>();
@@ -3409,7 +3492,7 @@ IrFunction IrGenerator::generateFunction(const FunctionDecl& function,
             auto inst = std::make_unique<IrMove>();
             inst->value = paramRegister;
             emitVoid(ctx, std::move(inst));
-            if (structs_.contains(mangleSharedTypeName(function.params[i].type)) ||
+            if (structs_.contains(mangleHeapArrayTypeName(mangleSharedTypeName(function.params[i].type))) ||
                 function.params[i].type.starts_with("fn("))
             {
                 paramStructLocals.push_back(paramRegister);
@@ -3519,7 +3602,7 @@ IrFunction IrGenerator::generateClosureTrampoline(const ClosureExpr& closureExpr
             auto inst = std::make_unique<IrMove>();
             inst->value = paramRegister;
             emitVoid(ctx, std::move(inst));
-            if (structs_.contains(mangleSharedTypeName(closureExpr.params[i].type)) ||
+            if (structs_.contains(mangleHeapArrayTypeName(mangleSharedTypeName(closureExpr.params[i].type))) ||
                 closureExpr.params[i].type.starts_with("fn("))
             {
                 paramStructLocals.push_back(paramRegister);
@@ -3849,6 +3932,19 @@ IrProgram IrGenerator::generate(
     // function bodies above, flushed here" reason unions/closure captures are flushed here rather
     // than right after registerStructs.
     for (const auto& decl : sharedTypeDecls_)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        fields.reserve(decl->fields.size());
+        for (const auto& field : decl->fields)
+        {
+            fields.emplace_back(field.name, field.type);
+        }
+        irProgram.structs[decl->name] = std::move(fields);
+    }
+
+    // HeapArray<T> (see registerHeapArrayType's own comment) - same "discovered lazily while
+    // lowering function bodies above, flushed here" reason sharedTypeDecls_ just above is.
+    for (const auto& decl : heapArrayTypeDecls_)
     {
         std::vector<std::pair<std::string, std::string>> fields;
         fields.reserve(decl->fields.size());

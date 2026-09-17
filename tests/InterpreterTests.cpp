@@ -1120,6 +1120,53 @@ TEST("Interpreter's Shared<T>.clone() still returns a second handle to the exact
     EXPECT_EQ(std::get<std::int64_t>(vars.at("y")), 2);
 }
 
+TEST("Interpreter constructs a HeapArray<T>(n), and get/set through it via ordinary [] "
+     "indexing (see docs/language/0069-heap-array.md)")
+{
+    EXPECT_EQ(std::get<std::int64_t>(run(
+                  "i32 run() { a = HeapArray<i32>(5) a[0] = 10 a[4] = 99 return a[0] + a[4] } "
+                  "x = run()")),
+             109);
+}
+
+TEST("Interpreter rejects an out-of-bounds HeapArray<T> index with a clear error, matching a "
+     "fixed [T;N] array's own identical bounds-check convention")
+{
+    EXPECT_THROWS(run("i32 run() { a = HeapArray<i32>(3) return a[10] } x = run()"));
+}
+
+TEST("Interpreter's HeapArray<T> stays correct through a struct's own growable-buffer resize - "
+     "the exact pattern List<T>'s own push uses (see std/collections.ax and "
+     "docs/language/0069-heap-array.md) - old buffer replaced, every live element preserved, no "
+     "leak or double-free even across several growths")
+{
+    const std::string source =
+        "struct Buf<T> { "
+        "  i32 length  HeapArray<T> data  i32 capacity "
+        "  void push(self, T value) { "
+        "    if self.length >= self.capacity { "
+        "      newCap = self.capacity * 2 "
+        "      newData = HeapArray<T>(newCap) "
+        "      i = 0 "
+        "      loop { if i >= self.length { break }  newData[i] = self.data[i]  i = i + 1 } "
+        "      self.data = newData  self.capacity = newCap "
+        "    } "
+        "    self.data[self.length] = value  self.length = self.length + 1 "
+        "  } "
+        "} "
+        "i32 run() { "
+        "  b = Buf<i32> { length: 0, data: HeapArray<i32>(1), capacity: 1 } "
+        "  i = 0 "
+        "  loop { if i >= 20 { break }  b.push(i)  i = i + 1 } "
+        "  total = 0 "
+        "  j = 0 "
+        "  loop { if j >= b.length { break }  total = total + b.data[j]  j = j + 1 } "
+        "  return total "
+        "} "
+        "x = run()";
+    EXPECT_EQ(std::get<std::int64_t>(run(source)), 190); // 0+1+...+19
+}
+
 TEST("Interpreter increment of a plain parameter mutates it through nested blocks")
 {
     const std::string source = R"AXEA(i32 bump(i32 n)

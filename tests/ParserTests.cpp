@@ -2380,6 +2380,19 @@ TEST("Parser parses 'sizeof<TypeName>()' as a SizeOfExpr")
     EXPECT_EQ(sizeOf->typeName, "i32");
 }
 
+TEST("Parser parses 'HeapArray<TypeName>(n)' as a HeapArrayNewExpr")
+{
+    auto program = parseOne("x = HeapArray<i32>(5)");
+
+    auto* assignment = dynamic_cast<AssignmentStmt*>(program.items.at(0).get());
+    auto* heapArrayNew = dynamic_cast<HeapArrayNewExpr*>(assignment->value.get());
+    EXPECT_TRUE(heapArrayNew != nullptr);
+    EXPECT_EQ(heapArrayNew->elementTypeName, "i32");
+    auto* size = dynamic_cast<IntegerExpr*>(heapArrayNew->size.get());
+    EXPECT_TRUE(size != nullptr);
+    EXPECT_EQ(size->value, 5);
+}
+
 TEST("Parser parses a pointer-to-pointer 'as' cast using the ordinary CastExpr node")
 {
     auto program = parseOne("extern c malloc(size: i64) -> *i32 "

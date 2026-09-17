@@ -704,6 +704,30 @@ private:
     // program itself calls print(), matching `ax run` exactly again.
     void emitMain(const IrProgram& program, std::ostringstream& out);
     void emitStructNew(const IrStructNew& structNew, FunctionContext& fctx);
+    // `HeapArray<T>(n)` (see docs/language/0069-heap-array.md) - two mallocs: the 2-field wrapper
+    // struct itself (mirrors emitStructNew's own idiom), and its own separate `n`-element data
+    // buffer (`n` is a runtime i32, computed via the same `getelementptr null, i32 1` sizeof
+    // idiom sizeof<T>() already uses, times `n`) - `length` stored, `data` left uninitialized
+    // (matches every other collection's own "growable buffer, no need to zero unused capacity"
+    // convention; reading an in-bounds but never-written element is a real, if narrow, gap this
+    // phase doesn't close - see docs/language/0069-heap-array.md's own Known Limitations).
+    void emitHeapArrayNew(const IrHeapArrayNew& heapArrayNew, FunctionContext& fctx);
+    // Emits a bounds-check diamond (br i1 %inBounds, label %ok, label %panic) before an
+    // already-computed `indexReg`'s own GEP into a HeapArray<T>'s data buffer - shared by
+    // emitIndexGet/emitIndexSet's own new HeapArray branches. `lengthReg` is the already-loaded
+    // i32 length field; `panicMessage` names the specific failure for @axea.panic's own printed
+    // diagnostic (see registerPanicRuntime).
+    void emitHeapArrayBoundsCheck(const std::string& indexRegRef,
+                                  const std::string& lengthRegRef,
+                                  FunctionContext& fctx);
+    // `@axea.panic()` (see docs/language/0069-heap-array.md) - this backend's first and only
+    // controlled-failure runtime helper: prints a fixed "index out of bounds" message then calls
+    // libc `exit(1)`. No message parameter - there's only one possible caller shape this phase
+    // (a HeapArray<T> bounds-check failure), so the message is baked in directly (see this
+    // function's own implementation comment for why - an ordering hazard with hoistString).
+    // Registered lazily, the first time any bounds check needs it (mirrors every other
+    // registerXRuntime lazy-registration convention in this file). Returns the function name.
+    std::string registerPanicRuntime();
     void emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx);
     void emitFieldSet(const IrFieldSet& fieldSet, FunctionContext& fctx);
     // Mirrors emitStructNew/emitFieldGet/emitFieldSet - same malloc + null-GEP
@@ -1008,6 +1032,11 @@ private:
     // - same "register once" pattern as utf8CountRegistered_ just above.
     bool utf8CharAtRegistered_ = false;
     std::ostringstream utf8CharAtRuntimeText_;
+
+    // `@axea.panic` (see docs/language/0069-heap-array.md and registerPanicRuntime) - same
+    // "register once" lazy pattern as everything above.
+    bool panicRegistered_ = false;
+    std::ostringstream panicRuntimeText_;
 
     // `print`/`write`/interpolation's own stringification (see
     // docs/language/Axea_Printing_Formatting.md) - each a single shared

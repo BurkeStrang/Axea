@@ -2666,6 +2666,24 @@ TEST("TypeChecker rejects sizeof<T>() for an unknown type")
     EXPECT_THROWS(check("a = sizeof<Ghost>()"));
 }
 
+TEST("TypeChecker types 'HeapArray<T>(n)' as HeapArray<T>, and 'HeapArray<T>(n)[i]' as T")
+{
+    check("i32 run() { a = HeapArray<i32>(5)  a[0] = 42  return a[0] }  x = run()");
+}
+
+TEST("TypeChecker requires HeapArray<T>(n)'s size argument to be i32")
+{
+    EXPECT_THROWS(check(R"(a = HeapArray<i32>("oops"))"));
+}
+
+TEST("TypeChecker accepts HeapArray<T> as a struct field type, unrestricted element type "
+     "(unlike Shared<T>, a primitive element is exactly as valid as a struct one)")
+{
+    check("struct Buf { HeapArray<i32> data } "
+          "i32 run() { b = Buf { data: HeapArray<i32>(3) }  b.data[0] = 1  return b.data[0] }  "
+          "x = run()");
+}
+
 TEST("TypeChecker accepts a pointer-to-pointer cast only inside 'unsafe'")
 {
     check("extern c malloc(size: i64) -> *i32 "

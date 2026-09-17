@@ -128,6 +128,17 @@ struct IrStructNew final : IrInst
     std::vector<std::pair<std::string, int>> fields;
 };
 
+// `HeapArray<T>(n)` (see docs/language/0069-heap-array.md) - allocates a fresh wrapper struct
+// (mangled `typeName`, e.g. "HeapArray.i32" - registerHeapArrayType's own key into structs_) plus
+// its own separate `n`-element data buffer, `size` elements default-initialized to zero/null. Not
+// lowered as an ordinary IrStructNew (whose fields are always already-computed values, not a
+// freshly-malloc'd nested buffer).
+struct IrHeapArrayNew final : IrInst
+{
+    std::string typeName;
+    int size;
+};
+
 struct IrFieldGet final : IrInst
 {
     int object;

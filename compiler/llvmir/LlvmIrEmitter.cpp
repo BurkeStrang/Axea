@@ -38,6 +38,23 @@ namespace
         return name;
     }
 
+    // `HeapArray<T>` (see docs/language/0069-heap-array.md) - a struct field's own stored type
+    // text is always the raw, canonical "HeapArray<T>" form (GenericMonomorphizer's own type-text
+    // substitution never rewrites it into the mangled "HeapArray." form
+    // IrGenerator::registerHeapArrayType actually keys structs_ with), so
+    // emitStructRefcountHelpers's own field-drop loop needs this translation to recognize a
+    // HeapArray<T>-typed field as needing a recursive drop at all - own copy, per this codebase's
+    // "each pass owns its own walk" convention (mirrors IrGenerator.cpp's identical
+    // mangleHeapArrayTypeName). A no-op for anything that isn't a "HeapArray<...>" string.
+    std::string mangleHeapArrayTypeName(const std::string& name)
+    {
+        if (name.starts_with("HeapArray<") && name.back() == '>')
+        {
+            return "HeapArray." + name.substr(10, name.size() - 11);
+        }
+        return name;
+    }
+
     std::string llvmEscape(const std::string& text)
     {
         static const char* hex = "0123456789ABCDEF";
@@ -244,6 +261,22 @@ std::string LlvmIrEmitter::llvmType(const std::string& axeaTypeName)
             }
         }
         return registerClosureInstantiation(paramLlvmTypes, llvmType(returnTypeName)) + "*";
+    }
+    if (axeaTypeName.starts_with("HeapArray<") && axeaTypeName.back() == '>')
+    {
+        // "HeapArray<elem>" - the canonical form Parser::parseTypeName always produces (see
+        // docs/language/0069-heap-array.md). Unlike a *user-declared* generic struct (List<T>
+        // etc. - see this function's own "reaches here under its own mangled name" comments a
+        // few branches below), a builtin generic like this one is never rewritten into its own
+        // mangled form by GenericMonomorphizer (that pass only monomorphizes struct *templates*
+        // it can look up by name - see isBuiltinGenericName's own exemption), so the canonical
+        // angle-bracket text genuinely does reach here as-is and needs the same "." translation
+        // IrGenerator::registerHeapArrayType's own structs_ key already uses (mirrors
+        // mangleHeapArrayTypeName there) - no separate registerXInstantiation call needed here,
+        // since IrGenerator already registered the wrapper struct itself; this just needs to
+        // produce the matching name.
+        const std::string elementName = axeaTypeName.substr(10, axeaTypeName.size() - 11);
+        return "%HeapArray." + elementName + "*";
     }
     if (axeaTypeName.starts_with("slice<"))
     {
@@ -950,6 +983,41 @@ entry:
   %fmtPtr = getelementptr [3 x i8], [3 x i8]* @axea.fmt.d, i64 0, i64 0
   %ignored = call i32 (i8*, i8*, ...) @sprintf(i8* %buf, i8* %fmtPtr, i32 %v)
   ret i8* %buf
+}
+)";
+    return fnName;
+}
+
+std::string LlvmIrEmitter::registerPanicRuntime()
+{
+    const std::string fnName = "@axea.panic";
+    if (panicRegistered_)
+    {
+        return fnName;
+    }
+    panicRegistered_ = true;
+
+    // This backend's one controlled-failure path (see docs/language/0069-heap-array.md) - prints
+    // a fixed message then calls libc exit(1). No message *parameter* (unlike a real
+    // user-facing panic might have) - there's only ever one possible caller shape this phase
+    // (an out-of-bounds HeapArray<T> index), so the message is baked directly into this
+    // function's own self-contained block, the same "declared in this exact block, not via
+    // hoistString/stringGlobals_" convention registerI32ToStrRuntime's format-string global
+    // already uses just above - hoistString's own global would need to be discovered by an
+    // earlier pass than this lazy, mid-codegen registration ever runs, which a fixed inline
+    // string here sidesteps entirely. @axea.panic itself never returns (exit doesn't return),
+    // but LLVM still requires a real terminator right after the call - `unreachable`, not
+    // `ret void`, is exactly right here (mirrors every other genuinely-unreachable-after-a-call
+    // shape elsewhere in this backend).
+    panicRuntimeText_ << R"(
+@axea.panic.msg = private unnamed_addr constant [34 x i8] c"HeapArray<T> index out of bounds\0A\00"
+
+define void @axea.panic() {
+entry:
+  %msg = getelementptr [34 x i8], [34 x i8]* @axea.panic.msg, i64 0, i64 0
+  %ignored = call i32 (i8*, ...) @printf(i8* %msg)
+  call void @exit(i32 1)
+  unreachable
 }
 )";
     return fnName;
@@ -2112,7 +2180,7 @@ void LlvmIrEmitter::emitStructRefcountHelpers(const IrProgram& program)
                     const auto [fieldIndex, fieldLlvmType] =
                         fieldIndexAndType(name, variantName + "_" + std::to_string(fi));
                     const std::string fieldAxeaType =
-                        mangleUnionTypeName(fields[fieldIndex].second);
+                        mangleHeapArrayTypeName(mangleUnionTypeName(fields[fieldIndex].second));
                     if (!structs_.contains(fieldAxeaType) && !program.enums.contains(fieldAxeaType))
                     {
                         continue;
@@ -2135,7 +2203,7 @@ void LlvmIrEmitter::emitStructRefcountHelpers(const IrProgram& program)
             for (std::size_t i = 0; i < fields.size(); ++i)
             {
                 const auto& [fieldName, fieldTypeName] = fields[i];
-                const std::string fieldAxeaType = mangleUnionTypeName(fieldTypeName);
+                const std::string fieldAxeaType = mangleHeapArrayTypeName(mangleUnionTypeName(fieldTypeName));
                 if (!structs_.contains(fieldAxeaType) && !program.enums.contains(fieldAxeaType))
                 {
                     continue;
@@ -2150,6 +2218,31 @@ void LlvmIrEmitter::emitStructRefcountHelpers(const IrProgram& program)
                 dropBody << "  call void @axea.drop." << fieldAxeaType << "(" << fieldLlvmType
                          << " " << fieldVal << ")\n";
             }
+        }
+
+        // `HeapArray<T>` (see docs/language/0069-heap-array.md) - the one field the loop above
+        // can never see: `data` is a raw `*T` field (never itself a registered struct/enum, so
+        // the generic "recurse into struct/enum fields only" loop always skips it by
+        // construction), but it's this wrapper's own single-owned buffer all the same - freed
+        // here explicitly, unconditionally (never recursively - a raw `*T` element, even a
+        // struct-shaped one, is never itself drop-tracked; only whole HeapArray<T>/Shared<T>/
+        // plain-struct *values* are, matching this whole scheme's existing "unsafe raw pointers
+        // opt out of move-semantics entirely" philosophy - see IrGenerator.cpp's own identical
+        // isDerefDerived reasoning), before the wrapper struct's own allocation is freed just
+        // below.
+        if (name.starts_with("HeapArray."))
+        {
+            const std::string dataPtr = "%t" + std::to_string(nextTmp++);
+            const std::string dataVal = "%t" + std::to_string(nextTmp++);
+            const std::string dataRaw = "%t" + std::to_string(nextTmp++);
+            const std::string elementLlvmType = fieldIndexAndType(name, "data").second;
+            dropBody << "  " << dataPtr << " = getelementptr " << structType << ", " << pointerType
+                     << " %v, i32 0, i32 1\n";
+            dropBody << "  " << dataVal << " = load " << elementLlvmType << ", " << elementLlvmType
+                     << "* " << dataPtr << "\n";
+            dropBody << "  " << dataRaw << " = bitcast " << elementLlvmType << " " << dataVal
+                     << " to i8*\n";
+            dropBody << "  call void @free(i8* " << dataRaw << ")\n";
         }
 
         dropBody << "  %raw = bitcast " << pointerType << " %v to i8*\n";
@@ -2696,6 +2789,10 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
         {
             fctx.registerTypes[structNew->dest] = "%" + structNew->typeName + "*";
         }
+        else if (const auto* heapArrayNew = dynamic_cast<const IrHeapArrayNew*>(inst.get()))
+        {
+            fctx.registerTypes[heapArrayNew->dest] = "%" + heapArrayNew->typeName + "*";
+        }
         else if (const auto* closureNew = dynamic_cast<const IrClosureNew*>(inst.get()))
         {
             std::vector<std::string> paramLlvmTypes;
@@ -2813,6 +2910,18 @@ void LlvmIrEmitter::inferTypesInList(const std::vector<std::unique_ptr<IrInst>>&
             else if (isListType(objectType))
             {
                 fctx.registerTypes[indexGet->dest] = listElementType(objectType);
+            }
+            else if (isNamedStructPointerType(objectType) &&
+                     structNameFromPointerType(objectType).starts_with("HeapArray."))
+            {
+                // HeapArray<T> (see docs/language/0069-heap-array.md) - checked before the
+                // fixed-`[T;N]` fallback below, which would otherwise misparse a named struct
+                // pointer's own text ("%HeapArray.i32*") as if it were an anonymous array type
+                // shape.
+                const std::string elementPointerType =
+                    fieldIndexAndType(structNameFromPointerType(objectType), "data").second;
+                fctx.registerTypes[indexGet->dest] =
+                    elementPointerType.substr(0, elementPointerType.size() - 1);
             }
             else
             {
@@ -3483,6 +3592,93 @@ void LlvmIrEmitter::emitStructNew(const IrStructNew& structNew, FunctionContext&
     // populated, which the loop above already did.
 }
 
+void LlvmIrEmitter::emitHeapArrayNew(const IrHeapArrayNew& heapArrayNew, FunctionContext& fctx)
+{
+    const std::string llvmStructType = "%" + heapArrayNew.typeName;
+    const std::string pointerType = llvmStructType + "*";
+    const std::string elementAxeaType = heapArrayNew.typeName.substr(10); // strip "HeapArray."
+    const std::string elementLlvmType = llvmType(elementAxeaType);
+    const std::string elementPointerType = elementLlvmType + "*";
+
+    // sizeof(element) via the standard null-pointer-GEP idiom (same one emitStructNew/IrSizeOf's
+    // own codegen already use), times the runtime element count, for the data buffer's own
+    // malloc - the one genuinely dynamically-sized allocation this backend makes on behalf of
+    // safe (non-`unsafe`) user code.
+    const int elemSizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemSizePtrReg << " = getelementptr " << elementLlvmType << ", "
+              << elementPointerType << " null, i32 1\n";
+    const int elemSizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << elemSizeIntReg << " = ptrtoint " << elementPointerType << " %"
+              << elemSizePtrReg << " to i64\n";
+    const int sizeExtReg = allocateRegister(fctx);
+    *fctx.out << "  %" << sizeExtReg << " = sext i32 " << ref(heapArrayNew.size, fctx)
+              << " to i64\n";
+    const int dataBytesReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataBytesReg << " = mul i64 %" << elemSizeIntReg << ", %" << sizeExtReg
+              << "\n";
+    const int dataRawReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataRawReg << " = call i8* @malloc(i64 %" << dataBytesReg << ")\n";
+    const int dataReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataReg << " = bitcast i8* %" << dataRawReg << " to "
+              << elementPointerType << "\n";
+
+    // sizeof(the 2-field wrapper struct itself) - fixed-size regardless of n, same idiom as
+    // emitStructNew's own identical malloc.
+    const int structSizePtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << structSizePtrReg << " = getelementptr " << llvmStructType << ", "
+              << pointerType << " null, i32 1\n";
+    const int structSizeIntReg = allocateRegister(fctx);
+    *fctx.out << "  %" << structSizeIntReg << " = ptrtoint " << pointerType << " %"
+              << structSizePtrReg << " to i64\n";
+    const int structRawReg = allocateRegister(fctx);
+    *fctx.out << "  %" << structRawReg << " = call i8* @malloc(i64 %" << structSizeIntReg
+              << ")\n";
+
+    const int destReg = defineRegister(heapArrayNew.dest, fctx);
+    *fctx.out << "  %" << destReg << " = bitcast i8* %" << structRawReg << " to " << pointerType
+              << "\n";
+
+    const int lengthPtrReg = allocateRegister(fctx);
+    *fctx.out << "  %" << lengthPtrReg << " = getelementptr " << llvmStructType << ", "
+              << pointerType << " " << ref(heapArrayNew.dest, fctx) << ", i32 0, i32 0\n";
+    *fctx.out << "  store i32 " << ref(heapArrayNew.size, fctx) << ", i32* %" << lengthPtrReg
+              << "\n";
+
+    const int dataPtrFieldReg = allocateRegister(fctx);
+    *fctx.out << "  %" << dataPtrFieldReg << " = getelementptr " << llvmStructType << ", "
+              << pointerType << " " << ref(heapArrayNew.dest, fctx) << ", i32 0, i32 1\n";
+    *fctx.out << "  store " << elementPointerType << " %" << dataReg << ", " << elementPointerType
+              << "* %" << dataPtrFieldReg << "\n";
+}
+
+void LlvmIrEmitter::emitHeapArrayBoundsCheck(const std::string& indexRegRef,
+                                             const std::string& lengthRegRef,
+                                             FunctionContext& fctx)
+{
+    // `icmp ult` (unsigned) rather than `icmp slt`/`icmp sge` (signed) deliberately catches a
+    // negative index and an over-length index with the same single comparison: a negative i32,
+    // reinterpreted unsigned, is a huge positive number (e.g. -1 -> 4294967295), which is never
+    // "< length" for any real length - so there's no separate "is it negative" check needed at
+    // all.
+    const int inBoundsReg = allocateRegister(fctx);
+    *fctx.out << "  %" << inBoundsReg << " = icmp ult i32 " << indexRegRef << ", " << lengthRegRef
+              << "\n";
+    const int labelId = fctx.nextLabel++;
+    const std::string okLabel = "heapArray.ok" + std::to_string(labelId);
+    const std::string panicLabel = "heapArray.panic" + std::to_string(labelId);
+    *fctx.out << "  br i1 %" << inBoundsReg << ", label %" << okLabel << ", label %" << panicLabel
+              << "\n";
+
+    *fctx.out << panicLabel << ":\n";
+    fctx.currentLabel = panicLabel;
+    const std::string panicFn = registerPanicRuntime();
+    *fctx.out << "  call void " << panicFn << "()\n";
+    *fctx.out << "  unreachable\n";
+
+    *fctx.out << okLabel << ":\n";
+    fctx.currentLabel = okLabel;
+}
+
 void LlvmIrEmitter::emitFieldGet(const IrFieldGet& fieldGet, FunctionContext& fctx)
 {
     const std::string objectType = typeOf(fieldGet.object, fctx);
@@ -3911,6 +4107,45 @@ void LlvmIrEmitter::emitIndexGet(const IrIndexGet& indexGet, FunctionContext& fc
         return;
     }
 
+    if (isNamedStructPointerType(objectType) &&
+        structNameFromPointerType(objectType).starts_with("HeapArray."))
+    {
+        // `HeapArray<T>` (see docs/language/0069-heap-array.md) - GEP+load the length field
+        // (index 0), a real runtime bounds check against it (unlike every branch above, and the
+        // fixed-`[T;N]` fallback just below - this is the one indexable shape in this whole
+        // backend that's actually checked at runtime, since it's the one whose size isn't
+        // statically known), then the same flat-pointer single-index GEP List<T>'s own branch
+        // above uses.
+        const std::string name = structNameFromPointerType(objectType);
+        const std::string structType = "%" + name;
+        const std::string elementPointerType = fieldIndexAndType(name, "data").second;
+        const std::string elementType =
+            elementPointerType.substr(0, elementPointerType.size() - 1); // strip trailing '*'
+
+        const int lengthPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lengthPtrReg << " = getelementptr " << structType << ", "
+                  << objectType << " " << ref(indexGet.object, fctx) << ", i32 0, i32 0\n";
+        const int lengthReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lengthReg << " = load i32, i32* %" << lengthPtrReg << "\n";
+        emitHeapArrayBoundsCheck(
+            ref(indexGet.index, fctx), "%" + std::to_string(lengthReg), fctx);
+
+        const int dataPtrPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << structType << ", "
+                  << objectType << " " << ref(indexGet.object, fctx) << ", i32 0, i32 1\n";
+        const int dataPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrReg << " = load " << elementPointerType << ", "
+                  << elementPointerType << "* %" << dataPtrPtrReg << "\n";
+        const int elementPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", "
+                  << elementPointerType << " %" << dataPtrReg << ", i32 " << ref(indexGet.index, fctx)
+                  << "\n";
+        const int destReg = defineRegister(indexGet.dest, fctx);
+        *fctx.out << "  %" << destReg << " = load " << elementType << ", " << elementType << "* %"
+                  << elementPtrReg << "\n";
+        return;
+    }
+
     const std::string llvmArrayType =
         objectType.substr(0, objectType.size() - 1); // strip trailing '*'
     const std::string elementType = arrayElementType(objectType);
@@ -3984,6 +4219,40 @@ void LlvmIrEmitter::emitIndexSet(const IrIndexSet& indexSet, FunctionContext& fc
         const int elementPtrReg = allocateRegister(fctx);
         *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", "
                   << elementType << "* %" << dataPtrReg << ", i32 " << ref(indexSet.index, fctx)
+                  << "\n";
+        *fctx.out << "  store " << elementType << " " << ref(indexSet.value, fctx) << ", "
+                  << elementType << "* %" << elementPtrReg << "\n";
+        return;
+    }
+
+    if (isNamedStructPointerType(objectType) &&
+        structNameFromPointerType(objectType).starts_with("HeapArray."))
+    {
+        // Mirrors emitIndexGet's own HeapArray<T> branch exactly, plus a store instead of a load
+        // - see docs/language/0069-heap-array.md.
+        const std::string name = structNameFromPointerType(objectType);
+        const std::string structType = "%" + name;
+        const std::string elementPointerType = fieldIndexAndType(name, "data").second;
+        const std::string elementType =
+            elementPointerType.substr(0, elementPointerType.size() - 1); // strip trailing '*'
+
+        const int lengthPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lengthPtrReg << " = getelementptr " << structType << ", "
+                  << objectType << " " << ref(indexSet.object, fctx) << ", i32 0, i32 0\n";
+        const int lengthReg = allocateRegister(fctx);
+        *fctx.out << "  %" << lengthReg << " = load i32, i32* %" << lengthPtrReg << "\n";
+        emitHeapArrayBoundsCheck(
+            ref(indexSet.index, fctx), "%" + std::to_string(lengthReg), fctx);
+
+        const int dataPtrPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrPtrReg << " = getelementptr " << structType << ", "
+                  << objectType << " " << ref(indexSet.object, fctx) << ", i32 0, i32 1\n";
+        const int dataPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << dataPtrReg << " = load " << elementPointerType << ", "
+                  << elementPointerType << "* %" << dataPtrPtrReg << "\n";
+        const int elementPtrReg = allocateRegister(fctx);
+        *fctx.out << "  %" << elementPtrReg << " = getelementptr " << elementType << ", "
+                  << elementPointerType << " %" << dataPtrReg << ", i32 " << ref(indexSet.index, fctx)
                   << "\n";
         *fctx.out << "  store " << elementType << " " << ref(indexSet.value, fctx) << ", "
                   << elementType << "* %" << elementPtrReg << "\n";
@@ -6842,6 +7111,11 @@ bool LlvmIrEmitter::emitInstructions(const std::vector<std::unique_ptr<IrInst>>&
             emitStructNew(*structNew, fctx);
             continue;
         }
+        if (const auto* heapArrayNew = dynamic_cast<const IrHeapArrayNew*>(inst.get()))
+        {
+            emitHeapArrayNew(*heapArrayNew, fctx);
+            continue;
+        }
         if (const auto* closureNew = dynamic_cast<const IrClosureNew*>(inst.get()))
         {
             emitClosureNew(*closureNew, fctx);
@@ -7500,7 +7774,12 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // "invalid input yields a harmless default" contract (see
     // registerParseRuntime) means the exact stopping point is never
     // consulted.
-    out << "declare double @strtod(i8*, i8**)\n\n";
+    out << "declare double @strtod(i8*, i8**)\n";
+    // `HeapArray<T>` bounds checking (see docs/language/0069-heap-array.md and
+    // registerPanicRuntime) - this backend's first controlled-failure path: every other runtime
+    // violation in compiled code is documented, pre-existing UB (see docs/language/0031-arrays.md
+    // et al.) - a sixth libc function, reused rather than hand-rolling process termination.
+    out << "declare void @exit(i32)\n\n";
 
     // extern c declarations (see docs/language/0048-ffi.md) - a real LLVM
     // `declare`, one per extern, exactly like the fixed malloc/printf/
@@ -7585,6 +7864,7 @@ std::string LlvmIrEmitter::emit(const IrProgram& program)
     // stringification runtime (see
     // docs/language/Axea_Printing_Formatting.md).
     out << toStrRuntimeText_.str();
+    out << panicRuntimeText_.str();
     out << printRuntimeText_.str();
     out << structRefcountRuntimeText_.str();
     out << helpers.str();

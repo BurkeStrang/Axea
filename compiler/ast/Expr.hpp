@@ -694,3 +694,21 @@ struct KeyEqExpr final : Expr
     std::unique_ptr<Expr> left;
     std::unique_ptr<Expr> right;
 };
+
+// `HeapArray<TypeName>(n)` (see docs/language/0069-heap-array.md) - a builtin, not a real
+// callable function, mirroring `hash<TypeName>(value)`'s own recognition-by-literal-text shape:
+// allocates a fresh, dynamically-sized (n is a runtime i32, not a compile-time-known constant the
+// way `[T;N]`'s own N is), single-owned heap buffer of `n` `elementTypeName`-typed elements,
+// default-initialized. The one primitive `std/collections.ax`'s own growable types (`List<T>` and
+// everything built on it) need to stop needing `unsafe`/raw `*T`/manual `malloc`+`free` for their
+// own internal buffer - see docs/language/0069-heap-array.md's own Motivation section.
+struct HeapArrayNewExpr final : Expr
+{
+    HeapArrayNewExpr(std::string elementTypeName, std::unique_ptr<Expr> size)
+        : elementTypeName(std::move(elementTypeName)), size(std::move(size))
+    {
+    }
+
+    std::string elementTypeName;
+    std::unique_ptr<Expr> size;
+};

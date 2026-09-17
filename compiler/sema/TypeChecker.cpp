@@ -223,7 +223,8 @@ namespace
         // List<T>/Stack<T>/Deque<T> port follow-up) - both are real, user-declared generic
         // structs now (std/collections.ax), reached via `.get(i)`/`.set(i, v)` methods (general
         // struct dispatch), not `[]` sugar - and neither supports `for`-in anymore either.
-        return type.kind == TypeKind::Array || type.kind == TypeKind::Slice;
+        return type.kind == TypeKind::Array || type.kind == TypeKind::Slice ||
+               type.kind == TypeKind::HeapArray;
     }
 
     // slice<T> is deliberately scoped to function parameters only this phase
@@ -491,6 +492,7 @@ std::string typeName(const Type& type)
         case TypeKind::Slice: return "slice<" + type.elementTypeName + ">";
         case TypeKind::Optional: return "Optional<" + type.elementTypeName + ">";
         case TypeKind::Shared: return "Shared<" + type.elementTypeName + ">";
+        case TypeKind::HeapArray: return "HeapArray<" + type.elementTypeName + ">";
         case TypeKind::Result:
             return "Result<" + type.elementTypeName + "," + type.valueTypeName + ">";
         case TypeKind::OwnedString: return "String";
@@ -799,6 +801,17 @@ Type TypeChecker::resolveType(const std::string& name) const
         const Type elementType = resolveType(elementName);
 
         return arrayLikeType(TypeKind::Shared, typeName(elementType));
+    }
+
+    // "HeapArray<elem>" - the canonical form Parser::parseTypeName always produces (see
+    // docs/language/0069-heap-array.md). Unlike Shared<T> above, no struct/enum restriction on
+    // elem at all - any type is a sensible array element.
+    if (name.starts_with("HeapArray<") && name.back() == '>')
+    {
+        const std::string elementName = name.substr(10, name.size() - 11);
+        const Type elementType = resolveType(elementName);
+
+        return arrayLikeType(TypeKind::HeapArray, typeName(elementType));
     }
 
     // "Result<T,E>" - the canonical form Parser::parseTypeName always
@@ -3193,6 +3206,19 @@ Type TypeChecker::checkExpr(const Expr& expr,
                                      typeName(payloadType));
         }
         return arrayLikeType(TypeKind::Shared, typeName(payloadType));
+    }
+
+    if (const auto* heapArrayNew = dynamic_cast<const HeapArrayNewExpr*>(&expr))
+    {
+        const Type sizeType =
+            checkExpr(*heapArrayNew->size, env, expectedReturnType, currentLoopBreakTypes);
+        if (!(sizeType == kI32))
+        {
+            throw std::runtime_error("HeapArray<T>(n)'s size argument must be i32, found " +
+                                     typeName(sizeType));
+        }
+        const Type elementType = resolveType(heapArrayNew->elementTypeName);
+        return arrayLikeType(TypeKind::HeapArray, typeName(elementType));
     }
 
     if (dynamic_cast<const NoneExpr*>(&expr))
